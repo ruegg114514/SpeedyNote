@@ -6185,6 +6185,12 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
                     update(QRegion(cursorRectF.toAlignedRect(), QRegion::Ellipse));
                 } else if (m_currentTool == ToolType::Pen || m_currentTool == ToolType::Marker) {
                     startNotesStroke(pe, i);
+                } else if (m_currentTool == ToolType::Lasso) {
+                    // Allow the selection tool to operate over the notes column.
+                    // Route to the normal lasso press handler, which anchors the
+                    // path to this page and supports clamps in page-local coords
+                    // (x may exceed pageW out into the column).
+                    handlePointerPress_Lasso(pe);
                 }
                 // Consume the event - don't process further
                 return;
@@ -7406,6 +7412,14 @@ void DocumentViewport::handlePointerPress_Lasso(const PointerEvent& pe)
     } else if (pe.pageHit.valid()) {
         pt = pe.pageHit.pagePoint;
         m_lassoSelection.sourcePageIndex = pe.pageHit.pageIndex;
+    } else if (notesPageAtViewport(pe.viewportPos) >= 0) {
+        // Notes-column support: anchor the path to the page the notes column
+        // belongs to and keep the path in page-local coordinates (x may exceed
+        // pageW out into the column). This is how the lasso can begin over the
+        // notes area even though the pointer is not over the page body itself.
+        m_lassoSelection.sourcePageIndex = notesPageAtViewport(pe.viewportPos);
+        QPointF pageOrigin = pagePosition(m_lassoSelection.sourcePageIndex);
+        pt = viewportToDocument(pe.viewportPos) - pageOrigin;
     } else {
         return;  // No valid page hit in paged mode
     }
