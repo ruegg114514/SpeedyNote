@@ -6916,14 +6916,18 @@ void DocumentViewport::splitStrokeAtNotesBoundary(int pageIndex,
         }
 
         // Boundary crossing: interpolate the shared point at x = pageW so both
-        // segments literally touch, keeping the printed line continuous.
+        // segments literally touch, keeping the printed line continuous. Also
+        // interpolate pressure instead of carrying it so the seam has no visible
+        // thickness notch right on the divider line.
         const StrokePoint& p0 = m_currentStroke.points[i - 1];
         qreal t = (p0.pos.x() >= pageW) ? 0.0
                 : (pageW - p0.pos.x()) / qMax<qreal>(1e-6, cur.pos.x() - p0.pos.x());
         t = qBound<qreal>(0.0, t, 1.0);
 
-        StrokePoint bp = cur;                    // carries pressure / timestamp
-        bp.pos = p0.pos + (cur.pos - p0.pos) * t; // page-local boundary point
+        StrokePoint bp;                          // page-local boundary point
+        bp.pos = p0.pos + (cur.pos - p0.pos) * t;
+        bp.pressure = p0.pressure + (cur.pressure - p0.pressure) * t;
+        bp.timestamp = cur.timestamp;
 
         StrokePoint bpPage = bp;
         bpPage.pos.rx() = pageW;                 // page side, at the edge
@@ -20730,7 +20734,22 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
     if (m_sideNotesStrokes.contains(pageIdx)) {
         painter.save();
         painter.translate(page->size.width(), 0);
+        // During a selection transform, the "background" is a snapshot that must
+        // NOT contain the selected notes strokes - otherwise dragging shows the
+        // source lingering at its origin (looks like a copy instead of a move).
+        // Skip selected notes strokes while the transform is active.
+        QSet<QString> hiddenIds;
+        if (m_isTransformingSelection && m_lassoSelection.isValid()
+            && pageIdx == m_lassoNotesPage) {
+            for (int k = 0; k < m_lassoSelection.selectedStrokes.size(); ++k) {
+                if (k < m_lassoSelection.originalIndices.size()
+                    && m_lassoSelection.originalIndices[k] == -1) {
+                    hiddenIds.insert(m_lassoSelection.selectedStrokes[k].id);
+                }
+            }
+        }
         for (const VectorStroke& stroke : m_sideNotesStrokes[pageIdx]) {
+            if (!hiddenIds.isEmpty() && hiddenIds.contains(stroke.id)) continue;
             drawNotesStroke(painter, stroke);
         }
         painter.restore();
