@@ -3744,10 +3744,12 @@ private:
     static constexpr int SCROLL_SETTLE_MS = 60;   ///< Idle delay (ms) before deferred housekeeping runs (was 120, reduced for faster settle)
 
     // ===== Pan-gesture → full-render transition =====
-    // After a deferred pan gesture ends, keep showing the cached (shifted) frame
-    // until the async PDF preload fills the cache for newly visible pages.
-    // This prevents a visible "flash" as the full renderer replaces the frame.
-    bool m_waitingForPdfCacheAfterPan = false;
+    // After a deferred pan gesture ends, wheel events arriving within ~200ms
+    // would set m_scrollActive=true, causing lookupCachedPdfPage() to return
+    // null for uncached pages → blank flash. The grace period blocks
+    // m_scrollActive during this window so the full render path uses
+    // synchronous getCachedPdfPage() instead (no blank pages).
+    bool m_postPanGracePeriod = false;
 
     // ===== Side Notes Area (PDF annotation extension) =====
     bool m_sideNotesVisible = false;        ///< Whether the notes area is shown

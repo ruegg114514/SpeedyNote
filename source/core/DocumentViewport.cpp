@@ -1277,6 +1277,18 @@ void DocumentViewport::setPanOffset(QPointF offset, bool steppedScroll)
 
 void DocumentViewport::onScrollActivity(bool steppedScroll)
 {
+    // Post-pan grace period: block m_scrollActive for ~200ms after pan ends.
+    // Wheel events arriving during this window would otherwise set
+    // m_scrollActive=true, causing lookupCachedPdfPage() to return null for
+    // uncached pages → blank flash. During grace period, the full render path
+    // uses synchronous getCachedPdfPage() instead (no blank pages).
+    if (m_postPanGracePeriod) {
+        if (m_scrollSettleTimer) {
+            m_scrollSettleTimer->start();
+        }
+        return;
+    }
+
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     // Qt6: behavior unchanged - always gate rendering to cache-only while
     // scrolling (SP2). The discrete-step distinction below is Qt5-only.
@@ -3104,58 +3116,22 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
             painter.drawPixmap(QRectF(scaledOrigin, scaledSize), m_gesture.cachedFrame, 
                               m_gesture.cachedFrame.rect());
         } else if (m_gesture.activeType == ViewportGestureState::Pan) {
-            // Post-pan-end transition: if we're waiting for the async PDF preload
-            // to fill the cache, check whether all visible pages are now cached.
-            // When they are, reset the gesture and fall through to the full render
-            // path so the user sees freshly rendered content (not the shifted frame).
-            if (m_waitingForPdfCacheAfterPan) {
-                bool allCached = true;
-                QVector<int> vis = visiblePages();
-                qreal dpi = effectivePdfDpi();
-                for (int idx : vis) {
-                    Page* pg = m_document ? m_document->page(idx) : nullptr;
-                    if (pg && pg->backgroundType == Page::BackgroundType::PDF
-                        && pg->pdfPageNumber >= 0) {
-                        if (lookupCachedPdfPage(pg->pdfSourceId, pg->pdfPageNumber, dpi).isNull()) {
-                            allCached = false;
-                            break;
-                        }
-                    }
-                }
-                if (allCached || m_activePdfWatchers.isEmpty()) {
-                    // All visible pages are cached - switch to full render
-                    m_waitingForPdfCacheAfterPan = false;
-                    m_gesture.reset();
-                    // Fall through to the normal rendering path below
-                } else {
-                    // Still waiting - keep showing the cached frame
-                    perfSample.setPath(ViewportPerfMonitor::FramePath::GesturePan);
-                    QPointF panDeltaDoc = m_gesture.targetPan - m_gesture.startPan;
-                    QPointF panDeltaPixels = panDeltaDoc * m_gesture.startZoom * -1.0;
-                    fillBackgroundAround(painter, QRectF(panDeltaPixels, logicalSize));
-                    painter.drawPixmap(panDeltaPixels, m_gesture.cachedFrame);
-                    return;
-                }
-            }
+            perfSample.setPath(ViewportPerfMonitor::FramePath::GesturePan);
+            // PAN: Shift the cached frame by pan delta
+            // Pan delta in document coords → convert to viewport pixels
+            QPointF panDeltaDoc = m_gesture.targetPan - m_gesture.startPan;
+            QPointF panDeltaPixels = panDeltaDoc * m_gesture.startZoom * -1.0;  // Negate: pan offset increase = viewport moves opposite
 
-            if (!m_waitingForPdfCacheAfterPan && m_gesture.activeType == ViewportGestureState::Pan) {
-                perfSample.setPath(ViewportPerfMonitor::FramePath::GesturePan);
-                // PAN: Shift the cached frame by pan delta
-                // Pan delta in document coords → convert to viewport pixels
-                QPointF panDeltaDoc = m_gesture.targetPan - m_gesture.startPan;
-                QPointF panDeltaPixels = panDeltaDoc * m_gesture.startZoom * -1.0;  // Negate: pan offset increase = viewport moves opposite
-                
-                // Note: no need to snap panDeltaPixels to whole device pixels. With
-                // SmoothPixmapTransform off, QRasterPaintEngine already quantises a
-                // pure-translate drawPixmap to the device pixel grid - verified by
-                // byte-comparing renders at fractional and integral offsets, which
-                // come out identical at both DPR 1 and DPR 2.
-                
-                // Clear only what the shifted frame won't cover.
-                fillBackgroundAround(painter, QRectF(panDeltaPixels, logicalSize));
-                
-                painter.drawPixmap(panDeltaPixels, m_gesture.cachedFrame);
-            }
+            // Note: no need to snap panDeltaPixels to whole device pixels. With
+            // SmoothPixmapTransform off, QRasterPaintEngine already quantises a
+            // pure-translate drawPixmap to the device pixel grid - verified by
+            // byte-comparing renders at fractional and integral offsets, which
+            // come out identical at both DPR 1 and DPR 2.
+
+            // Clear only what the shifted frame won't cover.
+            fillBackgroundAround(painter, QRectF(panDeltaPixels, logicalSize));
+
+            painter.drawPixmap(panDeltaPixels, m_gesture.cachedFrame);
         } else {
             // Defensive: ViewportGestureState::ZoomAndPan is declared but never
             // assigned. If that changes, clear rather than present a stale
@@ -3278,12 +3254,13 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
         // Get page position once (O(1) with cache, but avoid redundant calls)
         QPointF pos = pagePosition(pageIdx);
         
-        // Check if this page intersects the dirty region (optimization for partial updates)
+        // Check if this page (plus notes area) intersects the dirty region
         if (isPartialUpdate) {
+            qreal notesW = (m_sideNotesVisible && m_sideNotesWidth > 0) ? m_sideNotesWidth : 0;
             QRectF pageRectInViewport = QRectF(
                 (pos.x() - m_panOffset.x()) * m_zoomLevel,
                 (pos.y() - m_panOffset.y()) * m_zoomLevel,
-                page->size.width() * m_zoomLevel,
+                (page->size.width() + notesW) * m_zoomLevel,
                 page->size.height() * m_zoomLevel
             );
             if (!pageRectInViewport.intersects(dirtyRect)) {
@@ -3301,15 +3278,24 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
         // Render the notes area to the right of the page if visible
         if (m_sideNotesVisible && m_sideNotesWidth > 0) {
             QRectF notesRect(page->size.width(), 0, m_sideNotesWidth, page->size.height());
-            
-            // Notes background (slightly different from page paper)
-            QColor notesBg = m_isDarkMode ? QColor(45, 45, 48) : QColor(248, 248, 250);
+
+            // Notes background - clearly distinct from page paper
+            QColor notesBg = m_isDarkMode ? QColor(35, 40, 50) : QColor(235, 240, 250);
             painter.fillRect(notesRect, notesBg);
-            
-            // Divider line between page and notes
-            painter.setPen(QPen(m_isDarkMode ? QColor(70, 70, 75) : QColor(210, 210, 215), 1.0 / m_zoomLevel));
+
+            // Subtle dot grid pattern for notes area
+            painter.setPen(QPen(m_isDarkMode ? QColor(55, 60, 75) : QColor(210, 218, 230), 0.5 / m_zoomLevel));
+            qreal gridSpacing = 20.0;
+            for (qreal x = gridSpacing; x < m_sideNotesWidth; x += gridSpacing) {
+                for (qreal y = gridSpacing; y < page->size.height(); y += gridSpacing) {
+                    painter.drawPoint(QPointF(x, y));
+                }
+            }
+
+            // Bold divider line between page and notes
+            painter.setPen(QPen(m_isDarkMode ? QColor(100, 130, 180) : QColor(100, 140, 200), 2.0 / m_zoomLevel));
             painter.drawLine(QPointF(page->size.width(), 0), QPointF(page->size.width(), page->size.height()));
-            
+
             // Render committed notes strokes for this page
             if (m_sideNotesStrokes.contains(pageIdx)) {
                 for (const VectorStroke& stroke : m_sideNotesStrokes[pageIdx]) {
@@ -5027,61 +5013,51 @@ void DocumentViewport::endPanGesture()
     if (m_gesture.activeType != ViewportGestureState::Pan) {
         return;  // Not in pan gesture
     }
-    
+
     // Stop timeout timer
     m_gestureTimeoutTimer->stop();
-    
+
     // Get final pan offset
     QPointF finalPan = m_gesture.targetPan;
-    
-    // Apply final pan to the real offset BEFORE clearing the gesture.
-    // This way the cached-frame paint path below uses the correct offset.
+
+    // Clear gesture state BEFORE applying pan (to avoid recursion in paintEvent)
+    m_gesture.reset();
+
+    // Apply final pan
     m_panOffset = finalPan;
-    
+
     // Clamp and emit signals
     clampPanOffset();
     updateCurrentPageIndex();
-    
+
     emit panChanged(m_panOffset);
     emitScrollFractions();
-    
-    // CRITICAL FIX: Do NOT clear the gesture state yet. Keep the cached frame
-    // visible while the async PDF preload warms the cache for newly visible pages.
-    // Without this, the first repaint after gesture end would go through the full
-    // rendering path, causing a visible "flash" as freshly rendered pages replace
-    // the cached frame.
-    //
-    // The cached frame (captured at gesture start) is drawn shifted by
-    // (targetPan - startPan) = (finalPan - startPan), which correctly shows
-    // the content at the new position. Newly exposed areas show the background
-    // color until the async preload fills the cache.
-    
-    // Force scroll-inactive so the full render path (when we get to it) uses
-    // synchronous getCachedPdfPage() for any remaining cache misses.
+
+    // ===== CRITICAL FIX: Post-pan grace period =====
+    // Wheel events that arrive within ~200ms after the pan ends would set
+    // m_scrollActive = true, causing lookupCachedPdfPage() to return null for
+    // uncached pages → blank flash. The grace period blocks m_scrollActive
+    // during this window so the full render path uses synchronous
+    // getCachedPdfPage() for any cache misses (no blank pages).
     m_scrollActive = false;
-    
-    // Mark that we're waiting for the async preload to complete
-    m_waitingForPdfCacheAfterPan = true;
-    
+    m_postPanGracePeriod = true;
+    QTimer::singleShot(200, this, [this]() {
+        m_postPanGracePeriod = false;
+    });
+
     // Update PDF cache capacity (visible pages may have changed)
     updatePdfCacheCapacity();
-    
-    // Force immediate preload (bypass debounce timer) for the newly visible pages.
-    // doAsyncPdfPreload() launches background renders; each completion calls update()
-    // which will check m_waitingForPdfCacheAfterPan in paintEvent.
-    doAsyncPdfPreload();
-    
-    // If there's nothing to preload (all pages already cached), the watchers list
-    // will be empty and we can switch to full render right away.
-    if (m_activePdfWatchers.isEmpty()) {
-        m_waitingForPdfCacheAfterPan = false;
-        m_gesture.reset();
-        update();
-    }
-    // Otherwise, the cached frame stays visible. Each async watcher completion
-    // calls update(), and the paintEvent checks whether all visible pages are
-    // now cached. When they are, it clears the flag and resets the gesture.
-    
+
+    // Warm the PDF cache for the new viewport position (async, debounced).
+    // The preload during the gesture should have already cached most pages;
+    // this catches any remaining misses.
+    preloadPdfCache();
+
+    // Trigger repaint. With m_scrollActive=false and grace period active,
+    // the full render path uses getCachedPdfPage() which renders synchronously
+    // for any cache misses → no blank flash.
+    update();
+
     // Evict distant tiles if in edgeless mode
     if (m_document && m_document->isEdgeless()) {
         evictDistantTiles();
