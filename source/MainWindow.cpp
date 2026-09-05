@@ -1150,11 +1150,9 @@ void MainWindow::setupUi() {
             updateActionBarPosition();
         }
     });
-    connect(m_navigationBar, &NavigationBar::sideNotesToggled, this, [this](bool checked) {
-        // Toggle side notes area
-        if (m_sideNotesPanelVisible != checked) {
-            toggleSideNotesPanel();
-        }
+    connect(m_navigationBar, &NavigationBar::sideNotesToggled, this, [this](bool) {
+        // The side-notes button adds/removes a notes column on the current page.
+        toggleSideNotesPanel();
     });
     connect(m_navigationBar, &NavigationBar::menuRequested, this, [this]() {
         // Show overflow menu at menu button position
@@ -3794,6 +3792,10 @@ bool MainWindow::saveNewDocumentWithDialog(Document* doc)
             tr("Failed to save document to:\n%1").arg(filePath));
         return false;
     }
+
+    // Persist the in-canvas notes columns alongside the newly-saved bundle
+    // (covers both "Save As" and first-time saves of a new document).
+    persistSideNotes(doc);
     
     // Phase P.4.6: Save thumbnail to NotebookLibrary
     {
@@ -3883,6 +3885,9 @@ void MainWindow::saveDocument()
         return;
     }
 
+        // Persist the in-canvas notes columns alongside the saved bundle.
+        persistSideNotes(doc);
+
         // Update tab title (clear modified flag)
         int currentIndex = tabManager()->currentIndex();
         if (currentIndex >= 0) {
@@ -3936,6 +3941,30 @@ void MainWindow::saveDocument()
         tabManager()->setTabTitle(currentIndex, doc->name);
         tabManager()->markTabModified(currentIndex, false);
     }
+}
+
+void MainWindow::persistSideNotes(Document* doc)
+{
+    if (!doc || !tabManager()) return;
+    const QString notesDir = doc->notesPath();
+    if (notesDir.isEmpty()) return;
+    for (int i = 0; i < tabManager()->tabCount(); ++i) {
+        DocumentViewport* vp = tabManager()->viewportAt(i);
+        if (vp && vp->document() == doc) {
+            vp->setSideNotesDir(notesDir);
+            vp->saveSideNotes();
+            return;
+        }
+    }
+}
+
+void MainWindow::loadSideNotes(DocumentViewport* viewport)
+{
+    if (!viewport || !viewport->document()) return;
+    const QString notesDir = viewport->document()->notesPath();
+    if (notesDir.isEmpty()) return;
+    viewport->setSideNotesDir(notesDir);
+    viewport->loadSideNotes();
 }
 
 // MAC.3: "Save As..." entry point. Always prompts for a new path even if the
@@ -8894,21 +8923,21 @@ void MainWindow::toggleSideNotesPanel()
     DocumentViewport* vp = currentViewport();
     if (!vp) return;
 
-    m_sideNotesPanelVisible = !m_sideNotesPanelVisible;
-
-    // Toggle the notes area in the viewport
-    vp->setSideNotesVisible(m_sideNotesPanelVisible);
-
-    // Set notes directory for persistence
-    if (m_sideNotesPanelVisible && vp->document()) {
-        vp->loadSideNotes();
-    } else if (!m_sideNotesPanelVisible && vp->document()) {
-        vp->saveSideNotes();
+    // Ensure the notes directory is wired so strokes & per-page widths persist.
+    if (vp->document()) {
+        const QString notesDir = vp->document()->notesPath();
+        if (!notesDir.isEmpty()) {
+            vp->setSideNotesDir(notesDir);
+            vp->loadSideNotes();
+        }
     }
 
-    // Sync navigation bar button state
+    // Toggle the current page's notes column on/off (default width = page width).
+    const bool on = vp->addSideNotesToCurrentPage();
+
+    // Sync navigation bar button state to the current page's column presence.
     if (m_navigationBar) {
-        m_navigationBar->setSideNotesChecked(m_sideNotesPanelVisible);
+        m_navigationBar->setSideNotesChecked(on);
     }
 
     updateActionBarPosition();
@@ -9880,6 +9909,15 @@ void MainWindow::openFileInNewTab(const QString &filePath)
         // Paged: Center content horizontally within the viewport
         centerViewportContent(tabIndex);
     }
+
+    // Load any persisted in-canvas notes columns (per-page strokes & widths)
+    // for this document, once the new viewport is fully constructed.
+    QTimer::singleShot(0, this, [this, tabIndex]() {
+        if (tabManager()) {
+            loadSideNotes(tabManager()->viewportAt(tabIndex));
+        }
+    });
+
     /*
     // Step 6: Log success
     if (isEdgeless) {

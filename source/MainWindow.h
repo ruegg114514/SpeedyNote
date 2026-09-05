@@ -575,6 +575,13 @@ private:
      * Used by saveDocument(), tab close handlers, and window close event.
      */
     bool saveNewDocumentWithDialog(Document* doc);
+
+    // ===== Side-notes persistence =====
+    // Writes the in-canvas notes columns (per-page strokes & widths) to the
+    // side-notes JSON beside the document, and loads them back on open. Must run
+    // only after the document has a permanent path so notesPath() is meaningful.
+    void persistSideNotes(Document* doc);
+    void loadSideNotes(DocumentViewport* viewport);
     
     /**
      * @brief Phase P.4.6: Render a thumbnail for page 0 of a document.
