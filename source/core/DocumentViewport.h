@@ -4766,10 +4766,14 @@ private:
     void addPointToStroke(const QPointF& pagePos, qreal pressure, qint64 timestamp = 0);
 
     // ===== Side Notes Area Helpers =====
-    void startNotesStroke(const PointerEvent& pe, int pageIndex, QPointF notesOrigin);
+    void startNotesStroke(const PointerEvent& pe, int pageIndex);
     void continueNotesStroke(const PointerEvent& pe);
     void endNotesStroke();
     void drawNotesStroke(QPainter& painter, const VectorStroke& stroke);
+    // Draws the notes column (background, grid, divider, committed strokes) of
+    // a page. Painter must already be translated to the page's top-left corner
+    // (page-local coordinates).
+    void drawNotesColumn(QPainter& painter, Page* page, int pageIdx);
     void eraseNotesAt(const QPointF& viewportPos);
 
     /**

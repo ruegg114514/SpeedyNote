@@ -3128,10 +3128,58 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
             // byte-comparing renders at fractional and integral offsets, which
             // come out identical at both DPR 1 and DPR 2.
 
-            // Clear only what the shifted frame won't cover.
-            fillBackgroundAround(painter, QRectF(panDeltaPixels, logicalSize));
-
+            // Shift-draw the frame captured when the gesture started, then
+            // re-render the regions it no longer covers (the content entering
+            // the viewport from off-screen) at the destination pan, so pages
+            // scroll in during the drag instead of leaving a blank/stale strip.
             painter.drawPixmap(panDeltaPixels, m_gesture.cachedFrame);
+
+            const QRectF coveredFrame(panDeltaPixels, logicalSize);
+            const QRect vpRect = rect();
+            QRegion exposedRegion = QRegion(vpRect);
+            const QRect coveredAligned = coveredFrame.toAlignedRect().intersected(vpRect);
+            if (!coveredAligned.isEmpty()) {
+                exposedRegion = exposedRegion.subtracted(QRegion(coveredAligned));
+            }
+
+            if (m_document && !exposedRegion.isEmpty()) {
+                painter.save();
+                painter.setClipRegion(exposedRegion);
+                painter.fillRect(exposedRegion.boundingRect(), m_backgroundColor);
+
+                if (m_document->isEdgeless()) {
+                    // renderEdgelessMode() positions tiles via m_panOffset,
+                    // which is still the gesture-start value during the drag, so
+                    // compensate by the pan delta (== panDeltaPixels) that the
+                    // shifted frame already represents to land at the destination.
+                    painter.translate(panDeltaPixels);
+                    renderEdgelessMode(painter, exposedRegion.boundingRect());
+                } else {
+                    painter.translate(-m_gesture.targetPan.x() * m_zoomLevel,
+                                      -m_gesture.targetPan.y() * m_zoomLevel);
+                    painter.scale(m_zoomLevel, m_zoomLevel);
+
+                    // Pages that become visible at the destination position.
+                    // visiblePages() is based on the (still unchanged) start pan,
+                    // so enumerate the pages the destination viewport will show.
+                    ensurePageLayoutCache();
+                    const QRectF destViewRect(
+                        m_gesture.targetPan,
+                        QSizeF(width() / m_zoomLevel, height() / m_zoomLevel));
+                    const int pageCount = m_document->pageCount();
+                    for (int pageIdx = 0; pageIdx < pageCount; ++pageIdx) {
+                        if (!pageRect(pageIdx).intersects(destViewRect)) continue;
+                        Page* page = m_document->page(pageIdx);
+                        if (!page) continue;
+                        painter.save();
+                        painter.translate(pagePosition(pageIdx));
+                        renderPage(painter, page, pageIdx);
+                        drawNotesColumn(painter, page, pageIdx);
+                        painter.restore();
+                    }
+                }
+                painter.restore();
+            }
         } else {
             // Defensive: ViewportGestureState::ZoomAndPan is declared but never
             // assigned. If that changes, clear rather than present a stale
@@ -3275,34 +3323,8 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
         renderPage(painter, page, pageIdx);
         
         // ===== Side Notes Area =====
-        // Render the notes area to the right of the page if visible
-        if (m_sideNotesVisible && m_sideNotesWidth > 0) {
-            QRectF notesRect(page->size.width(), 0, m_sideNotesWidth, page->size.height());
-
-            // Notes background - clearly distinct from page paper
-            QColor notesBg = m_isDarkMode ? QColor(35, 40, 50) : QColor(235, 240, 250);
-            painter.fillRect(notesRect, notesBg);
-
-            // Subtle dot grid pattern for notes area
-            painter.setPen(QPen(m_isDarkMode ? QColor(55, 60, 75) : QColor(210, 218, 230), 0.5 / m_zoomLevel));
-            qreal gridSpacing = 20.0;
-            for (qreal x = gridSpacing; x < m_sideNotesWidth; x += gridSpacing) {
-                for (qreal y = gridSpacing; y < page->size.height(); y += gridSpacing) {
-                    painter.drawPoint(QPointF(x, y));
-                }
-            }
-
-            // Bold divider line between page and notes
-            painter.setPen(QPen(m_isDarkMode ? QColor(100, 130, 180) : QColor(100, 140, 200), 2.0 / m_zoomLevel));
-            painter.drawLine(QPointF(page->size.width(), 0), QPointF(page->size.width(), page->size.height()));
-
-            // Render committed notes strokes for this page
-            if (m_sideNotesStrokes.contains(pageIdx)) {
-                for (const VectorStroke& stroke : m_sideNotesStrokes[pageIdx]) {
-                    drawNotesStroke(painter, stroke);
-                }
-            }
-        }
+        // Render the notes area to the right of the page if visible.
+        drawNotesColumn(painter, page, pageIdx);
         
         painter.restore();
     }
@@ -6094,7 +6116,9 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
         QPointF docPt = viewportToDocument(pe.viewportPos);
         for (int i = 0; i < m_document->pageCount(); ++i) {
             QPointF pos = pagePosition(i);
-            QSizeF psz = m_document->pageSizeAt(i);
+            Page* page = m_document->page(i);
+            if (!page) continue;
+            QSizeF psz = page->size;
             if (psz.isEmpty()) continue;
             QRectF notesRect(pos.x() + psz.width(), pos.y(), m_sideNotesWidth, psz.height());
             if (notesRect.contains(docPt)) {
@@ -6108,7 +6132,7 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
                                        eraserRadius * 2, eraserRadius * 2);
                     update(QRegion(cursorRectF.toAlignedRect(), QRegion::Ellipse));
                 } else if (m_currentTool == ToolType::Pen || m_currentTool == ToolType::Marker) {
-                    startNotesStroke(pe, i, notesRect.topLeft());
+                    startNotesStroke(pe, i);
                 }
                 // Consume the event - don't process further
                 return;
@@ -20090,7 +20114,7 @@ void DocumentViewport::clearSideNotesCurrentPage()
     update();
 }
 
-void DocumentViewport::startNotesStroke(const PointerEvent& pe, int pageIndex, QPointF notesOrigin)
+void DocumentViewport::startNotesStroke(const PointerEvent& pe, int pageIndex)
 {
     if (!m_document) return;
 
@@ -20118,8 +20142,16 @@ void DocumentViewport::startNotesStroke(const PointerEvent& pe, int pageIndex, Q
     m_sideNotesCurrentStroke.color = strokeColor;
     m_sideNotesCurrentStroke.baseThickness = strokeThickness;
 
-    // Convert viewport position to notes-local coordinates
+    // Convert viewport position to notes-local coordinates. The origin is the
+    // left edge of the notes column (page top-left + the page's own width),
+    // computed from page->size so it exactly matches continueNotesStroke and
+    // the painting path.
     QPointF docPt = viewportToDocument(pe.viewportPos);
+    QPointF notesOrigin = pagePosition(pageIndex);
+    Page* page = m_document->page(pageIndex);
+    if (page) {
+        notesOrigin += QPointF(page->size.width(), 0);
+    }
     QPointF notesLocal = docPt - notesOrigin;
 
     // Add first point
@@ -20198,6 +20230,43 @@ void DocumentViewport::drawNotesStroke(QPainter& painter, const VectorStroke& st
     }
 }
 
+void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageIdx)
+{
+    if (!page || !m_sideNotesVisible || m_sideNotesWidth <= 0) return;
+
+    QRectF notesRect(page->size.width(), 0, m_sideNotesWidth, page->size.height());
+
+    // Notes background - clearly distinct from page paper
+    QColor notesBg = m_isDarkMode ? QColor(35, 40, 50) : QColor(235, 240, 250);
+    painter.fillRect(notesRect, notesBg);
+
+    // Subtle dot grid pattern for notes area
+    painter.setPen(QPen(m_isDarkMode ? QColor(55, 60, 75) : QColor(210, 218, 230), 0.5 / m_zoomLevel));
+    qreal gridSpacing = 20.0;
+    for (qreal x = gridSpacing; x < m_sideNotesWidth; x += gridSpacing) {
+        for (qreal y = gridSpacing; y < page->size.height(); y += gridSpacing) {
+            painter.drawPoint(QPointF(x, y));
+        }
+    }
+
+    // Bold divider line between page and notes
+    painter.setPen(QPen(m_isDarkMode ? QColor(100, 130, 180) : QColor(100, 140, 200), 2.0 / m_zoomLevel));
+    painter.drawLine(QPointF(page->size.width(), 0), QPointF(page->size.width(), page->size.height()));
+
+    // Render committed notes strokes for this page. Strokes are stored in
+    // notes-column-local coordinates (origin at the column's left edge), so
+    // translate by the page width to land them inside the column instead of at
+    // the left of the PDF page.
+    if (m_sideNotesStrokes.contains(pageIdx)) {
+        painter.save();
+        painter.translate(page->size.width(), 0);
+        for (const VectorStroke& stroke : m_sideNotesStrokes[pageIdx]) {
+            drawNotesStroke(painter, stroke);
+        }
+        painter.restore();
+    }
+}
+
 void DocumentViewport::eraseNotesAt(const QPointF& viewportPos)
 {
     if (!m_document) return;
@@ -20207,7 +20276,9 @@ void DocumentViewport::eraseNotesAt(const QPointF& viewportPos)
 
     for (int i = 0; i < m_document->pageCount(); ++i) {
         QPointF pos = pagePosition(i);
-        QSizeF psz = m_document->pageSizeAt(i);
+        Page* page = m_document->page(i);
+        if (!page) continue;
+        QSizeF psz = page->size;
         if (psz.isEmpty()) continue;
         QPointF notesOrigin = pos + QPointF(psz.width(), 0);
         QRectF notesRect(notesOrigin.x(), notesOrigin.y(), m_sideNotesWidth, psz.height());
