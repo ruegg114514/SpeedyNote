@@ -950,8 +950,7 @@ set(UI_SOURCES
     source/ui/panels/InlineTextBoxEditor.cpp
     source/ui/panels/TextBoxFormatBar.cpp
     source/ui/panels/LinkObjectBar.cpp
-    # Side notes panel (PDF annotation side panel)
-    source/ui/SideNotesPanel.cpp
+    # Side notes area is now integrated into DocumentViewport (no separate panel)
     # Action bars
     source/ui/actionbars/ActionBar.cpp
     source/ui/actionbars/ActionBarContainer.cpp

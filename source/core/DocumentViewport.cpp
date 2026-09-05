@@ -58,6 +58,9 @@
 #include <QBuffer>
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
+#include <QJsonDocument>
+#include <QJsonArray>
 #include <QImageReader>
 #include <QMimeData>      // For clipboard content type check (O2.4)
 #include <QDragEnterEvent> // Plan D2: cross-document page-transfer drops
@@ -3101,22 +3104,58 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
             painter.drawPixmap(QRectF(scaledOrigin, scaledSize), m_gesture.cachedFrame, 
                               m_gesture.cachedFrame.rect());
         } else if (m_gesture.activeType == ViewportGestureState::Pan) {
-            perfSample.setPath(ViewportPerfMonitor::FramePath::GesturePan);
-            // PAN: Shift the cached frame by pan delta
-            // Pan delta in document coords → convert to viewport pixels
-            QPointF panDeltaDoc = m_gesture.targetPan - m_gesture.startPan;
-            QPointF panDeltaPixels = panDeltaDoc * m_gesture.startZoom * -1.0;  // Negate: pan offset increase = viewport moves opposite
-            
-            // Note: no need to snap panDeltaPixels to whole device pixels. With
-            // SmoothPixmapTransform off, QRasterPaintEngine already quantises a
-            // pure-translate drawPixmap to the device pixel grid - verified by
-            // byte-comparing renders at fractional and integral offsets, which
-            // come out identical at both DPR 1 and DPR 2.
-            
-            // Clear only what the shifted frame won't cover.
-            fillBackgroundAround(painter, QRectF(panDeltaPixels, logicalSize));
-            
-            painter.drawPixmap(panDeltaPixels, m_gesture.cachedFrame);
+            // Post-pan-end transition: if we're waiting for the async PDF preload
+            // to fill the cache, check whether all visible pages are now cached.
+            // When they are, reset the gesture and fall through to the full render
+            // path so the user sees freshly rendered content (not the shifted frame).
+            if (m_waitingForPdfCacheAfterPan) {
+                bool allCached = true;
+                QVector<int> vis = visiblePages();
+                qreal dpi = effectivePdfDpi();
+                for (int idx : vis) {
+                    Page* pg = m_document ? m_document->page(idx) : nullptr;
+                    if (pg && pg->backgroundType == Page::BackgroundType::PDF
+                        && pg->pdfPageNumber >= 0) {
+                        if (lookupCachedPdfPage(pg->pdfSourceId, pg->pdfPageNumber, dpi).isNull()) {
+                            allCached = false;
+                            break;
+                        }
+                    }
+                }
+                if (allCached || m_activePdfWatchers.isEmpty()) {
+                    // All visible pages are cached - switch to full render
+                    m_waitingForPdfCacheAfterPan = false;
+                    m_gesture.reset();
+                    // Fall through to the normal rendering path below
+                } else {
+                    // Still waiting - keep showing the cached frame
+                    perfSample.setPath(ViewportPerfMonitor::FramePath::GesturePan);
+                    QPointF panDeltaDoc = m_gesture.targetPan - m_gesture.startPan;
+                    QPointF panDeltaPixels = panDeltaDoc * m_gesture.startZoom * -1.0;
+                    fillBackgroundAround(painter, QRectF(panDeltaPixels, logicalSize));
+                    painter.drawPixmap(panDeltaPixels, m_gesture.cachedFrame);
+                    return;
+                }
+            }
+
+            if (!m_waitingForPdfCacheAfterPan && m_gesture.activeType == ViewportGestureState::Pan) {
+                perfSample.setPath(ViewportPerfMonitor::FramePath::GesturePan);
+                // PAN: Shift the cached frame by pan delta
+                // Pan delta in document coords → convert to viewport pixels
+                QPointF panDeltaDoc = m_gesture.targetPan - m_gesture.startPan;
+                QPointF panDeltaPixels = panDeltaDoc * m_gesture.startZoom * -1.0;  // Negate: pan offset increase = viewport moves opposite
+                
+                // Note: no need to snap panDeltaPixels to whole device pixels. With
+                // SmoothPixmapTransform off, QRasterPaintEngine already quantises a
+                // pure-translate drawPixmap to the device pixel grid - verified by
+                // byte-comparing renders at fractional and integral offsets, which
+                // come out identical at both DPR 1 and DPR 2.
+                
+                // Clear only what the shifted frame won't cover.
+                fillBackgroundAround(painter, QRectF(panDeltaPixels, logicalSize));
+                
+                painter.drawPixmap(panDeltaPixels, m_gesture.cachedFrame);
+            }
         } else {
             // Defensive: ViewportGestureState::ZoomAndPan is declared but never
             // assigned. If that changes, clear rather than present a stale
@@ -3124,8 +3163,11 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
             painter.fillRect(rect(), m_backgroundColor);
         }
         
-        // Skip normal rendering during gesture
-        return;
+        // If the gesture was reset above (waiting complete), fall through to full render.
+        // Otherwise, skip normal rendering during gesture.
+        if (m_gesture.isActive()) {
+            return;
+        }
     }
     
     // ========== FAST PATH: Selection Transform ==========
@@ -3255,10 +3297,48 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
         // Render the page (background + content)
         renderPage(painter, page, pageIdx);
         
+        // ===== Side Notes Area =====
+        // Render the notes area to the right of the page if visible
+        if (m_sideNotesVisible && m_sideNotesWidth > 0) {
+            QRectF notesRect(page->size.width(), 0, m_sideNotesWidth, page->size.height());
+            
+            // Notes background (slightly different from page paper)
+            QColor notesBg = m_isDarkMode ? QColor(45, 45, 48) : QColor(248, 248, 250);
+            painter.fillRect(notesRect, notesBg);
+            
+            // Divider line between page and notes
+            painter.setPen(QPen(m_isDarkMode ? QColor(70, 70, 75) : QColor(210, 210, 215), 1.0 / m_zoomLevel));
+            painter.drawLine(QPointF(page->size.width(), 0), QPointF(page->size.width(), page->size.height()));
+            
+            // Render committed notes strokes for this page
+            if (m_sideNotesStrokes.contains(pageIdx)) {
+                for (const VectorStroke& stroke : m_sideNotesStrokes[pageIdx]) {
+                    drawNotesStroke(painter, stroke);
+                }
+            }
+        }
+        
         painter.restore();
     }
     
     painter.restore();
+    
+    // ===== Render current notes stroke being drawn =====
+    if (m_isDrawingSideNotes && !m_sideNotesCurrentStroke.points.isEmpty() && m_sideNotesActivePage >= 0) {
+        painter.save();
+        painter.translate(-m_panOffset.x() * m_zoomLevel, -m_panOffset.y() * m_zoomLevel);
+        painter.scale(m_zoomLevel, m_zoomLevel);
+        
+        QPointF notesOrigin = pagePosition(m_sideNotesActivePage);
+        Page* notesPage = m_document->page(m_sideNotesActivePage);
+        if (notesPage) {
+            notesOrigin += QPointF(notesPage->size.width(), 0);
+        }
+        painter.translate(notesOrigin);
+        drawNotesStroke(painter, m_sideNotesCurrentStroke);
+        
+        painter.restore();
+    }
     
     // Render current stroke with incremental caching (Task 2.3)
     // This is done AFTER restoring the painter transform because the cache
@@ -4934,6 +5014,10 @@ void DocumentViewport::updatePanGesture(QPointF panDelta)
     // Restart timeout timer (each event resets the timeout)
     m_gestureTimeoutTimer->start(GESTURE_TIMEOUT_MS);
     
+    // Warm the PDF cache during the gesture so pages are ready when it ends.
+    // The debounce timer ensures this only triggers one actual preload per burst.
+    preloadPdfCache();
+    
     // Trigger repaint (will use fast cached frame shifting)
     update();
 }
@@ -4950,10 +5034,8 @@ void DocumentViewport::endPanGesture()
     // Get final pan offset
     QPointF finalPan = m_gesture.targetPan;
     
-    // Clear gesture state BEFORE applying pan (to avoid recursion in paintEvent)
-    m_gesture.reset();
-    
-    // Apply final pan
+    // Apply final pan to the real offset BEFORE clearing the gesture.
+    // This way the cached-frame paint path below uses the correct offset.
     m_panOffset = finalPan;
     
     // Clamp and emit signals
@@ -4963,23 +5045,42 @@ void DocumentViewport::endPanGesture()
     emit panChanged(m_panOffset);
     emitScrollFractions();
     
-    // SP2: Gate rendering to cache-only for the first repaint after gesture ends.
-    // This prevents synchronous PDF rendering on the UI thread when the cached
-    // frame is cleared. The settle timer will trigger async preload and a final
-    // clean repaint once preloading completes.
-    m_scrollActive = true;
-    if (m_scrollSettleTimer) {
-        m_scrollSettleTimer->start();
-    }
+    // CRITICAL FIX: Do NOT clear the gesture state yet. Keep the cached frame
+    // visible while the async PDF preload warms the cache for newly visible pages.
+    // Without this, the first repaint after gesture end would go through the full
+    // rendering path, causing a visible "flash" as freshly rendered pages replace
+    // the cached frame.
+    //
+    // The cached frame (captured at gesture start) is drawn shifted by
+    // (targetPan - startPan) = (finalPan - startPan), which correctly shows
+    // the content at the new position. Newly exposed areas show the background
+    // color until the async preload fills the cache.
     
-    // Trigger repaint (cache-only, no synchronous PDF rendering)
-    update();
+    // Force scroll-inactive so the full render path (when we get to it) uses
+    // synchronous getCachedPdfPage() for any remaining cache misses.
+    m_scrollActive = false;
+    
+    // Mark that we're waiting for the async preload to complete
+    m_waitingForPdfCacheAfterPan = true;
     
     // Update PDF cache capacity (visible pages may have changed)
     updatePdfCacheCapacity();
     
-    // Preload PDF cache for new viewport position
-    preloadPdfCache();
+    // Force immediate preload (bypass debounce timer) for the newly visible pages.
+    // doAsyncPdfPreload() launches background renders; each completion calls update()
+    // which will check m_waitingForPdfCacheAfterPan in paintEvent.
+    doAsyncPdfPreload();
+    
+    // If there's nothing to preload (all pages already cached), the watchers list
+    // will be empty and we can switch to full render right away.
+    if (m_activePdfWatchers.isEmpty()) {
+        m_waitingForPdfCacheAfterPan = false;
+        m_gesture.reset();
+        update();
+    }
+    // Otherwise, the cached frame stays visible. Each async watcher completion
+    // calls update(), and the paintEvent checks whether all visible pages are
+    // now cached. When they are, it clears the flag and resets the gesture.
     
     // Evict distant tiles if in edgeless mode
     if (m_document && m_document->isEdgeless()) {
@@ -6011,6 +6112,34 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
     // Initialize from the press event's eraser state
     m_hardwareEraserActive = pe.isEraser;
     
+    // ===== Side Notes Area Input =====
+    // Check if the pointer is in the notes area (to the right of a page)
+    if (m_sideNotesVisible && !m_document->isEdgeless()) {
+        QPointF docPt = viewportToDocument(pe.viewportPos);
+        for (int i = 0; i < m_document->pageCount(); ++i) {
+            QPointF pos = pagePosition(i);
+            QSizeF psz = m_document->pageSizeAt(i);
+            if (psz.isEmpty()) continue;
+            QRectF notesRect(pos.x() + psz.width(), pos.y(), m_sideNotesWidth, psz.height());
+            if (notesRect.contains(docPt)) {
+                // Pointer is in the notes area
+                bool isErasing = m_hardwareEraserActive || m_currentTool == ToolType::Eraser;
+                if (isErasing) {
+                    // Eraser in notes area: erase notes strokes
+                    eraseNotesAt(pe.viewportPos());
+                    qreal eraserRadius = m_eraserSize * m_zoomLevel + 5;
+                    QRectF cursorRectF(pe.viewportPos.x() - eraserRadius, pe.viewportPos.y() - eraserRadius,
+                                       eraserRadius * 2, eraserRadius * 2);
+                    update(QRegion(cursorRectF.toAlignedRect(), QRegion::Ellipse));
+                } else if (m_currentTool == ToolType::Pen || m_currentTool == ToolType::Marker) {
+                    startNotesStroke(pe, i, notesRect.topLeft());
+                }
+                // Consume the event - don't process further
+                return;
+            }
+        }
+    }
+    
     // Determine which page to draw on
     if (pe.pageHit.valid()) {
         m_activeDrawingPage = pe.pageHit.pageIndex;
@@ -6119,6 +6248,12 @@ void DocumentViewport::handlePointerMove(const PointerEvent& pe)
     
     // Update last pointer position for cursor tracking
     m_lastPointerPos = pe.viewportPos;
+    
+    // ===== Side Notes Area: continue/erase stroke =====
+    if (m_isDrawingSideNotes) {
+        continueNotesStroke(pe);
+        return;
+    }
     
     // Off-page pan runs ahead of every tool branch, the eraser included: a
     // hardware eraser press sets m_hardwareEraserActive before dispatch, so
@@ -6276,6 +6411,16 @@ void DocumentViewport::handlePointerMove(const PointerEvent& pe)
 void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
 {
     if (!m_document) return;
+    
+    // ===== Side Notes Area: end stroke =====
+    if (m_isDrawingSideNotes) {
+        endNotesStroke();
+        m_pointerActive = false;
+        m_activeSource = PointerEvent::Unknown;
+        m_hardwareEraserActive = false;
+        update();
+        return;
+    }
     
     // Off-page pan: either finish the pan, or treat a press that never moved as
     // the tap that used to clear the selection.
@@ -19945,4 +20090,278 @@ void DocumentViewport::emitScrollFractions()
     
     emit horizontalScrollChanged(hFraction);
     emit verticalScrollChanged(vFraction);
+}
+
+// ===== Side Notes Area Implementation =====
+
+void DocumentViewport::setSideNotesVisible(bool visible)
+{
+    if (m_sideNotesVisible == visible) return;
+    m_sideNotesVisible = visible;
+    emit sideNotesVisibilityChanged(visible);
+    update();
+}
+
+void DocumentViewport::setSideNotesWidth(qreal width)
+{
+    m_sideNotesWidth = qBound(50.0, width, 600.0);
+    update();
+}
+
+void DocumentViewport::clearSideNotesCurrentPage()
+{
+    m_sideNotesStrokes.remove(m_currentPageIndex);
+    update();
+}
+
+void DocumentViewport::startNotesStroke(const PointerEvent& pe, int pageIndex, QPointF notesOrigin)
+{
+    if (!m_document) return;
+
+    // Determine stroke properties
+    QColor strokeColor;
+    qreal strokeThickness;
+    bool useFixedPressure = false;
+
+    if (m_currentTool == ToolType::Marker) {
+        strokeColor = m_markerColor;
+        strokeThickness = m_markerThickness;
+        useFixedPressure = true;
+    } else {
+        strokeColor = m_penColor;
+        strokeThickness = m_penThickness;
+        useFixedPressure = false;
+    }
+
+    m_isDrawingSideNotes = true;
+    m_sideNotesActivePage = pageIndex;
+
+    // Initialize new stroke
+    m_sideNotesCurrentStroke = VectorStroke();
+    m_sideNotesCurrentStroke.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_sideNotesCurrentStroke.color = strokeColor;
+    m_sideNotesCurrentStroke.baseThickness = strokeThickness;
+
+    // Convert viewport position to notes-local coordinates
+    QPointF docPt = viewportToDocument(pe.viewportPos);
+    QPointF notesLocal = docPt - notesOrigin;
+
+    // Add first point
+    StrokePoint pt;
+    pt.pos = notesLocal;
+    pt.pressure = useFixedPressure ? 1.0 : pe.pressure;
+    pt.timestamp = pe.timestamp;
+    m_sideNotesCurrentStroke.points.append(pt);
+
+    m_pointerActive = true;
+    update();
+}
+
+void DocumentViewport::continueNotesStroke(const PointerEvent& pe)
+{
+    if (!m_isDrawingSideNotes || !m_document) return;
+
+    // Get notes origin in document coordinates
+    QPointF notesOrigin = pagePosition(m_sideNotesActivePage);
+    Page* page = m_document->page(m_sideNotesActivePage);
+    if (!page) return;
+    notesOrigin += QPointF(page->size.width(), 0);
+
+    // Convert viewport position to notes-local coordinates
+    QPointF docPt = viewportToDocument(pe.viewportPos);
+    QPointF notesLocal = docPt - notesOrigin;
+
+    // Add point
+    bool useFixedPressure = (m_currentTool == ToolType::Marker);
+    StrokePoint pt;
+    pt.pos = notesLocal;
+    pt.pressure = useFixedPressure ? 1.0 : pe.pressure;
+    pt.timestamp = pe.timestamp;
+    m_sideNotesCurrentStroke.points.append(pt);
+
+    // Request a partial update (dirty rect around the new point)
+    QPointF vpPt = documentToViewport(notesLocal + notesOrigin);
+    qreal radius = (strokeThickness() * m_zoomLevel) + 10;
+    QRectF dirtyRect(vpPt.x() - radius, vpPt.y() - radius, radius * 2, radius * 2);
+    update(dirtyRect.toAlignedRect());
+}
+
+void DocumentViewport::endNotesStroke()
+{
+    if (!m_isDrawingSideNotes) return;
+
+    // Commit the stroke to the per-page storage
+    if (m_sideNotesCurrentStroke.points.size() >= 2) {
+        m_sideNotesStrokes[m_sideNotesActivePage].append(m_sideNotesCurrentStroke);
+        emit documentModified();
+    }
+
+    m_isDrawingSideNotes = false;
+    m_sideNotesCurrentStroke = VectorStroke();
+    m_sideNotesActivePage = -1;
+    update();
+}
+
+void DocumentViewport::drawNotesStroke(QPainter& painter, const VectorStroke& stroke)
+{
+    if (stroke.points.size() < 2) return;
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(stroke.color);
+
+    for (int i = 1; i < stroke.points.size(); ++i) {
+        const StrokePoint& p0 = stroke.points[i - 1];
+        const StrokePoint& p1 = stroke.points[i];
+
+        qreal width = stroke.baseThickness * p1.pressure;
+        if (width < 0.5) width = 0.5;
+
+        painter.setPen(QPen(stroke.color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.drawLine(p0.pos, p1.pos);
+    }
+}
+
+void DocumentViewport::eraseNotesAt(const QPointF& viewportPos)
+{
+    if (!m_document) return;
+
+    QPointF docPt = viewportToDocument(viewportPos);
+    qreal eraserRadius = m_eraserSize;
+
+    for (int i = 0; i < m_document->pageCount(); ++i) {
+        QPointF pos = pagePosition(i);
+        QSizeF psz = m_document->pageSizeAt(i);
+        if (psz.isEmpty()) continue;
+        QPointF notesOrigin = pos + QPointF(psz.width(), 0);
+        QRectF notesRect(notesOrigin.x(), notesOrigin.y(), m_sideNotesWidth, psz.height());
+
+        if (!notesRect.contains(docPt)) continue;
+
+        // Check strokes for this page
+        if (!m_sideNotesStrokes.contains(i)) continue;
+
+        QPointF notesLocal = docPt - notesOrigin;
+        QVector<VectorStroke>& strokes = m_sideNotesStrokes[i];
+        bool changed = false;
+
+        for (int s = strokes.size() - 1; s >= 0; --s) {
+            for (const StrokePoint& pt : strokes[s].points) {
+                QPointF diff = pt.pos - notesLocal;
+                if (diff.x() * diff.x() + diff.y() * diff.y() < eraserRadius * eraserRadius) {
+                    strokes.removeAt(s);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+
+        if (changed) {
+            if (strokes.isEmpty()) {
+                m_sideNotesStrokes.remove(i);
+            }
+            emit documentModified();
+        }
+        break;  // Only erase from the first matching page
+    }
+
+    update();
+}
+
+void DocumentViewport::saveSideNotes()
+{
+    if (m_sideNotesDir.isEmpty() || !m_document) return;
+
+    QDir dir(m_sideNotesDir);
+    if (!dir.exists()) {
+        dir.mkpath(".");
+    }
+
+    QString filePath = m_sideNotesDir + "/side_notes.json";
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        return;
+    }
+
+    QJsonObject root;
+    QJsonObject pagesObj;
+
+    for (auto it = m_sideNotesStrokes.begin(); it != m_sideNotesStrokes.end(); ++it) {
+        QJsonArray strokesArr;
+        for (const VectorStroke& stroke : it.value()) {
+            QJsonObject strokeObj;
+            strokeObj["id"] = stroke.id;
+            strokeObj["color"] = stroke.color.name(QColor::HexArgb);
+            strokeObj["thickness"] = stroke.baseThickness;
+
+            QJsonArray pointsArr;
+            for (const StrokePoint& pt : stroke.points) {
+                QJsonObject ptObj;
+                ptObj["x"] = pt.pos.x();
+                ptObj["y"] = pt.pos.y();
+                ptObj["pressure"] = pt.pressure;
+                pointsArr.append(ptObj);
+            }
+            strokeObj["points"] = pointsArr;
+            strokesArr.append(strokeObj);
+        }
+        pagesObj[QString::number(it.key())] = strokesArr;
+    }
+
+    root["pages"] = pagesObj;
+    root["notesWidth"] = m_sideNotesWidth;
+
+    file.write(QJsonDocument(root).toJson());
+    file.close();
+}
+
+void DocumentViewport::loadSideNotes()
+{
+    if (m_sideNotesDir.isEmpty()) return;
+
+    QString filePath = m_sideNotesDir + "/side_notes.json";
+    QFile file(filePath);
+    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
+        return;
+    }
+
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    file.close();
+
+    if (!doc.isObject()) return;
+
+    QJsonObject root = doc.object();
+    m_sideNotesWidth = root.value("notesWidth").toDouble(200.0);
+
+    m_sideNotesStrokes.clear();
+    QJsonObject pagesObj = root.value("pages").toObject();
+
+    for (auto it = pagesObj.begin(); it != pagesObj.end(); ++it) {
+        int pageIndex = it.key().toInt();
+        QJsonArray strokesArr = it.value().toArray();
+        QVector<VectorStroke> strokes;
+
+        for (const QJsonValue& strokeVal : strokesArr) {
+            QJsonObject strokeObj = strokeVal.toObject();
+            VectorStroke stroke;
+            stroke.id = strokeObj.value("id").toString();
+            stroke.color = QColor(strokeObj.value("color").toString());
+            stroke.baseThickness = strokeObj.value("thickness").toDouble(2.5);
+
+            QJsonArray pointsArr = strokeObj.value("points").toArray();
+            for (const QJsonValue& ptVal : pointsArr) {
+                QJsonObject ptObj = ptVal.toObject();
+                StrokePoint pt;
+                pt.pos = QPointF(ptObj.value("x").toDouble(), ptObj.value("y").toDouble());
+                pt.pressure = ptObj.value("pressure").toDouble(1.0);
+                stroke.points.append(pt);
+            }
+            strokes.append(stroke);
+        }
+
+        if (!strokes.isEmpty()) {
+            m_sideNotesStrokes[pageIndex] = strokes;
+        }
+    }
+
+    update();
 }

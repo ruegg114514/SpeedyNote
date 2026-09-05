@@ -828,11 +828,7 @@ void MainWindow::setupUi() {
     markdownNotesSidebar->setMaximumWidth(600);
     markdownNotesSidebar->setVisible(false); // Hidden by default
 
-    // Side Notes Panel (PDF annotation side panel)
-    m_sideNotesPanel = new SideNotesPanel(this);
-    m_sideNotesPanel->setMinimumWidth(200);
-    m_sideNotesPanel->setMaximumWidth(500);
-    m_sideNotesPanel->setVisible(false); // Hidden by default
+    // Side notes area is now integrated into DocumentViewport (no separate panel widget)
 
     // Keyboard shortcut: Ctrl+Shift+N to toggle side notes panel
     {
@@ -1155,8 +1151,8 @@ void MainWindow::setupUi() {
         }
     });
     connect(m_navigationBar, &NavigationBar::sideNotesToggled, this, [this](bool checked) {
-        // Toggle side notes panel
-        if (m_sideNotesPanel && m_sideNotesPanelVisible != checked) {
+        // Toggle side notes area
+        if (m_sideNotesPanelVisible != checked) {
             toggleSideNotesPanel();
         }
     });
@@ -1263,11 +1259,9 @@ void MainWindow::setupUi() {
     m_contentSplitter->addWidget(m_leftSidebar);
     m_contentSplitter->addWidget(canvasContainer);
     m_contentSplitter->addWidget(markdownNotesSidebar);
-    m_contentSplitter->addWidget(m_sideNotesPanel);  // Side notes panel for PDF annotation
     m_contentSplitter->setStretchFactor(0, 0);  // Left sidebar: fixed
     m_contentSplitter->setStretchFactor(1, 1);  // Canvas: stretches
     m_contentSplitter->setStretchFactor(2, 0);  // Right sidebar: fixed
-    m_contentSplitter->setStretchFactor(3, 0);  // Side notes panel: fixed
 
     // Restore persisted sidebar widths
     {
@@ -1292,9 +1286,6 @@ void MainWindow::setupUi() {
         }
         if (markdownNotesSidebar && markdownNotesSidebar->isVisible()) {
             s.setValue("ui/rightSidebarWidth", markdownNotesSidebar->width());
-        }
-        if (m_sideNotesPanel && m_sideNotesPanel->isVisible()) {
-            s.setValue("ui/sideNotesPanelWidth", m_sideNotesPanel->width());
         }
     });
 
@@ -3056,48 +3047,8 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
     // search bar would stay pushed down by the banner that is no longer there.
     updatePdfSearchBarPosition();
 
-    // Side Notes Panel: sync page, scroll, and tool changes
-    connect(viewport, &DocumentViewport::currentPageChanged, this, [this](int pageIndex) {
-        if (m_sideNotesPanel && m_sideNotesPanelVisible) {
-            m_sideNotesPanel->setCurrentPage(pageIndex);
-        }
-    }, Qt::UniqueConnection);
-
-    connect(viewport, &DocumentViewport::panChanged, this, [this](QPointF) {
-        if (m_sideNotesPanel && m_sideNotesPanelVisible) {
-            DocumentViewport* vp = currentViewport();
-            if (vp) {
-                m_sideNotesPanel->setScrollOffset(vp->panOffset().y());
-            }
-        }
-    }, Qt::UniqueConnection);
-
-    connect(viewport, &DocumentViewport::zoomChanged, this, [this](qreal) {
-        if (m_sideNotesPanel && m_sideNotesPanelVisible) {
-            DocumentViewport* vp = currentViewport();
-            if (vp) {
-                m_sideNotesPanel->setViewportZoom(vp->zoomLevel());
-            }
-        }
-    }, Qt::UniqueConnection);
-
-    connect(viewport, &DocumentViewport::toolChanged, this, [this](ToolType tool) {
-        if (m_sideNotesPanel && m_sideNotesPanelVisible) {
-            m_sideNotesPanel->setToolType(tool);
-        }
-    }, Qt::UniqueConnection);
-
-    connect(viewport, &DocumentViewport::penColorChanged, this, [this](QColor color) {
-        if (m_sideNotesPanel && m_sideNotesPanelVisible) {
-            m_sideNotesPanel->setCurrentColor(color);
-        }
-    }, Qt::UniqueConnection);
-
-    connect(viewport, &DocumentViewport::penThicknessChanged, this, [this](qreal thickness) {
-        if (m_sideNotesPanel && m_sideNotesPanelVisible) {
-            m_sideNotesPanel->setCurrentThickness(thickness);
-        }
-    }, Qt::UniqueConnection);
+    // Side notes area is now integrated into DocumentViewport - no sync needed
+    // (notes area uses the same pan/zoom/tool state as the viewport automatically)
 }
 
 void MainWindow::applySubToolbarValuesToViewport(ToolType tool)
@@ -5578,9 +5529,7 @@ void MainWindow::updateTheme() {
     if (markdownNotesSidebar) {
         markdownNotesSidebar->setDarkMode(darkMode);
     }
-    if (m_sideNotesPanel) {
-        m_sideNotesPanel->setDarkMode(darkMode);
-    }
+    // Side notes area is integrated into viewport - dark mode handled automatically
 }
     
 void MainWindow::saveThemeSettings() {
@@ -8942,83 +8891,27 @@ void MainWindow::toggleMarkdownNotesSidebar() {
 
 void MainWindow::toggleSideNotesPanel()
 {
-    if (!m_sideNotesPanel) return;
+    DocumentViewport* vp = currentViewport();
+    if (!vp) return;
 
     m_sideNotesPanelVisible = !m_sideNotesPanelVisible;
 
-    if (m_contentSplitter) {
-        QList<int> sizes = m_contentSplitter->sizes();
-        if (sizes.size() >= 4) {
-            if (m_sideNotesPanelVisible) {
-                // Show the panel with a reasonable default width
-                int notesW = qBound(200, 300, 500);
-                int total = sizes[0] + sizes[1] + sizes[2] + sizes[3];
-                int leftW = sizes[0];
-                int rightW = sizes[2];
-                int canvasW = qMax(1, total - leftW - rightW - notesW);
-                m_contentSplitter->setSizes({leftW, canvasW, rightW, notesW});
-            } else {
-                // Hide the panel - give its space back to the canvas
-                int total = sizes[0] + sizes[1] + sizes[2] + sizes[3];
-                int leftW = sizes[0];
-                int rightW = sizes[2];
-                int canvasW = qMax(1, total - leftW - rightW);
-                m_contentSplitter->setSizes({leftW, canvasW, rightW, 0});
-            }
-        }
-    }
+    // Toggle the notes area in the viewport
+    vp->setSideNotesVisible(m_sideNotesPanelVisible);
 
-    m_sideNotesPanel->setVisible(m_sideNotesPanelVisible);
+    // Set notes directory for persistence
+    if (m_sideNotesPanelVisible && vp->document()) {
+        vp->loadSideNotes();
+    } else if (!m_sideNotesPanelVisible && vp->document()) {
+        vp->saveSideNotes();
+    }
 
     // Sync navigation bar button state
     if (m_navigationBar) {
         m_navigationBar->setSideNotesChecked(m_sideNotesPanelVisible);
     }
 
-    // Sync state when showing
-    if (m_sideNotesPanelVisible) {
-        syncSideNotesPanel();
-    }
-
-    // Force layout update
-    if (centralWidget() && centralWidget()->layout()) {
-        centralWidget()->layout()->invalidate();
-        centralWidget()->layout()->activate();
-    }
-    QApplication::processEvents();
-
-    if (DocumentViewport* vp = currentViewport()) {
-        vp->update();
-    }
     updateActionBarPosition();
-}
-
-void MainWindow::syncSideNotesPanel()
-{
-    if (!m_sideNotesPanel || !m_sideNotesPanelVisible) return;
-
-    DocumentViewport* vp = currentViewport();
-    if (!vp || !vp->document()) return;
-
-    Document* doc = vp->document();
-
-    // Set notes directory for persistence
-    m_sideNotesPanel->setNotesDir(doc->notesPath());
-
-    // Sync current page
-    m_sideNotesPanel->setCurrentPage(vp->currentPageIndex());
-
-    // Sync scroll position
-    m_sideNotesPanel->setScrollOffset(vp->panOffset().y());
-    m_sideNotesPanel->setViewportZoom(vp->zoomLevel());
-
-    // Sync tool settings
-    m_sideNotesPanel->setCurrentColor(vp->penColor());
-    m_sideNotesPanel->setCurrentThickness(vp->penThickness());
-    m_sideNotesPanel->setToolType(vp->currentTool());
-
-    // Sync dark mode
-    m_sideNotesPanel->setDarkMode(vp->isDarkMode());
 }
 
 // Phase M.8: Rebuild right-sidebar outline tree (no .md file I/O).

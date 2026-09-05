@@ -596,6 +596,39 @@ public:
      * Shortcut: Ctrl+2 toggles this setting.
      */
     void setAutoLayoutEnabled(bool enabled);
+
+    // ===== Side Notes Area (PDF annotation extension) =====
+
+    /**
+     * @brief Show/hide the notes area to the right of each PDF page.
+     *
+     * The notes area extends each page's width, scrolls/zooms together with
+     * the PDF, and accepts freehand drawing input (pen, marker, eraser).
+     */
+    void setSideNotesVisible(bool visible);
+    bool isSideNotesVisible() const { return m_sideNotesVisible; }
+
+    /**
+     * @brief Set the width of the notes area in document units.
+     * @param width Width in document units (clamped to 50..600).
+     */
+    void setSideNotesWidth(qreal width);
+    qreal sideNotesWidth() const { return m_sideNotesWidth; }
+
+    /**
+     * @brief Clear all notes strokes for the current page.
+     */
+    void clearSideNotesCurrentPage();
+
+    /**
+     * @brief Save all notes strokes to disk.
+     */
+    void saveSideNotes();
+
+    /**
+     * @brief Load notes strokes from disk.
+     */
+    void loadSideNotes();
     
     // ===== Tool Management (Task 2.1) =====
     
@@ -2934,6 +2967,11 @@ signals:
      * before calling convertOcrTextToTextBox().
      */
     void convertOcrTextRequested(InsertedObject* obj);
+
+    /**
+     * @brief Side notes area visibility changed.
+     */
+    void sideNotesVisibilityChanged(bool visible);
     
 protected:
     // ===== Qt Event Overrides =====
@@ -3704,6 +3742,21 @@ private:
     QTimer* m_scrollSettleTimer = nullptr;  ///< Fires SCROLL_SETTLE_MS after the last scroll event
     bool m_scrollActive = false;            ///< True while actively scrolling (see isScrolling())
     static constexpr int SCROLL_SETTLE_MS = 60;   ///< Idle delay (ms) before deferred housekeeping runs (was 120, reduced for faster settle)
+
+    // ===== Pan-gesture → full-render transition =====
+    // After a deferred pan gesture ends, keep showing the cached (shifted) frame
+    // until the async PDF preload fills the cache for newly visible pages.
+    // This prevents a visible "flash" as the full renderer replaces the frame.
+    bool m_waitingForPdfCacheAfterPan = false;
+
+    // ===== Side Notes Area (PDF annotation extension) =====
+    bool m_sideNotesVisible = false;        ///< Whether the notes area is shown
+    qreal m_sideNotesWidth = 200.0;         ///< Notes area width in document units
+    QMap<int, QVector<VectorStroke>> m_sideNotesStrokes;  ///< Per-page notes strokes
+    VectorStroke m_sideNotesCurrentStroke;  ///< Stroke being drawn in notes area
+    bool m_isDrawingSideNotes = false;      ///< Currently drawing in notes area
+    int m_sideNotesActivePage = -1;         ///< Page index for active notes stroke
+    QString m_sideNotesDir;                 ///< Directory for notes persistence
     
     // ===== Page Layout Cache (Performance: O(1) page position lookup) =====
     mutable QVector<qreal> m_pageYCache;  ///< Cached Y position for each page (single column)
@@ -4709,6 +4762,13 @@ private:
      * @param pressure Pressure value (0.0 to 1.0).
      */
     void addPointToStroke(const QPointF& pagePos, qreal pressure, qint64 timestamp = 0);
+
+    // ===== Side Notes Area Helpers =====
+    void startNotesStroke(const PointerEvent& pe, int pageIndex, QPointF notesOrigin);
+    void continueNotesStroke(const PointerEvent& pe);
+    void endNotesStroke();
+    void drawNotesStroke(QPainter& painter, const VectorStroke& stroke);
+    void eraseNotesAt(const QPointF& viewportPos);
 
     /**
      * @brief Apply the active pen preset's minimum-width floor to a raw
