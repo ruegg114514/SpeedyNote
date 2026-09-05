@@ -2720,7 +2720,19 @@ signals:
      * @param tool New tool type.
      */
     void toolChanged(ToolType tool);
-    
+
+    /**
+     * @brief Emitted when pen color changes.
+     * @param color New pen color.
+     */
+    void penColorChanged(QColor color);
+
+    /**
+     * @brief Emitted when pen thickness changes.
+     * @param thickness New pen thickness.
+     */
+    void penThicknessChanged(qreal thickness);
+
     /**
      * @brief Emitted when straight line mode is toggled.
      * @param enabled True if straight line mode is now enabled.
@@ -3667,7 +3679,7 @@ private:
     
     // ----- Performance/Memory Settings -----
     /// CUSTOMIZABLE: PDF cache capacity - higher = more RAM, smoother scrolling (range: 4-16)
-    int m_pdfCacheCapacity = 6;  // Default for single column (visible + ±2 buffer)
+    int m_pdfCacheCapacity = 12;  // Enhanced: larger cache for smoother scrolling (was 6)
     /// CUSTOMIZABLE: Max undo actions - higher = more RAM (range: 10-200)
     static const int MAX_UNDO_ACTIONS = 100;
     
@@ -3683,7 +3695,7 @@ private:
     // ===== Async PDF Preloading =====
     QTimer* m_pdfPreloadTimer = nullptr;  ///< Debounce timer for preload requests
     QList<QFutureWatcher<QImage>*> m_activePdfWatchers;  ///< Active async render operations (returns QImage for thread safety)
-    static constexpr int PDF_PRELOAD_DELAY_MS = 150;   ///< Debounce delay (ms) before preloading
+    static constexpr int PDF_PRELOAD_DELAY_MS = 80;    ///< Debounce delay (ms) before preloading (was 150, reduced for faster preload)
 
     // ===== Scroll-activity gate (SP1) =====
     // The immediate-pan route (wheel/touchpad/scroll-bar) marks itself active on
@@ -3691,7 +3703,7 @@ private:
     // deferred housekeeping (preload/evict) once instead of on every event.
     QTimer* m_scrollSettleTimer = nullptr;  ///< Fires SCROLL_SETTLE_MS after the last scroll event
     bool m_scrollActive = false;            ///< True while actively scrolling (see isScrolling())
-    static constexpr int SCROLL_SETTLE_MS = 120;  ///< Idle delay (ms) before deferred housekeeping runs
+    static constexpr int SCROLL_SETTLE_MS = 60;   ///< Idle delay (ms) before deferred housekeeping runs (was 120, reduced for faster settle)
     
     // ===== Page Layout Cache (Performance: O(1) page position lookup) =====
     mutable QVector<qreal> m_pageYCache;  ///< Cached Y position for each page (single column)

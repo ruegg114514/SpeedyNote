@@ -946,6 +946,7 @@ void DocumentViewport::setPenColor(const QColor& color)
     }
     
     m_penColor = color;
+    emit penColorChanged(m_penColor);
 }
 
 void DocumentViewport::setPenThickness(qreal thickness)
@@ -958,6 +959,7 @@ void DocumentViewport::setPenThickness(qreal thickness)
     }
     
     m_penThickness = thickness;
+    emit penThicknessChanged(m_penThickness);
 }
 
 void DocumentViewport::setPenMinStrokeWidth(qreal minWidth)
@@ -5269,9 +5271,9 @@ void DocumentViewport::doAsyncPdfPreload()
     int last = visible.last();
     
     // Pre-load buffer depends on layout mode:
-    // - Single column: ±1 page (above and below)
-    // - Two column: ±2 pages (1 row above + 1 row below = 4 pages)
-    int preloadBuffer = (m_layoutMode == LayoutMode::TwoColumn) ? 2 : 1;
+    // - Single column: ±4 pages (enhanced from ±1 for smoother scrolling)
+    // - Two column: ±6 pages (enhanced from ±2 for smoother scrolling)
+    int preloadBuffer = (m_layoutMode == LayoutMode::TwoColumn) ? 6 : 4;
     
     int preloadStart = qMax(0, first - preloadBuffer);
     int preloadEnd = qMin(m_document->pageCount() - 1, last + preloadBuffer);
@@ -5495,9 +5497,9 @@ void DocumentViewport::updatePdfCacheCapacity()
     QVector<int> visible = visiblePages();
     int visibleCount = static_cast<int>(visible.size());
     
-    // Buffer: 3 pages for 1-column (1 above + 2 below or vice versa)
-    //         6 pages for 2-column (1 row above + 1 row below = 4, plus margin)
-    int buffer = (m_layoutMode == LayoutMode::TwoColumn) ? 6 : 3;
+    // Buffer: 8 pages for 1-column (enhanced from 3 for more pre-rendered pages)
+    //         12 pages for 2-column (enhanced from 6 for more pre-rendered pages)
+    int buffer = (m_layoutMode == LayoutMode::TwoColumn) ? 12 : 8;
     
     // New capacity with minimum of 4
     int newCapacity = qMax(4, visibleCount + buffer);

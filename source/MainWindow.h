@@ -45,6 +45,7 @@
 #include "ui/NavigationBar.h"
 #include "ui/Toolbar.h"
 #include "ui/sidebars/LeftSidebarContainer.h"  // Phase S3: Left sidebar container
+#include "ui/SideNotesPanel.h"  // Side notes panel for PDF annotation
 
 class QThread;
 
@@ -619,6 +620,10 @@ private:
 
     // Markdown notes sidebar functionality
     void toggleMarkdownNotesSidebar();  // Toggle markdown notes sidebar
+
+    // Side notes panel functionality (PDF annotation side panel)
+    void toggleSideNotesPanel();
+    void syncSideNotesPanel();
     
     /**
      * @brief Phase M.8: Rebuild the right-sidebar outline tree from the
@@ -744,6 +749,10 @@ private:
     MarkdownNotesSidebar *markdownNotesSidebar;  // Sidebar for markdown notes
     // QPushButton *toggleMarkdownNotesButton; // Button to toggle markdown notes sidebar
     bool markdownNotesSidebarVisible = false;
+
+    // Side Notes Panel (PDF annotation side panel)
+    SideNotesPanel *m_sideNotesPanel = nullptr;
+    bool m_sideNotesPanelVisible = false;
 
 
     QWidget *sidebarContainer;  // Container for sidebar
