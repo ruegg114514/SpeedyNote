@@ -6126,7 +6126,7 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
                 bool isErasing = m_hardwareEraserActive || m_currentTool == ToolType::Eraser;
                 if (isErasing) {
                     // Eraser in notes area: erase notes strokes
-                    eraseNotesAt(pe.viewportPos());
+                    eraseNotesAt(pe.viewportPos);
                     qreal eraserRadius = m_eraserSize * m_zoomLevel + 5;
                     QRectF cursorRectF(pe.viewportPos.x() - eraserRadius, pe.viewportPos.y() - eraserRadius,
                                        eraserRadius * 2, eraserRadius * 2);
@@ -20181,7 +20181,8 @@ void DocumentViewport::continueNotesStroke(const PointerEvent& pe)
 
     // Request a partial update (dirty rect around the new point)
     QPointF vpPt = documentToViewport(notesLocal + notesOrigin);
-    qreal radius = (strokeThickness() * m_zoomLevel) + 10;
+    qreal thickness = (m_currentTool == ToolType::Marker) ? m_markerThickness : m_penThickness;
+    qreal radius = (thickness * m_zoomLevel) + 10;
     QRectF dirtyRect(vpPt.x() - radius, vpPt.y() - radius, radius * 2, radius * 2);
     update(dirtyRect.toAlignedRect());
 }
