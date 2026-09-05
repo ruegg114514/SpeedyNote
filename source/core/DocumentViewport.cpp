@@ -12873,16 +12873,19 @@ void DocumentViewport::finalizeLassoSelection()
         // ===== Also capture this page's notes-column strokes inside the lasso =====
         // Notes strokes are stored notes-local (origin is the page's left edge +
         // the page width), so translate them to page-local before the hit test.
+        // NOTE: notes strokes are drawn point-by-point and their stored boundingBox
+        // is not maintained, so compute it on the translated copy here; relying on
+        // the stored box would reject every notes stroke and break the selection.
         const qreal pageW = page->size.width();
         QPointF notesOffset(pageW, 0);
         if (m_sideNotesStrokes.contains(m_lassoSelection.sourcePageIndex)) {
             QVector<VectorStroke>& notes = m_sideNotesStrokes[m_lassoSelection.sourcePageIndex];
             for (int idx = 0; idx < notes.size(); ++idx) {
                 const VectorStroke& ns = notes[idx];
-                if (!ns.boundingBox.translated(notesOffset).intersects(lassoBounds)) continue;
                 VectorStroke docCopy = ns;
                 for (auto& pt : docCopy.points) pt.pos += notesOffset;
                 docCopy.updateBoundingBox();
+                if (!docCopy.boundingBox.intersects(lassoBounds)) continue;
                 if (strokeIntersectsLasso(docCopy, m_lassoPath)) {
                     m_lassoNotesPage = m_lassoSelection.sourcePageIndex;
                     m_lassoNotesIndices.append(idx);            // parallel to selection
@@ -20573,6 +20576,9 @@ void DocumentViewport::endNotesStroke()
 
     // Commit the stroke to the per-page storage
     if (m_sideNotesCurrentStroke.points.size() >= 2) {
+        // Notes strokes are rendered point-by-point, but the stored boundingBox
+        // must be valid for lasso hit-tests, erasing and persistence consumers.
+        m_sideNotesCurrentStroke.updateBoundingBox();
         m_sideNotesStrokes[m_sideNotesActivePage].append(m_sideNotesCurrentStroke);
         emit documentModified();
     }
