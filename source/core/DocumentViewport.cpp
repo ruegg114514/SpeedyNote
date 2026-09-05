@@ -20190,10 +20190,16 @@ bool DocumentViewport::addSideNotesToCurrentPage()
 
     const bool turningOn = !hasSideNotesOnPage(idx);
     if (turningOn) {
-        // Default column width: as wide as the page itself (document units).
+        // Default column width: exactly the page's own width (document units).
+        // Applied directly (not through setSideNotesWidthOnPage) so it is never
+        // capped by the resize maximum, guaranteeing the default matches the page.
         Page* page = m_document->page(idx);
         qreal w = (page && page->size.width() > 0.0) ? page->size.width() : 200.0;
-        setSideNotesWidthOnPage(idx, w);
+        m_sideNotesWidths[idx] = qMax(w, m_sideNotesMinWidth);
+        emit sideNotesVisibilityChanged(true);
+        m_pageLayoutDirty = true;
+        ensurePageLayoutCache();
+        update();
     } else {
         setSideNotesWidthOnPage(idx, 0.0);
     }

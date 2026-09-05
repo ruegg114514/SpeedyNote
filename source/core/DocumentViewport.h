@@ -3770,7 +3770,7 @@ private:
     // ===== Side Notes Area (PDF annotation extension) =====
     QMap<int, qreal> m_sideNotesWidths;    ///< Per-page notes column width (pageIdx -> width). A page has a column iff present with width > 0.
     qreal m_sideNotesMinWidth = 40.0;      ///< Minimum column width (document units)
-    qreal m_sideNotesMaxWidth = 900.0;     ///< Maximum column width (document units)
+    qreal m_sideNotesMaxWidth = 8000.0;     ///< Maximum column width (document units). Generous so typical PDF page widths (stored in logical pixels, often >900) and free widening are not capped near the page's own default.
     int m_resizingNotesPage = -1;          ///< Page whose notes divider is being dragged (<0 = none)
     qreal m_resizeStartX = 0.0;            ///< Viewport X where the divider drag started
     qreal m_resizeStartWidth = 0.0;        ///< Column width when the drag started
