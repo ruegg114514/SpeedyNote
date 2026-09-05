@@ -3304,7 +3304,7 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
         
         // Check if this page (plus notes area) intersects the dirty region
         if (isPartialUpdate) {
-            qreal notesW = (m_sideNotesVisible && m_sideNotesWidth > 0) ? m_sideNotesWidth : 0;
+            qreal notesW = sideNotesWidthFor(pageIdx);
             QRectF pageRectInViewport = QRectF(
                 (pos.x() - m_panOffset.x()) * m_zoomLevel,
                 (pos.y() - m_panOffset.y()) * m_zoomLevel,
@@ -3785,6 +3785,20 @@ void DocumentViewport::mousePressEvent(QMouseEvent* event)
         event->accept();
         return;
     }
+
+    // Left press exactly on a notes divider starts a width-resize drag. This is
+    // a viewport-level control, independent of the active drawing tool.
+    if (event->button() == Qt::LeftButton && !m_document->isEdgeless()) {
+        const int divPage = notesDividerPageAtViewport(SN_MOUSE_POS(event));
+        if (divPage >= 0) {
+            m_resizingNotesPage = divPage;
+            m_resizeStartX = SN_MOUSE_POS(event).x();
+            m_resizeStartWidth = sideNotesWidthFor(divPage);
+            setCursor(Qt::SizeHorCursor);
+            event->accept();
+            return;
+        }
+    }
     
     const bool objectAlternateButton =
         m_currentTool == ToolType::ObjectSelect && event->button() == Qt::RightButton;
@@ -3830,6 +3844,15 @@ void DocumentViewport::mouseMoveEvent(QMouseEvent* event)
         QPointF docDelta(-delta.x() / m_zoomLevel, -delta.y() / m_zoomLevel);
         updatePanGesture(docDelta);
         m_middleMouseLastPos = SN_MOUSE_POS(event);
+        event->accept();
+        return;
+    }
+
+    // Active notes-divider resize: recompute the column width from the pointer
+    // X movement (in document units), then stop when the button is released.
+    if (m_resizingNotesPage >= 0 && (event->buttons() & Qt::LeftButton)) {
+        const qreal widthDelta = (SN_MOUSE_POS(event).x() - m_resizeStartX) / m_zoomLevel;
+        setSideNotesWidthOnPage(m_resizingNotesPage, m_resizeStartWidth + widthDelta);
         event->accept();
         return;
     }
@@ -3897,6 +3920,17 @@ void DocumentViewport::mouseMoveEvent(QMouseEvent* event)
                 updateHighlighterCursor();
             }
         }
+
+        // Hovering exactly over a notes divider advertises the resize cursor.
+        // This runs last so it wins over the pan/off-page cursor above.
+        if (!this->m_pointerActive) {
+            const int hoverDiv = notesDividerPageAtViewport(SN_MOUSE_POS(event));
+            if (hoverDiv >= 0) {
+                setCursor(Qt::SizeHorCursor);
+            } else if (!offPageHover) {
+                updateHighlighterCursor();
+            }
+        }
         
         // Phase D.1: Update cursor for PDF link hover in Highlighter tool
         if (!offPageHover && m_currentTool == ToolType::Highlighter) {
@@ -3919,6 +3953,17 @@ void DocumentViewport::mouseReleaseEvent(QMouseEvent* event)
     if (event->button() == Qt::MiddleButton && m_isMiddleMousePanning) {
         endPanGesture();
         m_isMiddleMousePanning = false;
+        updateHighlighterCursor();
+        event->accept();
+        return;
+    }
+
+    // Finish a notes-divider width-resize drag.
+    if (m_resizingNotesPage >= 0 && event->button() == Qt::LeftButton) {
+        const qreal widthDelta = (SN_MOUSE_POS(event).x() - m_resizeStartX) / m_zoomLevel;
+        setSideNotesWidthOnPage(m_resizingNotesPage, m_resizeStartWidth + widthDelta);
+        m_resizingNotesPage = -1;
+        saveSideNotes();
         updateHighlighterCursor();
         event->accept();
         return;
@@ -5684,7 +5729,9 @@ void DocumentViewport::ensurePageLayoutCache() const
                 m_pageYCache[i] = y;
                 QSizeF pageSize = m_document->pageSizeAt(i);
                 if (!pageSize.isEmpty()) {
-                    totalWidth = qMax(totalWidth, pageSize.width());
+                    // Note: each page's notes column extends the scrollable width.
+                    const qreal notesW = sideNotesWidthFor(i);
+                    totalWidth = qMax(totalWidth, pageSize.width() + notesW);
                     totalHeight = y + pageSize.height();  // Track total height
                     y += pageSize.height() + m_pageGap;
                 }
@@ -5713,10 +5760,10 @@ void DocumentViewport::ensurePageLayoutCache() const
                     if (!leftSize.isEmpty()) rowHeight = qMax(rowHeight, leftSize.height());
                     if (!rightSize.isEmpty()) rowHeight = qMax(rowHeight, rightSize.height());
                     
-                    // Track total width (both pages + gap)
+                    // Track total width (both pages + their notes columns + gap)
                     qreal rowWidth = 0;
-                    if (!leftSize.isEmpty()) rowWidth += leftSize.width();
-                    if (!rightSize.isEmpty()) rowWidth += m_pageGap + rightSize.width();
+                    if (!leftSize.isEmpty()) rowWidth += leftSize.width() + sideNotesWidthFor(i - 1);
+                    if (!rightSize.isEmpty()) rowWidth += m_pageGap + rightSize.width() + sideNotesWidthFor(i);
                     totalWidth = qMax(totalWidth, rowWidth);
                     
                     totalHeight = y + rowHeight;  // Track total height
@@ -5727,7 +5774,8 @@ void DocumentViewport::ensurePageLayoutCache() const
             if (pageCount % 2 == 1 && pageCount > 0) {
                 QSizeF lastSize = m_document->pageSizeAt(pageCount - 1);
                 if (!lastSize.isEmpty()) {
-                    totalWidth = qMax(totalWidth, lastSize.width());
+                    qreal lastW = lastSize.width() + sideNotesWidthFor(pageCount - 1);
+                    totalWidth = qMax(totalWidth, lastW);
                     totalHeight = m_pageYCache[pageCount - 1] + lastSize.height();
                 }
             }
@@ -6112,15 +6160,17 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
     
     // ===== Side Notes Area Input =====
     // Check if the pointer is in the notes area (to the right of a page)
-    if (m_sideNotesVisible && !m_document->isEdgeless()) {
+    if (!m_document->isEdgeless()) {
         QPointF docPt = viewportToDocument(pe.viewportPos);
         for (int i = 0; i < m_document->pageCount(); ++i) {
+            const qreal notesW = sideNotesWidthFor(i);
+            if (notesW <= 0) continue;
             QPointF pos = pagePosition(i);
             Page* page = m_document->page(i);
             if (!page) continue;
             QSizeF psz = page->size;
             if (psz.isEmpty()) continue;
-            QRectF notesRect(pos.x() + psz.width(), pos.y(), m_sideNotesWidth, psz.height());
+            QRectF notesRect(pos.x() + psz.width(), pos.y(), notesW, psz.height());
             if (notesRect.contains(docPt)) {
                 // Pointer is in the notes area
                 bool isErasing = m_hardwareEraserActive || m_currentTool == ToolType::Eraser;
@@ -20094,18 +20144,81 @@ void DocumentViewport::emitScrollFractions()
 
 // ===== Side Notes Area Implementation =====
 
-void DocumentViewport::setSideNotesVisible(bool visible)
+void DocumentViewport::setSideNotesDir(const QString& dir)
 {
-    if (m_sideNotesVisible == visible) return;
-    m_sideNotesVisible = visible;
-    emit sideNotesVisibilityChanged(visible);
+    m_sideNotesDir = dir;
+}
+
+bool DocumentViewport::hasSideNotesOnPage(int pageIndex) const
+{
+    return m_sideNotesWidths.value(pageIndex, 0.0) > 0.0;
+}
+
+qreal DocumentViewport::sideNotesWidthFor(int pageIndex) const
+{
+    return m_sideNotesWidths.value(pageIndex, 0.0);
+}
+
+void DocumentViewport::setSideNotesWidthOnPage(int pageIndex, qreal width)
+{
+    if (pageIndex < 0) return;
+    const qreal oldWidth = m_sideNotesWidths.value(pageIndex, 0.0);
+    if (qFuzzyCompare(oldWidth, width)) return;   // No change
+
+    if (width <= 0.0) {
+        if (m_sideNotesWidths.remove(pageIndex))
+            emit sideNotesVisibilityChanged(false);
+    } else {
+        qreal clamped = qBound(m_sideNotesMinWidth, width, m_sideNotesMaxWidth);
+        bool became = !hasSideNotesOnPage(pageIndex);
+        m_sideNotesWidths[pageIndex] = clamped;
+        if (became) emit sideNotesVisibilityChanged(true);
+    }
+
+    // Column width participates in the layout content size, so force a
+    // recompute (ensurePageLayoutCache only acts while the flag is dirty).
+    m_pageLayoutDirty = true;
+    ensurePageLayoutCache();
     update();
 }
 
-void DocumentViewport::setSideNotesWidth(qreal width)
+bool DocumentViewport::addSideNotesToCurrentPage()
 {
-    m_sideNotesWidth = qBound(50.0, width, 600.0);
-    update();
+    if (!m_document) return false;
+    const int idx = m_currentPageIndex;
+    if (idx < 0 || idx >= m_document->pageCount()) return false;
+
+    const bool turningOn = !hasSideNotesOnPage(idx);
+    if (turningOn) {
+        // Default column width: as wide as the page itself (document units).
+        Page* page = m_document->page(idx);
+        qreal w = (page && page->size.width() > 0.0) ? page->size.width() : 200.0;
+        setSideNotesWidthOnPage(idx, w);
+    } else {
+        setSideNotesWidthOnPage(idx, 0.0);
+    }
+    saveSideNotes();
+    return hasSideNotesOnPage(idx);
+}
+
+int DocumentViewport::notesDividerPageAtViewport(const QPointF& vpPos) const
+{
+    if (!m_document || m_document->isEdgeless()) return -1;
+    const qreal hitPx = 6.0;
+    const qreal zoom = m_zoomLevel > 0.0 ? m_zoomLevel : 1.0;
+    for (int i = 0; i < m_document->pageCount(); ++i) {
+        if (sideNotesWidthFor(i) <= 0.0) continue;
+        Page* page = m_document->page(i);
+        if (!page || page->size.width() <= 0.0) continue;
+        QPointF pos = pagePosition(i);
+        qreal divX = (pos.x() + page->size.width() - m_panOffset.x()) * zoom;
+        if (qAbs(divX - vpPos.x()) > hitPx) continue;
+        qreal top = (pos.y() - m_panOffset.y()) * zoom;
+        qreal bottom = (pos.y() + page->size.height() - m_panOffset.y()) * zoom;
+        if (vpPos.y() < top || vpPos.y() > bottom) continue;
+        return i;
+    }
+    return -1;
 }
 
 void DocumentViewport::clearSideNotesCurrentPage()
@@ -20232,25 +20345,26 @@ void DocumentViewport::drawNotesStroke(QPainter& painter, const VectorStroke& st
 
 void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageIdx)
 {
-    if (!page || !m_sideNotesVisible || m_sideNotesWidth <= 0) return;
+    if (!page) return;
+    const qreal notesW = sideNotesWidthFor(pageIdx);
+    if (notesW <= 0) return;
 
-    QRectF notesRect(page->size.width(), 0, m_sideNotesWidth, page->size.height());
+    QRectF notesRect(page->size.width(), 0, notesW, page->size.height());
 
-    // Notes background - clearly distinct from page paper
-    QColor notesBg = m_isDarkMode ? QColor(35, 40, 50) : QColor(235, 240, 250);
-    painter.fillRect(notesRect, notesBg);
+    // Notes background - white (explicit user requirement)
+    painter.fillRect(notesRect, Qt::white);
 
     // Subtle dot grid pattern for notes area
-    painter.setPen(QPen(m_isDarkMode ? QColor(55, 60, 75) : QColor(210, 218, 230), 0.5 / m_zoomLevel));
+    painter.setPen(QPen(QColor(205, 214, 226), 0.5 / m_zoomLevel));
     qreal gridSpacing = 20.0;
-    for (qreal x = gridSpacing; x < m_sideNotesWidth; x += gridSpacing) {
+    for (qreal x = gridSpacing; x < notesW; x += gridSpacing) {
         for (qreal y = gridSpacing; y < page->size.height(); y += gridSpacing) {
             painter.drawPoint(QPointF(x, y));
         }
     }
 
-    // Bold divider line between page and notes
-    painter.setPen(QPen(m_isDarkMode ? QColor(100, 130, 180) : QColor(100, 140, 200), 2.0 / m_zoomLevel));
+    // Bold divider line between page and notes (clearly visible on white)
+    painter.setPen(QPen(QColor(120, 140, 180), 2.0 / m_zoomLevel));
     painter.drawLine(QPointF(page->size.width(), 0), QPointF(page->size.width(), page->size.height()));
 
     // Render committed notes strokes for this page. Strokes are stored in
@@ -20280,8 +20394,10 @@ void DocumentViewport::eraseNotesAt(const QPointF& viewportPos)
         if (!page) continue;
         QSizeF psz = page->size;
         if (psz.isEmpty()) continue;
+        const qreal notesW = sideNotesWidthFor(i);
+        if (notesW <= 0) continue;
         QPointF notesOrigin = pos + QPointF(psz.width(), 0);
-        QRectF notesRect(notesOrigin.x(), notesOrigin.y(), m_sideNotesWidth, psz.height());
+        QRectF notesRect(notesOrigin.x(), notesOrigin.y(), notesW, psz.height());
 
         if (!notesRect.contains(docPt)) continue;
 
@@ -20356,7 +20472,16 @@ void DocumentViewport::saveSideNotes()
     }
 
     root["pages"] = pagesObj;
-    root["notesWidth"] = m_sideNotesWidth;
+
+    // Persist per-page column widths. A page has a notes column iff a width > 0
+    // entry exists in the map; the column is closed by omitting the page key.
+    QJsonObject widthsObj;
+    for (auto it = m_sideNotesWidths.begin(); it != m_sideNotesWidths.end(); ++it) {
+        if (it.value() > 0.0) {
+            widthsObj[QString::number(it.key())] = it.value();
+        }
+    }
+    root["pageWidths"] = widthsObj;
 
     file.write(QJsonDocument(root).toJson());
     file.close();
@@ -20378,7 +20503,30 @@ void DocumentViewport::loadSideNotes()
     if (!doc.isObject()) return;
 
     QJsonObject root = doc.object();
-    m_sideNotesWidth = root.value("notesWidth").toDouble(200.0);
+    m_sideNotesWidths.clear();
+
+    // Per-page widths (new format). A page has a column iff its page key is
+    // present with a width > 0.
+    QJsonObject widthsObj = root.value("pageWidths").toObject();
+    for (auto it = widthsObj.begin(); it != widthsObj.end(); ++it) {
+        qreal w = it.value().toDouble(0.0);
+        int pageIndex = it.key().toInt();
+        if (w > 0.0) {
+            m_sideNotesWidths[pageIndex] = w;
+        }
+    }
+
+    // Legacy migration: the old format stored a single global width. Apply it
+    // to every page that already has committed strokes, so previously-created
+    // notes stay accessible after the upgrade.
+    if (m_sideNotesWidths.isEmpty()) {
+        const double legacyWidth = root.value("notesWidth").toDouble(200.0);
+        if (legacyWidth > 0.0) {
+            for (auto it = root.value("pages").toObject().begin(); it != root.value("pages").toObject().end(); ++it) {
+                m_sideNotesWidths[it.key().toInt()] = legacyWidth;
+            }
+        }
+    }
 
     m_sideNotesStrokes.clear();
     QJsonObject pagesObj = root.value("pages").toObject();

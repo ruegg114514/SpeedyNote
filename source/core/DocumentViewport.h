@@ -600,20 +600,36 @@ public:
     // ===== Side Notes Area (PDF annotation extension) =====
 
     /**
-     * @brief Show/hide the notes area to the right of each PDF page.
+     * @brief Toggle the notes column for the current page on/off.
      *
-     * The notes area extends each page's width, scrolls/zooms together with
-     * the PDF, and accepts freehand drawing input (pen, marker, eraser).
+     * Turning it on adds a notes column to the current page only, with a
+     * default width equal to the page's own width (document units). Each page
+     * independently owns its column and width.
+     * @return true if the current page now has a notes column.
      */
-    void setSideNotesVisible(bool visible);
-    bool isSideNotesVisible() const { return m_sideNotesVisible; }
+    bool addSideNotesToCurrentPage();
 
     /**
-     * @brief Set the width of the notes area in document units.
-     * @param width Width in document units (clamped to 50..600).
+     * @brief Whether @p pageIndex currently has a notes column.
      */
-    void setSideNotesWidth(qreal width);
-    qreal sideNotesWidth() const { return m_sideNotesWidth; }
+    bool hasSideNotesOnPage(int pageIndex) const;
+
+    /**
+     * @brief Notes column width for @p pageIndex in document units (0 if none).
+     */
+    qreal sideNotesWidthFor(int pageIndex) const;
+
+    /**
+     * @brief Set the width (document units) of a page's notes column.
+     * @param width Width <= 0 removes the column for that page.
+     * @param pageIndex
+     */
+    void setSideNotesWidthOnPage(int pageIndex, qreal width);
+
+    /**
+     * @brief Set the directory used for notes persistence.
+     */
+    void setSideNotesDir(const QString& dir);
 
     /**
      * @brief Clear all notes strokes for the current page.
@@ -3752,8 +3768,12 @@ private:
     bool m_postPanGracePeriod = false;
 
     // ===== Side Notes Area (PDF annotation extension) =====
-    bool m_sideNotesVisible = false;        ///< Whether the notes area is shown
-    qreal m_sideNotesWidth = 200.0;         ///< Notes area width in document units
+    QMap<int, qreal> m_sideNotesWidths;    ///< Per-page notes column width (pageIdx -> width). A page has a column iff present with width > 0.
+    qreal m_sideNotesMinWidth = 40.0;      ///< Minimum column width (document units)
+    qreal m_sideNotesMaxWidth = 900.0;     ///< Maximum column width (document units)
+    int m_resizingNotesPage = -1;          ///< Page whose notes divider is being dragged (<0 = none)
+    qreal m_resizeStartX = 0.0;            ///< Viewport X where the divider drag started
+    qreal m_resizeStartWidth = 0.0;        ///< Column width when the drag started
     QMap<int, QVector<VectorStroke>> m_sideNotesStrokes;  ///< Per-page notes strokes
     VectorStroke m_sideNotesCurrentStroke;  ///< Stroke being drawn in notes area
     bool m_isDrawingSideNotes = false;      ///< Currently drawing in notes area
@@ -4774,6 +4794,7 @@ private:
     // a page. Painter must already be translated to the page's top-left corner
     // (page-local coordinates).
     void drawNotesColumn(QPainter& painter, Page* page, int pageIdx);
+    int notesDividerPageAtViewport(const QPointF& vpPos) const;
     void eraseNotesAt(const QPointF& viewportPos);
 
     /**

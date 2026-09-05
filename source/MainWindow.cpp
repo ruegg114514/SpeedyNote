@@ -1150,11 +1150,9 @@ void MainWindow::setupUi() {
             updateActionBarPosition();
         }
     });
-    connect(m_navigationBar, &NavigationBar::sideNotesToggled, this, [this](bool checked) {
-        // Toggle side notes area
-        if (m_sideNotesPanelVisible != checked) {
-            toggleSideNotesPanel();
-        }
+    connect(m_navigationBar, &NavigationBar::sideNotesToggled, this, [this](bool) {
+        // The side-notes button adds/removes a notes column on the current page.
+        toggleSideNotesPanel();
     });
     connect(m_navigationBar, &NavigationBar::menuRequested, this, [this]() {
         // Show overflow menu at menu button position
@@ -8894,21 +8892,21 @@ void MainWindow::toggleSideNotesPanel()
     DocumentViewport* vp = currentViewport();
     if (!vp) return;
 
-    m_sideNotesPanelVisible = !m_sideNotesPanelVisible;
-
-    // Toggle the notes area in the viewport
-    vp->setSideNotesVisible(m_sideNotesPanelVisible);
-
-    // Set notes directory for persistence
-    if (m_sideNotesPanelVisible && vp->document()) {
-        vp->loadSideNotes();
-    } else if (!m_sideNotesPanelVisible && vp->document()) {
-        vp->saveSideNotes();
+    // Ensure the notes directory is wired so strokes & per-page widths persist.
+    if (vp->document()) {
+        const QString notesDir = vp->document()->notesPath();
+        if (!notesDir.isEmpty()) {
+            vp->setSideNotesDir(notesDir);
+            vp->loadSideNotes();
+        }
     }
 
-    // Sync navigation bar button state
+    // Toggle the current page's notes column on/off (default width = page width).
+    const bool on = vp->addSideNotesToCurrentPage();
+
+    // Sync navigation bar button state to the current page's column presence.
     if (m_navigationBar) {
-        m_navigationBar->setSideNotesChecked(m_sideNotesPanelVisible);
+        m_navigationBar->setSideNotesChecked(on);
     }
 
     updateActionBarPosition();
