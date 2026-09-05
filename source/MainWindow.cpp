@@ -1154,6 +1154,12 @@ void MainWindow::setupUi() {
             updateActionBarPosition();
         }
     });
+    connect(m_navigationBar, &NavigationBar::sideNotesToggled, this, [this](bool checked) {
+        // Toggle side notes panel
+        if (m_sideNotesPanel && m_sideNotesPanelVisible != checked) {
+            toggleSideNotesPanel();
+        }
+    });
     connect(m_navigationBar, &NavigationBar::menuRequested, this, [this]() {
         // Show overflow menu at menu button position
         if (overflowMenu && m_navigationBar) {
@@ -8940,20 +8946,34 @@ void MainWindow::toggleSideNotesPanel()
 
     m_sideNotesPanelVisible = !m_sideNotesPanelVisible;
 
-    if (m_sideNotesPanelVisible && m_contentSplitter) {
-        // Show the panel with a reasonable default width
-        int notesW = qBound(200, 300, 500);
+    if (m_contentSplitter) {
         QList<int> sizes = m_contentSplitter->sizes();
         if (sizes.size() >= 4) {
-            int total = sizes[0] + sizes[1] + sizes[2] + sizes[3];
-            int leftW = sizes[0];
-            int rightW = sizes[2];
-            int canvasW = qMax(1, total - leftW - rightW - notesW);
-            m_contentSplitter->setSizes({leftW, canvasW, rightW, notesW});
+            if (m_sideNotesPanelVisible) {
+                // Show the panel with a reasonable default width
+                int notesW = qBound(200, 300, 500);
+                int total = sizes[0] + sizes[1] + sizes[2] + sizes[3];
+                int leftW = sizes[0];
+                int rightW = sizes[2];
+                int canvasW = qMax(1, total - leftW - rightW - notesW);
+                m_contentSplitter->setSizes({leftW, canvasW, rightW, notesW});
+            } else {
+                // Hide the panel - give its space back to the canvas
+                int total = sizes[0] + sizes[1] + sizes[2] + sizes[3];
+                int leftW = sizes[0];
+                int rightW = sizes[2];
+                int canvasW = qMax(1, total - leftW - rightW);
+                m_contentSplitter->setSizes({leftW, canvasW, rightW, 0});
+            }
         }
     }
 
     m_sideNotesPanel->setVisible(m_sideNotesPanelVisible);
+
+    // Sync navigation bar button state
+    if (m_navigationBar) {
+        m_navigationBar->setSideNotesChecked(m_sideNotesPanelVisible);
+    }
 
     // Sync state when showing
     if (m_sideNotesPanelVisible) {

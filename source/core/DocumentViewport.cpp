@@ -4963,7 +4963,16 @@ void DocumentViewport::endPanGesture()
     emit panChanged(m_panOffset);
     emitScrollFractions();
     
-    // Trigger full re-render
+    // SP2: Gate rendering to cache-only for the first repaint after gesture ends.
+    // This prevents synchronous PDF rendering on the UI thread when the cached
+    // frame is cleared. The settle timer will trigger async preload and a final
+    // clean repaint once preloading completes.
+    m_scrollActive = true;
+    if (m_scrollSettleTimer) {
+        m_scrollSettleTimer->start();
+    }
+    
+    // Trigger repaint (cache-only, no synchronous PDF rendering)
     update();
     
     // Update PDF cache capacity (visible pages may have changed)
