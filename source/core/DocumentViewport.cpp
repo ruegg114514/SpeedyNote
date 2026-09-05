@@ -14087,12 +14087,44 @@ void DocumentViewport::applySelectionTransform()
         }
         layer->invalidateStrokeCache();
 
-        // Add transformed strokes -- each may land on a different page
+        // Add transformed strokes -- each may land on a different page.
+        // NOTE: the selection can contain notes-column strokes as well as page
+        // strokes. Notes strokes are marked by originalIndices == -1 and must
+        // stay in the notes column: remove the source notes strokes and write
+        // the transformed ones back as notes strokes instead of spilling them
+        // into the page VectorLayer (otherwise the drag copies rather than moves).
         QPointF srcOrigin = pagePosition(srcPage);
-        for (const VectorStroke& stroke : m_lassoSelection.selectedStrokes) {
+        const qreal pageW = page->size.width();
+        QVector<int> notesSrcToRemove;      // indices into m_sideNotesStrokes[notesPage]
+        int notesSeq = 0;
+        for (int k = 0; k < m_lassoSelection.selectedStrokes.size(); ++k) {
+            const VectorStroke& stroke = m_lassoSelection.selectedStrokes[k];
+            const bool isNotesStroke = (k < m_lassoSelection.originalIndices.size()
+                                        && m_lassoSelection.originalIndices[k] == -1);
             VectorStroke transformedStroke = stroke;
             transformStrokePoints(transformedStroke, transform);
             transformedStroke.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+            if (isNotesStroke && m_lassoNotesPage >= 0
+                && notesSeq < m_lassoNotesIndices.size()) {
+                // Record this source notes stroke for removal below.
+                notesSrcToRemove.append(m_lassoNotesIndices[notesSeq]);
+                ++notesSeq;
+                // Keep it a notes stroke: convert page-local back to notes-local
+                // and store it in the notes column it was dragged from.
+                for (auto& pt : transformedStroke.points)
+                    pt.pos.rx() -= pageW;
+                transformedStroke.updateBoundingBox();
+                m_sideNotesStrokes[m_lassoNotesPage].append(transformedStroke);
+                UndoAction::StrokeSegment seg;
+                seg.pageIndex = m_lassoNotesPage;
+                seg.stroke = transformedStroke;
+                seg.fromNotes = true;
+                undoAction.addedSegments.append(seg);
+                continue;
+            }
+
+            // --- Page-layer stroke (original behaviour) ---
             transformedStroke.updateBoundingBox();
 
             // Determine destination page by stroke centre in document coords
@@ -14132,6 +14164,29 @@ void DocumentViewport::applySelectionTransform()
             seg.pageIndex = destPage;
             seg.stroke = transformedStroke;
             undoAction.addedSegments.append(seg);
+        }
+
+        // Remove the original notes strokes that were moved, so a notes drag is
+        // a move and not an (implicit) copy.
+        if (!notesSrcToRemove.isEmpty() && m_sideNotesStrokes.contains(m_lassoNotesPage)) {
+            QVector<VectorStroke>& ns = m_sideNotesStrokes[m_lassoNotesPage];
+            std::sort(notesSrcToRemove.begin(), notesSrcToRemove.end(), std::greater<int>());
+            for (int idx : notesSrcToRemove) {
+                if (idx >= 0 && idx < ns.size()) {
+                    UndoAction::StrokeSegment seg;
+                    seg.pageIndex = m_lassoNotesPage;
+                    seg.stroke = ns[idx];
+                    seg.fromNotes = true;
+                    undoAction.removedSegments.append(seg);
+                    ns.removeAt(idx);
+                }
+            }
+            if (ns.isEmpty())
+                m_sideNotesStrokes.remove(m_lassoNotesPage);
+            m_document->markPageDirty(m_lassoNotesPage);
+            if (!m_document->isEdgeless())
+                emit pageModified(m_lassoNotesPage);
+            emit documentModified();
         }
 
         m_document->markPageDirty(srcPage);
@@ -18519,8 +18574,20 @@ void DocumentViewport::undo()
             default: break;
         }
     } else if (action.type == UndoAction::TransformSelection) {
-        // Remove added strokes
+        // Remove added strokes (notes strokes live outside any VectorLayer)
         for (const auto& seg : action.addedSegments) {
+            if (seg.fromNotes) {
+                if (m_sideNotesStrokes.contains(seg.pageIndex)) {
+                    QVector<VectorStroke>& notes = m_sideNotesStrokes[seg.pageIndex];
+                    for (int i = notes.size() - 1; i >= 0; --i) {
+                        if (notes[i].id == seg.stroke.id) { notes.removeAt(i); break; }
+                    }
+                    if (notes.isEmpty()) m_sideNotesStrokes.remove(seg.pageIndex);
+                }
+                if (m_document && !m_document->isEdgeless())
+                    m_document->markPageDirty(seg.pageIndex);
+                continue;
+            }
             Page* c = getContainer(m_document, seg, false);
             if (!c) continue;
             VectorLayer* layer = c->layer(action.layerIndex);
@@ -18530,6 +18597,12 @@ void DocumentViewport::undo()
         }
         // Restore removed strokes
         for (const auto& seg : action.removedSegments) {
+            if (seg.fromNotes) {
+                m_sideNotesStrokes[seg.pageIndex].append(seg.stroke);
+                if (m_document && !m_document->isEdgeless())
+                    m_document->markPageDirty(seg.pageIndex);
+                continue;
+            }
             Page* c = getContainer(m_document, seg, true);
             if (!c) continue;
             while (c->layerCount() <= action.layerIndex)
@@ -18981,8 +19054,20 @@ void DocumentViewport::redo()
             default: break;
         }
     } else if (action.type == UndoAction::TransformSelection) {
-        // Remove original strokes (redo the remove)
+        // Remove original strokes (redo the remove; notes live outside VectorLayer)
         for (const auto& seg : action.removedSegments) {
+            if (seg.fromNotes) {
+                if (m_sideNotesStrokes.contains(seg.pageIndex)) {
+                    QVector<VectorStroke>& notes = m_sideNotesStrokes[seg.pageIndex];
+                    for (int i = notes.size() - 1; i >= 0; --i) {
+                        if (notes[i].id == seg.stroke.id) { notes.removeAt(i); break; }
+                    }
+                    if (notes.isEmpty()) m_sideNotesStrokes.remove(seg.pageIndex);
+                }
+                if (m_document && !m_document->isEdgeless())
+                    m_document->markPageDirty(seg.pageIndex);
+                continue;
+            }
             Page* c = getContainer(m_document, seg, false);
             if (!c) continue;
             VectorLayer* layer = c->layer(action.layerIndex);
@@ -18992,6 +19077,12 @@ void DocumentViewport::redo()
         }
         // Add transformed strokes (redo the add)
         for (const auto& seg : action.addedSegments) {
+            if (seg.fromNotes) {
+                m_sideNotesStrokes[seg.pageIndex].append(seg.stroke);
+                if (m_document && !m_document->isEdgeless())
+                    m_document->markPageDirty(seg.pageIndex);
+                continue;
+            }
             Page* c = getContainer(m_document, seg, true);
             if (!c) continue;
             while (c->layerCount() <= action.layerIndex)
