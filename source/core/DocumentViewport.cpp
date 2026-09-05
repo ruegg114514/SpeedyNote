@@ -6902,74 +6902,96 @@ void DocumentViewport::splitStrokeAtNotesBoundary(int pageIndex,
     }
 
     const auto rawInNotes = [pageW](qreal x) { return x > pageW; };
+    const auto newId = []() {
+        return QUuid::createUuid().toString(QUuid::WithoutBraces);
+    };
 
-    VectorStroke pdf;
-    VectorStroke notes;
-    pdf.id = m_currentStroke.id;
-    pdf.color = m_currentStroke.color;
-    pdf.baseThickness = m_currentStroke.baseThickness;
-    notes.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    notes.color = m_currentStroke.color;
-    notes.baseThickness = m_currentStroke.baseThickness;
+    // Multiple boundary crossings (page -> notes -> page, and so on) must NOT
+    // connect the exit and re-entry points with a line that cuts straight across
+    // the divider. So instead of building one page + one notes segment (which
+    // glued the two boundary points together), we emit one segment per contiguous
+    // run, flushing at every crossing. Each run shares the interpolated boundary
+    // point with its neighbour so adjacent runs literally touch and the printed
+    // line stays continuous.
+    QVector<QVector<StrokePoint>> pdfRuns;
+    QVector<QVector<StrokePoint>> notesRuns;
 
-    // Seed with the first point, routing it to the side it starts on.
-    bool firstInNotes = rawInNotes(m_currentStroke.points[0].pos.x());
+    QVector<StrokePoint> curRun;
+    bool curInNotes = rawInNotes(m_currentStroke.points[0].pos.x());
     StrokePoint seed = m_currentStroke.points[0];
-    if (firstInNotes) {
-        seed.pos.rx() -= pageW;
-        notes.points.append(seed);
-    } else {
-        pdf.points.append(seed);
-    }
+    if (curInNotes) seed.pos.rx() -= pageW;
+    curRun.append(seed);
 
-    bool prevInNotes = firstInNotes;
+    const auto flushRun = [&]() {
+        if (curRun.isEmpty()) return;
+        if (curInNotes) notesRuns.append(curRun);
+        else pdfRuns.append(curRun);
+        curRun.clear();
+    };
+
     for (int i = 1; i < n; ++i) {
         const StrokePoint& cur = m_currentStroke.points[i];
-        const bool curInNotes = rawInNotes(cur.pos.x());
+        const bool inNotes = rawInNotes(cur.pos.x());
 
-        if (curInNotes == prevInNotes) {
+        if (inNotes == curInNotes) {
             StrokePoint p = cur;
-            if (curInNotes) p.pos.rx() -= pageW;
-            if (curInNotes) notes.points.append(p); else pdf.points.append(p);
+            if (inNotes) p.pos.rx() -= pageW;
+            curRun.append(p);
             continue;
         }
 
-        // Boundary crossing: interpolate the shared point at x = pageW so both
-        // segments literally touch, keeping the printed line continuous. Also
-        // interpolate pressure instead of carrying it so the seam has no visible
-        // thickness notch right on the divider line.
+        // Boundary crossing: interpolate the shared point at x = pageW so the two
+        // neighbouring runs meet exactly (no gap, no overlap). Pressure is
+        // interpolated too so the seam has no thickness notch on the divider line.
+        // The same formula works in both directions (page->notes and notes->page)
+        // because numerator and denominator change sign together.
         const StrokePoint& p0 = m_currentStroke.points[i - 1];
-        qreal t = (p0.pos.x() >= pageW) ? 0.0
-                : (pageW - p0.pos.x()) / qMax<qreal>(1e-6, cur.pos.x() - p0.pos.x());
+        const qreal denom = cur.pos.x() - p0.pos.x();
+        qreal t = (qAbs(denom) < 1e-6) ? 0.0 : (pageW - p0.pos.x()) / denom;
         t = qBound<qreal>(0.0, t, 1.0);
 
-        StrokePoint bp;                          // page-local boundary point
+        StrokePoint bp;                          // boundary point at x = pageW
         bp.pos = p0.pos + (cur.pos - p0.pos) * t;
         bp.pressure = p0.pressure + (cur.pressure - p0.pressure) * t;
         bp.timestamp = cur.timestamp;
 
-        StrokePoint bpPage = bp;
-        bpPage.pos.rx() = pageW;                 // page side, at the edge
-        pdf.points.append(bpPage);
+        // Close the current run at the boundary (in its local coordinates) and
+        // open the opposite run starting on that same boundary point.
+        StrokePoint bpLocal = bp;
+        if (curInNotes) bpLocal.pos.rx() -= pageW;
+        curRun.append(bpLocal);
+        flushRun();
 
-        StrokePoint bpNotes = bp;
-        bpNotes.pos.rx() -= pageW;               // notes side, at its left edge
-        notes.points.append(bpNotes);
+        curInNotes = !curInNotes;
+        StrokePoint bpNext = bp;
+        if (curInNotes) bpNext.pos.rx() -= pageW;
+        curRun.append(bpNext);
 
         StrokePoint curFit = cur;
         if (curInNotes) curFit.pos.rx() -= pageW;
-        if (curInNotes) notes.points.append(curFit); else pdf.points.append(curFit);
-
-        prevInNotes = curInNotes;
+        curRun.append(curFit);
     }
+    flushRun();
 
-    if (pdf.points.size() >= 2) {
-        pdf.updateBoundingBox();
-        pdfParts.append(pdf);
+    for (const QVector<StrokePoint>& run : pdfRuns) {
+        if (run.size() < 2) continue;
+        VectorStroke s;
+        s.id = newId();
+        s.color = m_currentStroke.color;
+        s.baseThickness = m_currentStroke.baseThickness;
+        s.points = run;
+        s.updateBoundingBox();
+        pdfParts.append(s);
     }
-    if (notes.points.size() >= 2) {
-        notes.updateBoundingBox();
-        notesParts.append(notes);
+    for (const QVector<StrokePoint>& run : notesRuns) {
+        if (run.size() < 2) continue;
+        VectorStroke s;
+        s.id = newId();
+        s.color = m_currentStroke.color;
+        s.baseThickness = m_currentStroke.baseThickness;
+        s.points = run;
+        s.updateBoundingBox();
+        notesParts.append(s);
     }
 }
 
@@ -13883,8 +13905,30 @@ void DocumentViewport::updateSelectionTransform(const QPointF& viewportPos)
     }
     
     // P2: Dirty region update - only repaint selection area + handles
-    // Calculate visual bounds in viewport coordinates
+    // Also repaint the SOURCE (original, pre-move) region. The selected strokes
+    // are excluded from the background snapshot, but the snapshot is only ever
+    // blitted into the regions we repaint; if we skip the source region its old
+    // pixels stay on screen until the release-time full repaint. That is the
+    // "the original lingers during the drag and only disappears on confirm".
     QRectF visualBoundsVp = getSelectionVisualBounds();
+    if (m_lassoSelection.isValid() && !m_transformStartBounds.isEmpty()) {
+        QPolygonF src;
+        src << m_transformStartBounds.topLeft() << m_transformStartBounds.topRight()
+            << m_transformStartBounds.bottomRight() << m_transformStartBounds.bottomLeft();
+        QPolygonF srcVp;
+        for (const QPointF& c : src) {
+            if (m_document && m_document->isEdgeless()) {
+                srcVp << documentToViewport(c);
+            } else {
+                srcVp << documentToViewport(c + pagePosition(m_lassoSelection.sourcePageIndex));
+            }
+        }
+        if (!srcVp.isEmpty()) {
+            QRectF s = srcVp.boundingRect();
+            s.adjust(-HANDLE_HIT_SIZE, -HANDLE_HIT_SIZE, HANDLE_HIT_SIZE, HANDLE_HIT_SIZE);
+            visualBoundsVp = visualBoundsVp.united(s);
+        }
+    }
     if (!visualBoundsVp.isEmpty()) {
         // Expand for handles and rotation handle offset
         visualBoundsVp.adjust(
