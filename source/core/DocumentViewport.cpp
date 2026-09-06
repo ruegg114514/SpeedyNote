@@ -20854,12 +20854,14 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
     if (m_sideNotesStrokes.contains(pageIdx)) {
         painter.save();
         painter.translate(page->size.width(), 0);
-        // During a selection transform, the "background" is a snapshot that must
-        // NOT contain the selected notes strokes - otherwise dragging shows the
-        // source lingering at its origin (looks like a copy instead of a move).
-        // Skip selected notes strokes while the transform is active.
+        // While the lasso selection is active we must NOT paint the selected
+        // notes strokes as part of the column background. During a drag the
+        // overlay already draws them at the moved position (source would linger
+        // at its origin); in the adopted (post-release, pre-confirm) state the
+        // overlay still draws the moved copy, so leaving a note in the column
+        // here makes the original reappear at its start point until confirm.
         QSet<QString> hiddenIds;
-        if (m_isTransformingSelection && m_lassoSelection.isValid()
+        if (m_lassoSelection.isValid()
             && pageIdx == m_lassoNotesPage) {
             for (int k = 0; k < m_lassoSelection.selectedStrokes.size(); ++k) {
                 if (k < m_lassoSelection.originalIndices.size()
