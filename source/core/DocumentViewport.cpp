@@ -14079,6 +14079,53 @@ void DocumentViewport::transformStrokePoints(VectorStroke& stroke, const QTransf
     stroke.updateBoundingBox();
 }
 
+namespace {
+
+// Split a polyline (document coordinates) at the vertical line x = bx into the
+// left and right parts. Both parts receive the same interpolated boundary point
+// at x = bx, so they literally touch (no gap). Mirrors the draw-time cross
+// boundary split so a moved stroke that ends up straddling the page/notes
+// divider is committed into both regions instead of one half being clipped by
+// the page-size stroke cache (which is what made the notes-column half of a
+// PDF-originated stroke invisible when it was dropped at the divider).
+void splitDocumentStrokeAtX(const QVector<StrokePoint>& doc, qreal bx,
+                            QVector<StrokePoint>& left, QVector<StrokePoint>& right)
+{
+    left.clear();
+    right.clear();
+    if (doc.isEmpty()) return;
+
+    const auto onLeft = [bx](qreal x) { return x <= bx + 1e-6; };
+    StrokePoint seed = doc[0];
+    if (onLeft(seed.pos.x())) left.append(seed); else right.append(seed);
+
+    const int n = doc.size();
+    for (int i = 1; i < n; ++i) {
+        const StrokePoint& c = doc[i];
+        const bool cLeft = onLeft(c.pos.x());
+        const bool pLeft = onLeft(doc[i - 1].pos.x());
+        if (cLeft == pLeft) {
+            (cLeft ? left : right).append(c);
+            continue;
+        }
+        // Crossing: interpolate the shared boundary point at x = bx.
+        const StrokePoint& p0 = doc[i - 1];
+        const qreal denom = c.pos.x() - p0.pos.x();
+        qreal t = qAbs(denom) < 1e-6 ? 0.0 : (bx - p0.pos.x()) / denom;
+        t = qBound<qreal>(0.0, t, 1.0);
+        StrokePoint bp;
+        bp.pos = p0.pos + (c.pos - p0.pos) * t;
+        bp.pressure = p0.pressure + (c.pressure - p0.pressure) * t;
+        bp.timestamp = c.timestamp;
+        // Add the shared point to both sides so they meet exactly at the divider.
+        left.append(bp);
+        right.append(bp);
+        (cLeft ? left : right).append(c);
+    }
+}
+
+} // namespace
+
 void DocumentViewport::applySelectionTransform()
 {
     if (!m_lassoSelection.isValid() || !m_document) {
@@ -14211,43 +14258,86 @@ void DocumentViewport::applySelectionTransform()
             Page* dp = m_document->page(destPage);
             if (!dp) continue;
 
-            if (destNotes) {
-                // Store as a notes stroke in destPage's column (notes-local).
-                QPointF dstNotesOrigin = pagePosition(destPage) + QPointF(dp->size.width(), 0);
-                for (auto& pt : transformedStroke.points)
-                    pt.pos = pt.pos + srcOrigin - dstNotesOrigin;   // src page-local -> dest notes-local
-                transformedStroke.updateBoundingBox();
-                m_sideNotesStrokes[destPage].append(transformedStroke);
+            const QPointF dstOrigin = pagePosition(destPage);
+            const qreal pw = dp->size.width();
+            const qreal bx = dstOrigin.x() + pw;
+            const QPointF dstNotesOrigin = dstOrigin + QPointF(pw, 0);
+            const bool hasNotes = sideNotesWidthFor(destPage) > 0.0;
+
+            // Convert the (src page-local) transformed stroke into document space.
+            QVector<StrokePoint> docPts;
+            docPts.reserve(transformedStroke.points.size());
+            for (const StrokePoint& p : transformedStroke.points) {
+                StrokePoint d = p;
+                d.pos = d.pos + srcOrigin;
+                docPts.append(d);
+            }
+
+            // Append one new page-layer stroke (converted to dest page-local).
+            auto appendPagePart = [&](QVector<StrokePoint>& pts) {
+                if (pts.size() < 2) return;
+                VectorStroke s;
+                s.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                s.color = transformedStroke.color;
+                s.baseThickness = transformedStroke.baseThickness;
+                s.points = pts;
+                for (auto& pt : s.points) pt.pos -= dstOrigin;
+                s.updateBoundingBox();
+                while (dp->layerCount() <= m_lassoSelection.sourceLayerIndex)
+                    dp->addLayer(QString("Layer %1").arg(dp->layerCount() + 1));
+                VectorLayer* dstLayer = dp->layer(m_lassoSelection.sourceLayerIndex);
+                if (!dstLayer) return;
+                dstLayer->addStroke(s);
+                dstLayer->invalidateStrokeCache();
+                m_document->markPageDirty(destPage);
+                UndoAction::StrokeSegment seg;
+                seg.pageIndex = destPage;
+                seg.stroke = s;
+                undoAction.addedSegments.append(seg);
+            };
+
+            // Append one new notes-column stroke (converted to dest notes-local).
+            auto appendNotesPart = [&](QVector<StrokePoint>& pts) {
+                if (pts.size() < 2) return;
+                VectorStroke s;
+                s.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                s.color = transformedStroke.color;
+                s.baseThickness = transformedStroke.baseThickness;
+                s.points = pts;
+                for (auto& pt : s.points) pt.pos -= dstNotesOrigin;
+                s.updateBoundingBox();
+                m_sideNotesStrokes[destPage].append(s);
                 m_document->markPageDirty(destPage);
                 if (!m_document->isEdgeless()) emit pageModified(destPage);
                 UndoAction::StrokeSegment seg;
                 seg.pageIndex = destPage;
-                seg.stroke = transformedStroke;
+                seg.stroke = s;
                 seg.fromNotes = true;
                 undoAction.addedSegments.append(seg);
-                continue;
+            };
+
+            // If this stroke (in document space) straddles destPage's right edge
+            // (the page/notes divider), commit the page part and the notes part
+            // separately. Routing the whole stroke by its centre alone would make
+            // the half that falls beyond the page edge invisible, because the
+            // page-layer render cache clips at the page width.
+            if (hasNotes) {
+                QVector<StrokePoint> left, right;
+                splitDocumentStrokeAtX(docPts, bx, left, right);
+                if (!left.isEmpty() && !right.isEmpty()) {
+                    appendPagePart(left);
+                    appendNotesPart(right);
+                    continue;
+                }
             }
 
-            // Store as a page-layer stroke on destPage (page-local).
-            if (destPage != srcPage) {
-                QPointF dstOrigin = pagePosition(destPage);
-                QPointF offset = srcOrigin - dstOrigin;
-                for (auto& pt : transformedStroke.points)
-                    pt.pos += offset;
-                transformedStroke.updateBoundingBox();
+            // No boundary crossing: store the whole stroke to the region its
+            // centre lands in (existing behaviour).
+            if (destNotes) {
+                appendNotesPart(docPts);
+            } else {
+                appendPagePart(docPts);
             }
-            while (dp->layerCount() <= m_lassoSelection.sourceLayerIndex)
-                dp->addLayer(QString("Layer %1").arg(dp->layerCount() + 1));
-            VectorLayer* dstLayer = dp->layer(m_lassoSelection.sourceLayerIndex);
-            if (!dstLayer) continue;
-            dstLayer->addStroke(transformedStroke);
-            dstLayer->invalidateStrokeCache();
-            m_document->markPageDirty(destPage);
-
-            UndoAction::StrokeSegment seg;
-            seg.pageIndex = destPage;
-            seg.stroke = transformedStroke;
-            undoAction.addedSegments.append(seg);
         }
 
         // Remove the original notes strokes that were moved, so a notes drag is
