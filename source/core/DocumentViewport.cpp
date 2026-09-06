@@ -20995,11 +20995,31 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
     // Notes background - white (explicit user requirement)
     painter.fillRect(notesRect, Qt::white);
 
-    // Subtle dot grid pattern for notes area
+    // Subtle dot grid pattern for notes area.
+    // IMPORTANT (performance): the grid loop must only cover the currently
+    // visible part of the column. During a pan the gesture fast path repaints
+    // just the thin strip that entered the viewport (clipRegion), but drawing
+    // points for the FULL column height every frame was a serialized per-frame
+    // cost on the raster thread - it made scrolling over notes regions visibly
+    // stutter even though the CPU average looked flat. Clamping to the clip
+    // turns the per-frame cost into roughly "strip size" instead of "column
+    // size". Start at the first grid line inside the clip so dots stay aligned
+    // with the full-column grid.
     painter.setPen(QPen(QColor(205, 214, 226), 0.5 / m_zoomLevel));
     qreal gridSpacing = 20.0;
-    for (qreal x = gridSpacing; x < notesW; x += gridSpacing) {
-        for (qreal y = gridSpacing; y < page->size.height(); y += gridSpacing) {
+    QRectF gridClip(0, 0, notesW, page->size.height());
+    // clipBoundingRect() is in logical (painter) coordinates, i.e. the same
+    // page-local/document space the grid points are drawn in, so intersect
+    // directly - no manual inverse transform needed.
+    const QRectF clip = painter.clipBoundingRect();
+    if (!clip.isNull() && !clip.isEmpty()) {
+        gridClip = gridClip.intersected(clip);
+    }
+    if (gridClip.isEmpty() || gridClip.width() <= 0 || gridClip.height() <= 0) return;
+    for (qreal x = gridSpacing * qMax<qreal>(1, qCeil(gridClip.left() / gridSpacing));
+         x < qMin<qreal>(notesW, gridClip.right()); x += gridSpacing) {
+        for (qreal y = gridSpacing * qMax<qreal>(1, qCeil(gridClip.top() / gridSpacing));
+             y < qMin<qreal>(page->size.height(), gridClip.bottom()); y += gridSpacing) {
             painter.drawPoint(QPointF(x, y));
         }
     }
