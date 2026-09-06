@@ -20751,17 +20751,33 @@ bool DocumentViewport::addSideNotesToCurrentPage()
 int DocumentViewport::notesDividerPageAtViewport(const QPointF& vpPos) const
 {
     if (!m_document || m_document->isEdgeless()) return -1;
-    const qreal hitPx = 6.0;
     const qreal zoom = m_zoomLevel > 0.0 ? m_zoomLevel : 1.0;
+    const qreal hitPx = 6.0;          // thin-line grab (desktop precision)
+    // Handle (grip) geometry in viewport pixels. Minimums keep it a usable
+    // touch target even when zoomed out, and it scales with the drawn grip.
+    const qreal handleHalfW = qMax(18.0 * zoom, 22.0); // half-width (px)
+    const qreal handleH = qMax(44.0 * zoom, 50.0);     // height (px)
+    const qreal handleTop = qMax(14.0 * zoom, 8.0);    // below page top (px)
     for (int i = 0; i < m_document->pageCount(); ++i) {
         if (sideNotesWidthFor(i) <= 0.0) continue;
         Page* page = m_document->page(i);
         if (!page || page->size.width() <= 0.0) continue;
         QPointF pos = pagePosition(i);
-        qreal divX = (pos.x() + page->size.width() - m_panOffset.x()) * zoom;
+        const qreal divX = (pos.x() + page->size.width() - m_panOffset.x()) * zoom;
+        // Visibility/UX: the resize handle pinned to the top of the divider is
+        // the primary target. Its box is deliberately large so it is easy to
+        // hit with a finger or stylus on a tablet (the old 6px line was not).
+        {
+            const qreal topY = (pos.y() - m_panOffset.y()) * zoom + handleTop;
+            QRectF grip(divX - handleHalfW, topY, handleHalfW * 2, handleH);
+            grip.adjust(4.0, 4.0, 4.0, 4.0);
+            if (grip.contains(vpPos)) return i;
+        }
+        // Precision fallback: the thin divider line, slightly extended outside
+        // the page vertically so the grab does not require top precision.
         if (qAbs(divX - vpPos.x()) > hitPx) continue;
-        qreal top = (pos.y() - m_panOffset.y()) * zoom;
-        qreal bottom = (pos.y() + page->size.height() - m_panOffset.y()) * zoom;
+        const qreal top = (pos.y() - m_panOffset.y()) * zoom - 20.0;
+        const qreal bottom = (pos.y() + page->size.height() - m_panOffset.y()) * zoom + 20.0;
         if (vpPos.y() < top || vpPos.y() > bottom) continue;
         return i;
     }
@@ -20948,6 +20964,39 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
     // Bold divider line between page and notes (clearly visible on white)
     painter.setPen(QPen(QColor(120, 140, 180), 2.0 / m_zoomLevel));
     painter.drawLine(QPointF(page->size.width(), 0), QPointF(page->size.width(), page->size.height()));
+
+    // A visible resize grip pinned to the top of the divider. On touch/tablet
+    // the old 6px line was far too thin to grab; this gives the layout a clear,
+    // finger-sized handle (highlighted while the column is being resized).
+    {
+        const qreal z = m_zoomLevel > 0.0 ? m_zoomLevel : 1.0;
+        const qreal dx = page->size.width();
+        // Sizes kept in viewport px (mins make it finger-friendlier when
+        // zoomed out), converted back to pixel-space via z here since the
+        // painter is in document units.
+        const qreal gripWpx = qMax(18.0 * z, 20.0);
+        const qreal gripHpx = qMax(44.0 * z, 48.0);
+        const qreal gripW = gripWpx / z;
+        const qreal gripH = gripHpx / z;
+        const qreal gripTop = qMax(14.0, 8.0 / z);
+        painter.save();
+        QColor gripColor = (m_resizingNotesPage == pageIdx)
+            ? QColor(76, 104, 168) : QColor(158, 172, 198);
+        painter.setBrush(gripColor);
+        painter.setPen(QPen(QColor(255, 255, 255), 1.5));
+        painter.drawRoundedRect(
+            QRectF(dx - gripW / 2.0, gripTop, gripW, gripH), 5.0 / z, 5.0 / z);
+        painter.setPen(QPen(QColor(255, 255, 255), 1.6));
+        const qreal cx = dx;
+        qreal ny = gripTop + 12.0 / z;
+        const qreal span = 5.0 / z;
+        const qreal step = gripH / 3.0;
+        for (int g = 0; g < 3; ++g) {
+            painter.drawLine(QPointF(cx - span, ny), QPointF(cx + span, ny));
+            ny += step;
+        }
+        painter.restore();
+    }
 
     // Render committed notes strokes for this page. Strokes are stored in
     // notes-column-local coordinates (origin at the column's left edge), so
