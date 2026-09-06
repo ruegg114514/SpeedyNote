@@ -14081,34 +14081,46 @@ void DocumentViewport::transformStrokePoints(VectorStroke& stroke, const QTransf
 
 namespace {
 
-// Split a polyline (document coordinates) at the vertical line x = bx into the
-// left and right parts. Both parts receive the same interpolated boundary point
-// at x = bx, so they literally touch (no gap). Mirrors the draw-time cross
-// boundary split so a moved stroke that ends up straddling the page/notes
-// divider is committed into both regions instead of one half being clipped by
-// the page-size stroke cache (which is what made the notes-column half of a
-// PDF-originated stroke invisible when it was dropped at the divider).
+// Split a polyline (document coordinates) at the vertical line x = bx. Emits
+// one left run and one right run per contiguous crossing. Each run shares its
+// interpolated boundary point with the neighbouring run so adjacent segments
+// touch exactly at x = bx (no gap). Flushing per run matters: a moved stroke
+// that weaves across the divider more than once must not have its disjoint
+// page-side segments joined by a straight line drawn straight across the notes
+// region (the divider-connector bug), and the page/notes parts must both be
+// committed instead of the half beyond the page edge being clipped by the
+// page-size stroke cache.
 void splitDocumentStrokeAtX(const QVector<StrokePoint>& doc, qreal bx,
-                            QVector<StrokePoint>& left, QVector<StrokePoint>& right)
+                            QVector<QVector<StrokePoint>>& leftRuns,
+                            QVector<QVector<StrokePoint>>& rightRuns)
 {
-    left.clear();
-    right.clear();
+    leftRuns.clear();
+    rightRuns.clear();
     if (doc.isEmpty()) return;
 
     const auto onLeft = [bx](qreal x) { return x <= bx + 1e-6; };
+
+    QVector<StrokePoint> cur;
+    bool curLeft = onLeft(doc[0].pos.x());
     StrokePoint seed = doc[0];
-    if (onLeft(seed.pos.x())) left.append(seed); else right.append(seed);
+    cur.append(seed);
+
+    const auto flush = [&]() {
+        if (cur.isEmpty()) return;
+        if (curLeft) leftRuns.append(cur);
+        else rightRuns.append(cur);
+        cur.clear();
+    };
 
     const int n = doc.size();
     for (int i = 1; i < n; ++i) {
         const StrokePoint& c = doc[i];
         const bool cLeft = onLeft(c.pos.x());
-        const bool pLeft = onLeft(doc[i - 1].pos.x());
-        if (cLeft == pLeft) {
-            (cLeft ? left : right).append(c);
+        if (cLeft == curLeft) {
+            cur.append(c);
             continue;
         }
-        // Crossing: interpolate the shared boundary point at x = bx.
+        // Boundary crossing: interpolate the shared point at x = bx.
         const StrokePoint& p0 = doc[i - 1];
         const qreal denom = c.pos.x() - p0.pos.x();
         qreal t = qAbs(denom) < 1e-6 ? 0.0 : (bx - p0.pos.x()) / denom;
@@ -14117,11 +14129,15 @@ void splitDocumentStrokeAtX(const QVector<StrokePoint>& doc, qreal bx,
         bp.pos = p0.pos + (c.pos - p0.pos) * t;
         bp.pressure = p0.pressure + (c.pressure - p0.pressure) * t;
         bp.timestamp = c.timestamp;
-        // Add the shared point to both sides so they meet exactly at the divider.
-        left.append(bp);
-        right.append(bp);
-        (cLeft ? left : right).append(c);
+        // Close the current run at the boundary, then open the opposite run
+        // starting on the same boundary point.
+        cur.append(bp);
+        flush();
+        curLeft = !curLeft;
+        cur.append(bp);
+        cur.append(c);
     }
+    flush();
 }
 
 } // namespace
@@ -14316,24 +14332,20 @@ void DocumentViewport::applySelectionTransform()
                 undoAction.addedSegments.append(seg);
             };
 
-            // If this stroke (in document space) straddles destPage's right edge
-            // (the page/notes divider), commit the page part and the notes part
-            // separately. Routing the whole stroke by its centre alone would make
-            // the half that falls beyond the page edge invisible, because the
-            // page-layer render cache clips at the page width.
+            // If this page has a notes column, run the stroke (in document space)
+            // through the boundary splitter. It emits the page part(s) and notes
+            // part(s) separately - one run per contiguous crossing - so a stroke
+            // that straddles (or weaves across) the divider is committed to the
+            // right region(s) instead of half being clipped by the page-size
+            // stroke cache, and disjoint page-side segments are not joined by a
+            // connector line across the notes region. A stroke fully inside one
+            // region still yields exactly one part on that side.
             if (hasNotes) {
-                QVector<StrokePoint> left, right;
-                splitDocumentStrokeAtX(docPts, bx, left, right);
-                if (!left.isEmpty() && !right.isEmpty()) {
-                    appendPagePart(left);
-                    appendNotesPart(right);
-                    continue;
-                }
-            }
-
-            // No boundary crossing: store the whole stroke to the region its
-            // centre lands in (existing behaviour).
-            if (destNotes) {
+                QVector<QVector<StrokePoint>> leftRuns, rightRuns;
+                splitDocumentStrokeAtX(docPts, bx, leftRuns, rightRuns);
+                for (QVector<StrokePoint>& r : leftRuns) appendPagePart(r);
+                for (QVector<StrokePoint>& r : rightRuns) appendNotesPart(r);
+            } else if (destNotes) {
                 appendNotesPart(docPts);
             } else {
                 appendPagePart(docPts);
