@@ -4811,7 +4811,7 @@ private:
     void continueNotesStroke(const PointerEvent& pe);
     void endNotesStroke();
     void drawNotesStroke(QPainter& painter, const VectorStroke& stroke);
-    // Draws the notes column (background, grid, divider, committed strokes) of
+    // Draws the notes column (background, grid, drag handle, committed strokes) of
     // a page. Painter must already be translated to the page's top-left corner
     // (page-local coordinates).
     void drawNotesColumn(QPainter& painter, Page* page, int pageIdx);

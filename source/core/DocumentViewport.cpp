@@ -20796,8 +20796,9 @@ int DocumentViewport::notesDividerPageAtViewport(const QPointF& vpPos) const
 {
     if (!m_document || m_document->isEdgeless()) return -1;
     const qreal zoom = m_zoomLevel > 0.0 ? m_zoomLevel : 1.0;
-    const qreal hitPx = 6.0;          // thin-line grab (desktop precision)
-    // Handle (grip) geometry in viewport pixels. Minimums keep it a usable
+    // The only resize affordance is the drag handle: the old thin divider line
+    // grab was removed together with the divider-line display, so width can be
+    // changed by grabbing the handle (grip) alone. Minimums keep it a usable
     // touch target even when zoomed out, and it scales with the drawn grip.
     const qreal handleHalfW = qMax(18.0 * zoom, 22.0); // half-width (px)
     const qreal handleH = qMax(44.0 * zoom, 50.0);     // height (px)
@@ -20809,21 +20810,14 @@ int DocumentViewport::notesDividerPageAtViewport(const QPointF& vpPos) const
         QPointF pos = pagePosition(i);
         const qreal divX = (pos.x() + page->size.width() - m_panOffset.x()) * zoom;
         // Visibility/UX: the resize handle pinned to the top of the divider is
-        // the primary target. Its box is deliberately large so it is easy to
-        // hit with a finger or stylus on a tablet (the old 6px line was not).
+        // the sole grab target. Its box is deliberately large so it is easy to
+        // hit with a finger or stylus on a tablet.
         {
             const qreal topY = (pos.y() - m_panOffset.y()) * zoom + handleTop;
             QRectF grip(divX - handleHalfW, topY, handleHalfW * 2, handleH);
             grip.adjust(4.0, 4.0, 4.0, 4.0);
             if (grip.contains(vpPos)) return i;
         }
-        // Precision fallback: the thin divider line, slightly extended outside
-        // the page vertically so the grab does not require top precision.
-        if (qAbs(divX - vpPos.x()) > hitPx) continue;
-        const qreal top = (pos.y() - m_panOffset.y()) * zoom - 20.0;
-        const qreal bottom = (pos.y() + page->size.height() - m_panOffset.y()) * zoom + 20.0;
-        if (vpPos.y() < top || vpPos.y() > bottom) continue;
-        return i;
     }
     return -1;
 }
@@ -20958,6 +20952,11 @@ void DocumentViewport::endNotesStroke()
         if (m_document && !m_document->isEdgeless())
             m_document->markPageDirty(m_sideNotesActivePage);
         emit documentModified();
+
+        // Persist immediately so the committed stroke is not lost if the user
+        // toggles the notes column off/on (which used to clear the in-memory
+        // map before the stroke had ever been saved).
+        saveSideNotes();
     }
 
     m_isDrawingSideNotes = false;
@@ -21005,13 +21004,10 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
         }
     }
 
-    // Bold divider line between page and notes (clearly visible on white)
-    painter.setPen(QPen(QColor(120, 140, 180), 2.0 / m_zoomLevel));
-    painter.drawLine(QPointF(page->size.width(), 0), QPointF(page->size.width(), page->size.height()));
-
     // A visible resize grip pinned to the top of the divider. On touch/tablet
-    // the old 6px line was far too thin to grab; this gives the layout a clear,
-    // finger-sized handle (highlighted while the column is being resized).
+    // this is the ONLY way the column width is adjusted (the old thin divider
+    // line was removed, so no line is drawn here): the grip gives the layout a
+    // clear, finger-sized handle (highlighted while the column is resized).
     {
         const qreal z = m_zoomLevel > 0.0 ? m_zoomLevel : 1.0;
         const qreal dx = page->size.width();
