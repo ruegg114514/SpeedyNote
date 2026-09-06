@@ -8939,12 +8939,22 @@ void MainWindow::toggleSideNotesPanel()
     DocumentViewport* vp = currentViewport();
     if (!vp) return;
 
-    // Ensure the notes directory is wired so strokes & per-page widths persist.
+    // The notes strokes & per-page widths are loaded once when the document
+    // opens (MainWindow::loadSideNotes), so toggling ONLY shows/hides the
+    // column and must not reload them here. Calling vp->loadSideNotes() on
+    // every click would clear m_sideNotesStrokes and force a full repaint:
+    // a stroke the user just drew is still memory-only (it is committed to
+    // m_sideNotesStrokes without an immediate save), so clearing then
+    // reloading an empty file silently drops it, desyncs the notes undo
+    // history from the cleared map, and re-enters the render path on top of
+    // the just-toggled layout - which crashes on the close-then-reopen cycle
+    // described in the bug report. Only keep the directory wiring (cheap,
+    // so consecutive saves/dir may be set even if the open-time load was
+    // skipped for a doc that opened without notes).
     if (vp->document()) {
         const QString notesDir = vp->document()->notesPath();
         if (!notesDir.isEmpty()) {
             vp->setSideNotesDir(notesDir);
-            vp->loadSideNotes();
         }
     }
 
