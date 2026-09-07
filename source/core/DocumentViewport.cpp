@@ -21175,6 +21175,12 @@ void DocumentViewport::saveSideNotes()
 {
     if (m_sideNotesDir.isEmpty() || !m_document) return;
 
+    // Side-notes columns are a paged-document feature (see loadSideNotes).
+    // Never write side_notes.json for an edgeless canvas: it has no per-page
+    // columns to persist, and writing one would plant stale data that an
+    // older/newer build could later try to restore into an edgeless doc.
+    if (m_document->isEdgeless()) return;
+
     QDir dir(m_sideNotesDir);
     if (!dir.exists()) {
         dir.mkpath(".");
@@ -21230,6 +21236,20 @@ void DocumentViewport::saveSideNotes()
 void DocumentViewport::loadSideNotes()
 {
     if (m_sideNotesDir.isEmpty()) return;
+
+    // Side-notes columns are a paged-document concept. An edgeless document has
+    // no per-page layout (pageCount() == 0 because it is tile-based), so a
+    // side_notes.json left behind there would otherwise be loaded unchecked:
+    // the pageInRange() guard below treats pc <= 0 as "accept any index", which
+    // could plant notes columns keyed by indices that don't correspond to any
+    // real page and crash the first paint / layout. Rejecting edgeless here
+    // keeps a stale notes file from ever being restored into a canvas it was
+    // never meant for.
+    if (m_document && m_document->isEdgeless()) {
+        m_sideNotesWidths.clear();
+        m_sideNotesStrokes.clear();
+        return;
+    }
 
     QString filePath = m_sideNotesDir + "/side_notes.json";
     QFile file(filePath);
