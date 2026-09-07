@@ -9386,49 +9386,6 @@ void MainWindow::dropEvent(QDropEvent *event)
 
 #endif // !Q_OS_ANDROID && !Q_OS_IOS
 
-void MainWindow::saveSessionTabs()
-{
-    QSettings settings("SpeedyNote", "App");
-
-    if (!m_splitViewManager || !m_documentManager || m_splitViewManager->totalTabCount() == 0) {
-        settings.remove("session/lastOpenTabs");
-        settings.remove("session/activeTabIndex");
-        return;
-    }
-
-    QStringList paths;
-    m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
-        for (int i = 0; i < tm->tabCount(); ++i) {
-            Document* doc = tm->documentAt(i);
-            if (!doc) continue;
-
-            QString docPath = m_documentManager->documentPath(doc);
-            if (!docPath.isEmpty() && !m_documentManager->isUsingTempBundle(doc)) {
-                paths.append(QFileInfo(docPath).absoluteFilePath());
-            } else if (!doc->pdfPath().isEmpty()) {
-                paths.append(QFileInfo(doc->pdfPath()).absoluteFilePath());
-            }
-        }
-    });
-
-    if (paths.isEmpty()) {
-        settings.remove("session/lastOpenTabs");
-        settings.remove("session/activeTabIndex");
-    } else {
-        settings.setValue("session/lastOpenTabs", paths);
-
-        int globalActiveIndex = 0;
-        if (m_splitViewManager->activePane() == SplitViewManager::Right
-            && m_splitViewManager->rightTabManager()) {
-            globalActiveIndex = m_splitViewManager->leftTabManager()->tabCount()
-                              + m_splitViewManager->rightTabManager()->currentIndex();
-        } else if (m_splitViewManager->leftTabManager()) {
-            globalActiveIndex = m_splitViewManager->leftTabManager()->currentIndex();
-        }
-        settings.setValue("session/activeTabIndex", globalActiveIndex);
-    }
-}
-
 void MainWindow::closeEvent(QCloseEvent *event) {
     // ========== CHECK FOR UNSAVED DOCUMENTS ==========
     // Per-tab: silently persist ephemeral view state (edgeless last_position /
@@ -9535,9 +9492,6 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         
         // REMOVED MW7.4: Save bookmarks removed - bookmark implementation deleted
         // saveBookmarks();
-    
-    // Save session tabs for restore on next launch
-    saveSessionTabs();
 
     // Flush NotebookLibrary to disk before exiting
     // This ensures any pending addToRecent() calls are persisted, even if

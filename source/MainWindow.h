@@ -273,7 +273,6 @@ public:
      */
     static MainWindow* activeMainWindow();
     void switchToTabIndex(int index);  // Switch to a specific tab by index
-    void saveSessionTabs();  // Persist open tab paths to QSettings for session restore
 
     void switchPage(int pageNumber); // Made public for RecentNotebooksDialog
     // REMOVED MW7.7: switchPageWithDirection stub removed - replaced with switchPage calls
