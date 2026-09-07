@@ -21058,7 +21058,7 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
     // turns the per-frame cost into roughly "strip size" instead of "column
     // size". Start at the first grid line inside the clip so dots stay aligned
     // with the full-column grid.
-    painter.setPen(QPen(QColor(205, 214, 226), 0.5 / m_zoomLevel));
+    painter.setPen(QPen(QColor(205, 214, 226), 0.5 / (m_zoomLevel > 0.0 ? m_zoomLevel : 1.0)));
     qreal gridSpacing = 20.0;
     QRectF gridClip(0, 0, notesW, page->size.height());
     // clipBoundingRect() is in logical (painter) coordinates, i.e. the same
@@ -21286,6 +21286,17 @@ void DocumentViewport::loadSideNotes()
 
     QJsonObject root = doc.object();
     m_sideNotesWidths.clear();
+    m_sideNotesStrokes.clear();
+
+    // Defensive: remember how many paged documents this viewport currently has
+    // (0 if the document isn't ready yet). Bullseye for the "reopen same PDF"
+    // path: persisted notes may be keyed by page indices that no longer exist in
+    // the current PDF (file replaced / earlier or shorter version), so drop them
+    // here instead of letting rendering/undo/erase feed garbage indices.
+    const int pc = m_document ? m_document->pageCount() : 0;
+    const auto pageInRange = [pc](int pageIndex) {
+        return pageIndex >= 0 && (pc <= 0 || pageIndex < pc);
+    };
 
     // Per-page widths (new format). A page has a column iff its page key is
     // present with a width > 0.
@@ -21293,7 +21304,7 @@ void DocumentViewport::loadSideNotes()
     for (auto it = widthsObj.begin(); it != widthsObj.end(); ++it) {
         qreal w = it.value().toDouble(0.0);
         int pageIndex = it.key().toInt();
-        if (w > 0.0) {
+        if (w > 0.0 && pageInRange(pageIndex)) {
             m_sideNotesWidths[pageIndex] = w;
         }
     }
@@ -21305,16 +21316,17 @@ void DocumentViewport::loadSideNotes()
         const double legacyWidth = root.value("notesWidth").toDouble(200.0);
         if (legacyWidth > 0.0) {
             for (auto it = root.value("pages").toObject().begin(); it != root.value("pages").toObject().end(); ++it) {
-                m_sideNotesWidths[it.key().toInt()] = legacyWidth;
+                const int pageIndex = it.key().toInt();
+                if (pageInRange(pageIndex)) m_sideNotesWidths[pageIndex] = legacyWidth;
             }
         }
     }
 
-    m_sideNotesStrokes.clear();
     QJsonObject pagesObj = root.value("pages").toObject();
 
     for (auto it = pagesObj.begin(); it != pagesObj.end(); ++it) {
         int pageIndex = it.key().toInt();
+        if (!pageInRange(pageIndex)) continue;  // out of range for current doc
         QJsonArray strokesArr = it.value().toArray();
         QVector<VectorStroke> strokes;
 
@@ -21340,6 +21352,12 @@ void DocumentViewport::loadSideNotes()
             m_sideNotesStrokes[pageIndex] = strokes;
         }
     }
+
+    // Restored columns extend the content size that the layout cache was built
+    // with (the doc was just opened, so the cache predates any notes). Force a
+    // rebuild so page positions / scroll extents reflect the notes columns.
+    m_pageLayoutDirty = true;
+    ensurePageLayoutCache();
 
     update();
 }

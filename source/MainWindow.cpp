@@ -9938,9 +9938,16 @@ void MainWindow::openFileInNewTab(const QString &filePath)
 
     // Load any persisted in-canvas notes columns (per-page strokes & widths)
     // for this document, once the new viewport is fully constructed.
-    QTimer::singleShot(0, this, [this, tabIndex]() {
+    QTimer::singleShot(0, this, [this, tabIndex, doc]() {
         if (tabManager()) {
-            loadSideNotes(tabManager()->viewportAt(tabIndex));
+            DocumentViewport* vp = tabManager()->viewportAt(tabIndex);
+            // Only restore into the viewport that still owns the document we just
+            // opened. If the tab was closed (or the slot was reused by another
+            // tab) before this deferred call runs, loading those notes into a
+            // stale viewport could attach one document's notes to another.
+            if (vp && vp->document() == doc) {
+                loadSideNotes(vp);
+            }
         }
     });
 
