@@ -4062,29 +4062,15 @@ QString Document::notesPath() const
 {
     QString assets = assetsPath();
     if (assets.isEmpty()) {
-        // No bundle path - a raw PDF opened directly (not inside a .snb bundle).
-        // Give it a stable, writable per-PDF notes location under the app data
-        // dir, keyed by the PDF's absolute path. Reopening the same PDF then
-        // resolves the same folder, so annotations made on it are restored
-        // instead of opening a blank document. Hashing avoids long/illegal
-        // filenames and works on tablets where writing next to the PDF may not
-        // be possible.
-        const PdfSource* src = primarySource();
-        QString rawPath = src ? src->path : QString();
-        if (!rawPath.isEmpty()) {
-            QString absPath = QFileInfo(rawPath).absoluteFilePath();
-            if (!absPath.isEmpty()) {
-                QByteArray key = QCryptographicHash::hash(
-                    absPath.toUtf8(), QCryptographicHash::Sha256).toHex().left(24);
-                QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-                if (base.isEmpty()) {
-                    base = QDir::homePath() + "/.speedynote";
-                }
-                QString notes = base + "/pdf_notes/" + key;
-                QDir().mkpath(notes);
-                return notes;
-            }
-        }
+        // A raw PDF opened directly (not inside a .snb bundle) has no persistent
+        // notes folder. The per-PDF "reopen restore" feature previously gave such
+        // a PDF a hashed notes dir under the app-data path so annotations were
+        // auto-reloaded on reopen, but that path caused a crash when a PDF was
+        // closed without saving and reopened. This keeps notes columns/annotations
+        // working in the current session (in-memory) but intentionally does NOT
+        // persist or auto-restore them across opens, so reopening a plain PDF
+        // starts blank and is stable. .snb bundle notes (assets/notes) are
+        // unaffected.
         return QString();
     }
     
