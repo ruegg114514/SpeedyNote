@@ -33,6 +33,7 @@
 #include <QWheelEvent>
 #include <QKeyEvent>
 #include <QTouchEvent>
+#include <QElapsedTimer>
 #include <QNativeGestureEvent>  // macOS trackpad pinch-to-zoom
 #include "../compat/qt_compat.h"  // Qt5/Qt6 input device shims
 #include <QtMath>     // For qPow
@@ -4698,6 +4699,12 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
         if (m_tabletHoverTimer) {
             m_tabletHoverTimer->start();
         }
+        // A hovering stylus still counts as "stylus in use": refresh the
+        // anti-accidental-touch guard so a finger that lands just before the
+        // pen presses down (or while the pen hovers) does not trigger a pan.
+        if (m_pointerInViewport) {
+            m_lastStylusEventTimer.restart();
+        }
         
         // Check if eraser tool is active or this is hardware eraser
         bool isEraserHover = (m_currentTool == ToolType::Eraser) ||
@@ -4727,6 +4734,7 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
     PointerEvent pe = tabletToPointerEvent(event, peType);
     handlePointerEvent(pe);
     event->accept();
+    m_lastStylusEventTimer.restart();
 }
 
 // ===== Coordinate Transforms (Task 1.3.5) =====
@@ -5270,6 +5278,20 @@ bool DocumentViewport::event(QEvent* event)
             m_touchSequenceOnChild = false;
             if (!SN_TOUCH_POINTS(touchEvent).isEmpty()) {
                 QPointF touchPos = SN_TP_POS(SN_TOUCH_POINTS(touchEvent).first());
+                // Anti-accidental-touch: if the stylus was active around now
+                // (pen-down/pen-up/hover within the guard window), a touch-down
+                // is almost certainly the palm or a hovering finger brushing
+                // the screen. Lock the whole sequence to be ignored.
+                const bool stylusRecentlyActive =
+                    m_lastStylusEventTimer.isValid()
+                    && m_lastStylusEventTimer.elapsed() <= STYLUS_TOUCH_GUARD_MS;
+                m_touchBlockedByStylus =
+                    stylusRecentlyActive || m_pointerActive;
+                if (m_touchBlockedByStylus) {
+                    m_touchSequenceOnChild = false;
+                    event->accept();
+                    return true;
+                }
                 // If the finger lands on a notes-divider grip, start a width
                 // resize instead of a pan. The hit test checks the enlarged grip
                 // box first, so it is a comfortable touch target on a tablet.
@@ -5301,6 +5323,18 @@ bool DocumentViewport::event(QEvent* event)
             // mouse events for the child, which is how a finger reaches a
             // widget that only handles mouse input.
             return QWidget::event(event);
+        }
+        
+        // A touch sequence that was locked out by the stylus guard (see the
+        // TouchBegin branch above) must stay ignored for its whole lifetime:
+        // forget and swallow the rest of the sequence, then unlock on end.
+        if (m_touchBlockedByStylus) {
+            if (event->type() == QEvent::TouchEnd
+                || event->type() == QEvent::TouchCancel) {
+                m_touchBlockedByStylus = false;
+            }
+            event->accept();
+            return true;
         }
         
         if (m_touchHandler && m_touchHandler->handleTouchEvent(touchEvent)) {

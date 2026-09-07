@@ -3099,6 +3099,17 @@ private:
     bool m_touchCooldownActive = false;
     static constexpr qint64 TOUCH_COOLDOWN_MS = 300;
 
+    // ===== Palm-rejection anti-accidental-touch =====
+    // On tablets, when the stylus is being used, touch must not be treated as
+    // a gesture. The proximity-based palm rejection lives in MainWindow and
+    // is Linux-only; this viewport-level guard additionally suppresses touch
+    // that arrives right around stylus activity (pen-down/pen-up), which is
+    // exactly when the palm or a hovering finger tends to brush the screen.
+    QElapsedTimer m_lastStylusEventTimer;  ///< restarted on every stylus event
+    bool m_touchBlockedByStylus = false;   ///< current touch sequence is being ignored
+    static constexpr qint64 STYLUS_TOUCH_GUARD_MS =
+        180;  ///< ignore touch within this window after a stylus event
+
     /// True while the touch sequence in flight began on a child widget. Only
     /// TouchBegin carries a position we can hit-test, so the routing decision
     /// has to be remembered for the TouchUpdate and TouchEnd that follow.
