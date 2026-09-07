@@ -14420,6 +14420,17 @@ void DocumentViewport::applySelectionTransform()
         }
 
         m_document->markPageDirty(srcPage);
+
+        // Persist the notes-column strokes immediately. A lasso move/transform can
+        // add notes strokes (appendNotesPart) and remove their sources here, but
+        // apart from MainWindow::saveDocument / saveDocumentAs (persistSideNotes)
+        // the in-canvas notes are otherwise never written: autosave and the quit
+        // save path only write the .snb bundle, so a moved note would be committed
+        // in memory yet revert to its old position on reopen. Calling saveSideNotes
+        // at commit time mirrors endNotesStroke and makes the move survive any
+        // later save. It is a tiny, idempotent write and a no-op when this
+        // document has no persistent notes dir (raw PDFs).
+        saveSideNotes();
     }
 
     if (!undoAction.removedSegments.isEmpty() || !undoAction.addedSegments.isEmpty()) {
