@@ -4725,23 +4725,6 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
     }
     
     PointerEvent pe = tabletToPointerEvent(event, peType);
-    // Reverse palm-rejection on pen press: a palm can hit the screen and start
-    // a touch pan/zoom before the pen is detected (TabletPress typically arrives
-    // a beat after the palm's TouchBegin). If the pen presses while a touch
-    // gesture that began very recently is still in flight, that gesture was
-    // almost certainly the palm. Neither m_panOffset nor m_zoomLevel has been
-    // committed yet (end*Gesture applies them), so resetting the gesture here
-    // returns the view to its pre-touch state; the pen press then proceeds and
-    // draws normally. Doing this before handlePointerEvent keeps the stroke
-    // intact.
-    if (peType == PointerEvent::Press
-        && m_gesture.isActive()
-        && m_lastTouchGestureTimer.isValid()
-        && m_lastTouchGestureTimer.elapsed() <= PALM_PAN_GUARD_MS) {
-        m_gesture.reset();
-        if (m_touchHandler) m_touchHandler->reset();
-        update();
-    }
     handlePointerEvent(pe);
     event->accept();
 }
@@ -4915,7 +4898,6 @@ void DocumentViewport::beginZoomGesture(QPointF centerPoint)
     m_gesture.zoomCenter = centerPoint;
     m_gesture.startPan = m_panOffset;
     m_gesture.targetPan = m_panOffset;
-    m_lastTouchGestureTimer.restart();  // palm-rejection: timestamp the touch gesture
     
     // Track initial centroid for pan calculation during zoom gesture
     // This enables simultaneous pan+zoom (gallery-style 2-finger gestures)
@@ -5056,7 +5038,6 @@ void DocumentViewport::beginPanGesture()
     m_gesture.targetZoom = m_zoomLevel;
     m_gesture.startPan = m_panOffset;
     m_gesture.targetPan = m_panOffset;
-    m_lastTouchGestureTimer.restart();  // palm-rejection: timestamp the touch gesture
     
     // Capture current viewport as cached frame for fast shifting
     m_gesture.cachedFrame = grabOpaqueViewport();
