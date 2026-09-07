@@ -4062,11 +4062,29 @@ QString Document::notesPath() const
 {
     QString assets = assetsPath();
     if (assets.isEmpty()) {
-        // A raw PDF opened directly (not inside a .snb bundle) has no persistent
-        // notes folder: notes columns / annotations are intentionally NOT saved
-        // for it, so reopening a plain PDF starts blank. This disables the
-        // "reopen-PDF auto-restore" persistence (revert this block to re-enable:
-        // it previously returned a hashed per-PDF dir under the app-data path).
+        // No bundle path - a raw PDF opened directly (not inside a .snb bundle).
+        // Give it a stable, writable per-PDF notes location under the app data
+        // dir, keyed by the PDF's absolute path. Reopening the same PDF then
+        // resolves the same folder, so annotations made on it are restored
+        // instead of opening a blank document. Hashing avoids long/illegal
+        // filenames and works on tablets where writing next to the PDF may not
+        // be possible.
+        const PdfSource* src = primarySource();
+        QString rawPath = src ? src->path : QString();
+        if (!rawPath.isEmpty()) {
+            QString absPath = QFileInfo(rawPath).absoluteFilePath();
+            if (!absPath.isEmpty()) {
+                QByteArray key = QCryptographicHash::hash(
+                    absPath.toUtf8(), QCryptographicHash::Sha256).toHex().left(24);
+                QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+                if (base.isEmpty()) {
+                    base = QDir::homePath() + "/.speedynote";
+                }
+                QString notes = base + "/pdf_notes/" + key;
+                QDir().mkpath(notes);
+                return notes;
+            }
+        }
         return QString();
     }
     
