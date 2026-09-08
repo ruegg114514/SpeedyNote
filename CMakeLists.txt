@@ -1275,6 +1275,8 @@ if(WIN32)
         target_compile_definitions(speedynote PRIVATE SPEEDYNOTE_HAS_WINDOWS_INK)
         list(APPEND PLATFORM_LIBS windowsapp)
     endif()
+    # dbghelp for crash-handling (MiniDumpWriteDump)
+    list(APPEND PLATFORM_LIBS dbghelp)
     target_link_libraries(speedynote ${PLATFORM_LIBS})
 
 elseif(IOS)
