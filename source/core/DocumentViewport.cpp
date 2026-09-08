@@ -21271,7 +21271,12 @@ void DocumentViewport::loadSideNotes()
     if (m_sideNotesWidths.isEmpty()) {
         const double legacyWidth = root.value("notesWidth").toDouble(200.0);
         if (legacyWidth > 0.0) {
-            for (auto it = root.value("pages").toObject().begin(); it != root.value("pages").toObject().end(); ++it) {
+            // Cache the QJsonObject so the begin()/end() iterators point at a
+            // live object. Calling toObject() inline yields iterators into a
+            // temporary that is destroyed before ++it/it.key(), which was the
+            // crash (access violation) when reopening legacy side-notes.
+            const QJsonObject legacyPages = root.value("pages").toObject();
+            for (auto it = legacyPages.begin(); it != legacyPages.end(); ++it) {
                 const int pageIndex = it.key().toInt();
                 if (pageInRange(pageIndex)) {
                     m_sideNotesWidths[pageIndex] = legacyWidth;

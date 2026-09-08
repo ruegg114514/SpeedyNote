@@ -463,9 +463,9 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
             mei.ExceptionPointers  = ep;
             mei.ClientPointers     = TRUE;
             MINIDUMP_TYPE mdt = static_cast<MINIDUMP_TYPE>(
-                MiniDumpWithFullMemory |          // include all thread stacks
-                MiniDumpWithUnloadedModules |
-                MiniDumpWithHandleData);
+                MiniDumpWithDataSegs |          // lightweight, no 1GB full-memory
+                MiniDumpWithThreadInfo |
+                MiniDumpWithUnloadedModules);
             BOOL ok = MiniDumpWriteDump(GetCurrentProcess(),
                                         GetCurrentProcessId(),
                                         hFile, mdt,
