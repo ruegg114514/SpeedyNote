@@ -480,28 +480,28 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
             out << "pdb : keep " << module.left(module.lastIndexOf('.')) << ".pdb"
                 << " next to the exe to decode the stack\n";
             if (ep && ep->ExceptionRecord) {
-                out << "exception code: 0x" << hex
+                out << "exception code: 0x" << Qt::hex
                     << (quint64)ep->ExceptionRecord->ExceptionCode << "\n";
-                out << "fault address : 0x" << hex
+                out << "fault address : 0x" << Qt::hex
                     << (quint64)ep->ExceptionRecord->ExceptionAddress << "\n";
                 if (ep->ContextRecord) {
-                    out << "context rip   : 0x" << hex
+                    out << "context rip   : 0x" << Qt::hex
                         << (quint64)ep->ContextRecord->Rip << "\n";
-                    out << "context rax   : 0x" << hex
+                    out << "context rax   : 0x" << Qt::hex
                         << (quint64)ep->ContextRecord->Rax << "\n";
-                    out << "context rbx   : 0x" << hex
+                    out << "context rbx   : 0x" << Qt::hex
                         << (quint64)ep->ContextRecord->Rbx << "\n";
-                    out << "context rcx   : 0x" << hex
+                    out << "context rcx   : 0x" << Qt::hex
                         << (quint64)ep->ContextRecord->Rcx << "\n";
-                    out << "context rdx   : 0x" << hex
+                    out << "context rdx   : 0x" << Qt::hex
                         << (quint64)ep->ContextRecord->Rdx << "\n";
-                    out << "context rsi   : 0x" << hex
+                    out << "context rsi   : 0x" << Qt::hex
                         << (quint64)ep->ContextRecord->Rsi << "\n";
-                    out << "context rdi   : 0x" << hex
+                    out << "context rdi   : 0x" << Qt::hex
                         << (quint64)ep->ContextRecord->Rdi << "\n";
-                    out << "context rsp   : 0x" << hex
+                    out << "context rsp   : 0x" << Qt::hex
                         << (quint64)ep->ContextRecord->Rsp << "\n";
-                    out << "context rbp   : 0x" << hex
+                    out << "context rbp   : 0x" << Qt::hex
                         << (quint64)ep->ContextRecord->Rbp << "\n";
                 }
             }
