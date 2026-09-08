@@ -17,6 +17,8 @@
 #include <QTextStream>
 #include <ios>
 #include <algorithm>
+#include <exception>
+#include <cstdlib>
 
 #include "MainWindow.h"
 #include "ui/launcher/Launcher.h"
@@ -516,12 +518,94 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// ---- Runtime logging (cross-platform, catches abort()/terminate()/Qt fatal
+// ---- that never reach the SEH filter) ------------------------------------
+static QString runtimeLogPath()
+{
+    return crashDumpDir() + "/speedynote_run.log";
+}
+
+static void appendRuntimeLog(const QString& line)
+{
+    QFile f(runtimeLogPath());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        QTextStream out(&f);
+        out << line;
+        if (!line.endsWith('\n')) {
+            out << "\n";
+        }
+        f.close();
+    }
+}
+
+static QtMessageHandler g_prevQtHandler = nullptr;
+
+static void qtMessageHandler(QtMsgType type, const QMessageLogContext& ctx,
+                             const QString& msg)
+{
+    const char* lvl = "warn";
+    switch (type) {
+        case QtDebugMsg:    lvl = "debug"; break;
+        case QtInfoMsg:     lvl = "info";  break;
+        case QtWarningMsg:  lvl = "warn";  break;
+        case QtCriticalMsg: lvl = "CRIT "; break;
+        case QtFatalMsg:    lvl = "FATAL"; break;
+    }
+
+    // Timestamp + level + source file (basename only) + message.
+    const QString tag =
+        QStringLiteral("%1 %2 [%3] %4")
+            .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz"))
+            .arg(QString::fromLatin1(lvl))
+            .arg(ctx.file ? QFileInfo(QString::fromUtf8(ctx.file)).fileName()
+                          : QStringLiteral("?"))
+            .arg(msg);
+    appendRuntimeLog(tag);
+
+    // Forward to the original handler so console/debugger output is unchanged.
+    if (g_prevQtHandler) {
+        g_prevQtHandler(type, ctx, msg);
+    }
+    // A Qt FATAL normally calls abort() internally; with a custom handler we
+    // must reproduce that behaviour ourselves.
+    if (type == QtFatalMsg) {
+        std::abort();
+    }
+}
+
+static void crashTerminateHandler()
+{
+    QString what = QStringLiteral("<no exception>");
+    if (std::current_exception()) {
+        try {
+            std::rethrow_exception(std::current_exception());
+        } catch (const std::exception& e) {
+            what = QString::fromUtf8(e.what());
+        } catch (...) {
+            what = QStringLiteral("<non-std exception>");
+        }
+    }
+    appendRuntimeLog(QStringLiteral("%1 TERMINATE std::exception::what() = %2")
+                         .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz"))
+                         .arg(what));
+    std::abort();
+}
+
 bool installCrashHandler()
 {
 #ifndef _DEBUG
     // Only meaningful when built with symbols present; harmless otherwise.
     SetUnhandledExceptionFilter(terminateCrashHandler);
 #endif
+    // Also route (and persist) every qWarning/qCritical/qFatal so crashes that
+    // abort()/terminate() without reaching the SEH filter still leave a trace.
+    g_prevQtHandler = qInstallMessageHandler(qtMessageHandler);
+    std::set_terminate(crashTerminateHandler);
+    appendRuntimeLog(QStringLiteral("%1 --- SpeedyNote runtime log started ---")
+                         .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz")));
+
+    // Print where logs will land so the user can find them easily.
+    qInfo("SpeedyNote runtime log -> %s", qPrintable(runtimeLogPath()));
     return true;
 }
 } // namespace

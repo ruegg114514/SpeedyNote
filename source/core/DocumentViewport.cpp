@@ -390,6 +390,9 @@ DocumentViewport::~DocumentViewport()
 
 void DocumentViewport::setDocument(Document* doc)
 {
+    qInfo() << "[OPEN] 4 setDocument enter"
+            << (doc ? "newdoc" : "null")
+            << (doc ? (doc->mode == Document::Mode::Paged ? "paged" : "edgeless") : QString());
     if (m_document == doc) {
         return;
     }
