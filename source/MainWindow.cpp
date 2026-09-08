@@ -4768,16 +4768,10 @@ void MainWindow::openPdfDocument(const QString &filePath)
         qDebug() << "openPdfDocument: Loaded PDF with" << doc->pageCount() 
                  << "pages from" << filePath;
 #endif
-        // PDF-notes persistence: restore any in-canvas side notes (per-page
-        // strokes & widths) saved for this PDF the last time it was open.
-        // loadSideNotes resolves the same stable per-PDF notes location via
-        // Document::notesPath(), so reopening the same PDF shows the previous
-        // annotations instead of a blank document.
-        QTimer::singleShot(0, this, [this, tabIndex]() {
-            if (tabManager()) {
-                loadSideNotes(tabManager()->viewportAt(tabIndex));
-            }
-        });
+        // NOTE: no PDF-reopen side-notes auto-restore here on purpose. The
+        // per-PDF "reopen restore" feature is intentionally NOT enabled — plain
+        // PDFs open blank and stable (see Document::notesPath). Side notes only
+        // persist for .snb bundles via assets/notes.
     } else {
         qWarning() << "openPdfDocument: Failed to create tab for document";
     }
@@ -9386,6 +9380,49 @@ void MainWindow::dropEvent(QDropEvent *event)
 
 #endif // !Q_OS_ANDROID && !Q_OS_IOS
 
+void MainWindow::saveSessionTabs()
+{
+    QSettings settings("SpeedyNote", "App");
+
+    if (!m_splitViewManager || !m_documentManager || m_splitViewManager->totalTabCount() == 0) {
+        settings.remove("session/lastOpenTabs");
+        settings.remove("session/activeTabIndex");
+        return;
+    }
+
+    QStringList paths;
+    m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+        for (int i = 0; i < tm->tabCount(); ++i) {
+            Document* doc = tm->documentAt(i);
+            if (!doc) continue;
+
+            QString docPath = m_documentManager->documentPath(doc);
+            if (!docPath.isEmpty() && !m_documentManager->isUsingTempBundle(doc)) {
+                paths.append(QFileInfo(docPath).absoluteFilePath());
+            } else if (!doc->pdfPath().isEmpty()) {
+                paths.append(QFileInfo(doc->pdfPath()).absoluteFilePath());
+            }
+        }
+    });
+
+    if (paths.isEmpty()) {
+        settings.remove("session/lastOpenTabs");
+        settings.remove("session/activeTabIndex");
+    } else {
+        settings.setValue("session/lastOpenTabs", paths);
+
+        int globalActiveIndex = 0;
+        if (m_splitViewManager->activePane() == SplitViewManager::Right
+            && m_splitViewManager->rightTabManager()) {
+            globalActiveIndex = m_splitViewManager->leftTabManager()->tabCount()
+                              + m_splitViewManager->rightTabManager()->currentIndex();
+        } else if (m_splitViewManager->leftTabManager()) {
+            globalActiveIndex = m_splitViewManager->leftTabManager()->currentIndex();
+        }
+        settings.setValue("session/activeTabIndex", globalActiveIndex);
+    }
+}
+
 void MainWindow::closeEvent(QCloseEvent *event) {
     // ========== CHECK FOR UNSAVED DOCUMENTS ==========
     // Per-tab: silently persist ephemeral view state (edgeless last_position /
@@ -9492,6 +9529,9 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         
         // REMOVED MW7.4: Save bookmarks removed - bookmark implementation deleted
         // saveBookmarks();
+    
+    // Save session tabs for restore on next launch
+    saveSessionTabs();
 
     // Flush NotebookLibrary to disk before exiting
     // This ensures any pending addToRecent() calls are persisted, even if
@@ -9892,16 +9932,9 @@ void MainWindow::openFileInNewTab(const QString &filePath)
 
     // Load any persisted in-canvas notes columns (per-page strokes & widths)
     // for this document, once the new viewport is fully constructed.
-    QTimer::singleShot(0, this, [this, tabIndex, doc]() {
+    QTimer::singleShot(0, this, [this, tabIndex]() {
         if (tabManager()) {
-            DocumentViewport* vp = tabManager()->viewportAt(tabIndex);
-            // Only restore into the viewport that still owns the document we just
-            // opened. If the tab was closed (or the slot was reused by another
-            // tab) before this deferred call runs, loading those notes into a
-            // stale viewport could attach one document's notes to another.
-            if (vp && vp->document() == doc) {
-                loadSideNotes(vp);
-            }
+            loadSideNotes(tabManager()->viewportAt(tabIndex));
         }
     });
 

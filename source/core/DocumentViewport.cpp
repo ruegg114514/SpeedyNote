@@ -14420,17 +14420,6 @@ void DocumentViewport::applySelectionTransform()
         }
 
         m_document->markPageDirty(srcPage);
-
-        // Persist the notes-column strokes immediately. A lasso move/transform can
-        // add notes strokes (appendNotesPart) and remove their sources here, but
-        // apart from MainWindow::saveDocument / saveDocumentAs (persistSideNotes)
-        // the in-canvas notes are otherwise never written: autosave and the quit
-        // save path only write the .snb bundle, so a moved note would be committed
-        // in memory yet revert to its old position on reopen. Calling saveSideNotes
-        // at commit time mirrors endNotesStroke and makes the move survive any
-        // later save. It is a tiny, idempotent write and a no-op when this
-        // document has no persistent notes dir (raw PDFs).
-        saveSideNotes();
     }
 
     if (!undoAction.removedSegments.isEmpty() || !undoAction.addedSegments.isEmpty()) {
@@ -21016,7 +21005,7 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
     // turns the per-frame cost into roughly "strip size" instead of "column
     // size". Start at the first grid line inside the clip so dots stay aligned
     // with the full-column grid.
-    painter.setPen(QPen(QColor(205, 214, 226), 0.5 / (m_zoomLevel > 0.0 ? m_zoomLevel : 1.0)));
+    painter.setPen(QPen(QColor(205, 214, 226), 0.5 / m_zoomLevel));
     qreal gridSpacing = 20.0;
     QRectF gridClip(0, 0, notesW, page->size.height());
     // clipBoundingRect() is in logical (painter) coordinates, i.e. the same
@@ -21175,10 +21164,9 @@ void DocumentViewport::saveSideNotes()
 {
     if (m_sideNotesDir.isEmpty() || !m_document) return;
 
-    // Side-notes columns are a paged-document feature (see loadSideNotes).
-    // Never write side_notes.json for an edgeless canvas: it has no per-page
-    // columns to persist, and writing one would plant stale data that an
-    // older/newer build could later try to restore into an edgeless doc.
+    // Side-notes columns are a paged-document feature: an edgeless canvas has
+    // no per-page notes columns to persist, so do not write a stray side_notes
+    // file for it (symmetric with the guard in loadSideNotes).
     if (m_document->isEdgeless()) return;
 
     QDir dir(m_sideNotesDir);
@@ -21235,21 +21223,19 @@ void DocumentViewport::saveSideNotes()
 
 void DocumentViewport::loadSideNotes()
 {
-    if (m_sideNotesDir.isEmpty()) return;
+    if (m_sideNotesDir.isEmpty() || !m_document) return;
 
-    // Side-notes columns are a paged-document concept. An edgeless document has
-    // no per-page layout (pageCount() == 0 because it is tile-based), so a
-    // side_notes.json left behind there would otherwise be loaded unchecked:
-    // the pageInRange() guard below treats pc <= 0 as "accept any index", which
-    // could plant notes columns keyed by indices that don't correspond to any
-    // real page and crash the first paint / layout. Rejecting edgeless here
-    // keeps a stale notes file from ever being restored into a canvas it was
-    // never meant for.
-    if (m_document && m_document->isEdgeless()) {
-        m_sideNotesWidths.clear();
-        m_sideNotesStrokes.clear();
-        return;
-    }
+    // Side-notes columns are a paged-document feature. Never attempt to load
+    // them into an edgeless canvas, and require the page count to be known so
+    // every restored page index stays inside [0, pageCount). Restoring notes
+    // keyed by indices that match no real page was what crashed the first
+    // paint/layout when reopening a saved document.
+    if (m_document->isEdgeless()) return;
+    const int pageCount = m_document->pageCount();
+    if (pageCount <= 0) return;
+    const auto pageInRange = [pageCount](int pageIndex) {
+        return pageIndex >= 0 && pageIndex < pageCount;
+    };
 
     QString filePath = m_sideNotesDir + "/side_notes.json";
     QFile file(filePath);
@@ -21264,25 +21250,6 @@ void DocumentViewport::loadSideNotes()
 
     QJsonObject root = doc.object();
     m_sideNotesWidths.clear();
-    m_sideNotesStrokes.clear();
-
-    // Defensive: remember how many paged documents this viewport currently has
-    // (0 if the document isn't ready yet). Bullseye for the "reopen same PDF"
-    // path: persisted notes may be keyed by page indices that no longer exist in
-    // the current PDF (file replaced / earlier or shorter version), so drop them
-    // here instead of letting rendering/undo/erase feed garbage indices.
-    //
-    // Strictness fix (reopen crash): a page index is only valid when the loaded
-    // page count is known AND the index falls inside [0, pc). The previous
-    // window `pc <= 0 => accept any index` let a side_notes.json left in a
-    // document whose pages were not ready yet (pageCount() == 0) plant columns
-    // keyed by indices that match no real page, which then crashed the first
-    // paint / layout on reopen. When pages are not available we must recover
-    // nothing rather than accept arbitrary indices.
-    const int pc = m_document ? m_document->pageCount() : 0;
-    const auto pageInRange = [pc](int pageIndex) {
-        return pageIndex >= 0 && pc > 0 && pageIndex < pc;
-    };
 
     // Per-page widths (new format). A page has a column iff its page key is
     // present with a width > 0.
@@ -21303,16 +21270,20 @@ void DocumentViewport::loadSideNotes()
         if (legacyWidth > 0.0) {
             for (auto it = root.value("pages").toObject().begin(); it != root.value("pages").toObject().end(); ++it) {
                 const int pageIndex = it.key().toInt();
-                if (pageInRange(pageIndex)) m_sideNotesWidths[pageIndex] = legacyWidth;
+                if (pageInRange(pageIndex)) {
+                    m_sideNotesWidths[pageIndex] = legacyWidth;
+                }
             }
         }
     }
 
+    m_sideNotesStrokes.clear();
     QJsonObject pagesObj = root.value("pages").toObject();
 
     for (auto it = pagesObj.begin(); it != pagesObj.end(); ++it) {
         int pageIndex = it.key().toInt();
-        if (!pageInRange(pageIndex)) continue;  // out of range for current doc
+        if (!pageInRange(pageIndex))
+            continue;
         QJsonArray strokesArr = it.value().toArray();
         QVector<VectorStroke> strokes;
 
@@ -21333,8 +21304,8 @@ void DocumentViewport::loadSideNotes()
             }
             // Recompute the cached bounding box: the default-constructed
             // VectorStroke leaves it as an empty QRectF(0,0,0,0), so restored
-            // strokes were previously invisible to eraser hit-testing and
-            // paint culling (VectorStroke::fromJson always calls this).
+            // strokes were previously invisible to eraser hit-testing and paint
+            // culling (VectorStroke::fromJson always recomputes it).
             stroke.updateBoundingBox();
             strokes.append(stroke);
         }
@@ -21343,12 +21314,6 @@ void DocumentViewport::loadSideNotes()
             m_sideNotesStrokes[pageIndex] = strokes;
         }
     }
-
-    // Restored columns extend the content size that the layout cache was built
-    // with (the doc was just opened, so the cache predates any notes). Force a
-    // rebuild so page positions / scroll extents reflect the notes columns.
-    m_pageLayoutDirty = true;
-    ensurePageLayoutCache();
 
     update();
 }

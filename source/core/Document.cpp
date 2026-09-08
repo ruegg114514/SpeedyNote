@@ -15,7 +15,6 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSettings>
-#include <QStandardPaths>
 #include <QtConcurrent>
 #include <cmath>
 #include <algorithm>  // Phase 5.4: for std::sort, std::greater in merge
@@ -1552,9 +1551,32 @@ bool Document::loadPageFromDisk(int index) const
             return true;
         }
         
-        // Not a PDF page and file doesn't exist - actual error
-        qWarning() << "Cannot load page: file not found" << pagePath;
-        return false;
+        // Not a PDF page and file doesn't exist. A bundle can legitimately hit
+        // this when it was saved before the save-side fix that guarantees every
+        // page referenced by page_order is actually flushed to <bundle>/pages/.
+        // Rather than returning false (which makes Document::page() return
+        // nullptr and the reopened notebook render blank/crash-prone), synthesize
+        // an empty default page so the document still opens. The user's edits
+        // are re-persisted on the next save.
+        qWarning() << "Cannot load page, synthesizing empty fallback: file not found"
+                   << pagePath;
+        {
+            auto page = std::make_unique<Page>();
+            page->uuid = uuid;
+            page->pageIndex = index;
+            page->backgroundType = defaultBackgroundType;
+            page->backgroundColor = defaultBackgroundColor;
+            page->gridColor = defaultGridColor;
+            page->gridSpacing = defaultGridSpacing;
+            page->lineSpacing = defaultLineSpacing;
+            auto sizeIt = m_pageMetadata.find(uuid);
+            QSizeF size = (sizeIt != m_pageMetadata.end())
+                        ? sizeIt->second : defaultPageSize;
+            if (size.isEmpty()) size = defaultPageSize;
+            page->size = size;
+            m_loadedPages[uuid] = std::move(page);
+            return true;
+        }
     }
     
     QByteArray data = file.readAll();
@@ -4062,15 +4084,6 @@ QString Document::notesPath() const
 {
     QString assets = assetsPath();
     if (assets.isEmpty()) {
-        // A raw PDF opened directly (not inside a .snb bundle) has no persistent
-        // notes folder. The per-PDF "reopen restore" feature previously gave such
-        // a PDF a hashed notes dir under the app-data path so annotations were
-        // auto-reloaded on reopen, but that path caused a crash when a PDF was
-        // closed without saving and reopened. This keeps notes columns/annotations
-        // working in the current session (in-memory) but intentionally does NOT
-        // persist or auto-restore them across opens, so reopening a plain PDF
-        // starts blank and is stable. .snb bundle notes (assets/notes) are
-        // unaffected.
         return QString();
     }
     
@@ -4919,10 +4932,19 @@ bool Document::saveBundle(const QString& path, bool finalize)
             }
             
             // When saving to new location: save ALL in-memory pages (with content)
-            // When saving to same location: only save dirty pages
-            bool needsSave = savingToNewLocation || m_dirtyPages.count(uuid) > 0;
+            // When saving to same location: only save dirty pages.
+            // Also write the page if its file is not yet on disk, mirroring the
+            // edgeless tile fallback (Document::saveBundle, "m_tileIndex.count(coord)==0").
+            // Without this, a non-dirty page that has never been flushed would be
+            // referenced by the manifest page_order but missing from <bundle>/pages/,
+            // so reopening the bundle could not load that page and the notebook
+            // opened blank/crash-prone.
+            QString pagePath = path + "/pages/" + uuid + ".json";
+            bool pageOnDisk = QFile::exists(pagePath);
+            bool needsSave = savingToNewLocation
+                             || m_dirtyPages.count(uuid) > 0
+                             || !pageOnDisk;
             if (needsSave) {
-                QString pagePath = path + "/pages/" + uuid + ".json";
                 QSaveFile file(pagePath);
                 file.setDirectWriteFallback(false);
                 QJsonDocument doc(pagePtr->toJson());
