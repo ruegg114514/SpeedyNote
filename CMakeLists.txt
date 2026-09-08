@@ -1277,8 +1277,6 @@ if(WIN32)
     endif()
     # dbghelp for crash-handling (MiniDumpWriteDump)
     list(APPEND PLATFORM_LIBS dbghelp)
-    # psapi for EnumProcessModules / module+offset frame resolution
-    list(APPEND PLATFORM_LIBS psapi)
     target_link_libraries(speedynote ${PLATFORM_LIBS})
 
 elseif(IOS)

@@ -15,11 +15,8 @@
 #include <QDateTime>
 #include <QFile>
 #include <QTextStream>
-#include <QVector>
 #include <ios>
 #include <algorithm>
-#include <exception>
-#include <cstdlib>
 
 #include "MainWindow.h"
 #include "ui/launcher/Launcher.h"
@@ -36,14 +33,12 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <dbghelp.h>
-#include <psapi.h>
 #include <shellapi.h>
 #endif
 
 // Platform helpers
 #ifdef Q_OS_ANDROID
 #include <QDebug>
-#include <QVector>
 #include <QPalette>
 #include <QJniObject>
 #endif
@@ -463,9 +458,7 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
             mei.ExceptionPointers  = ep;
             mei.ClientPointers     = TRUE;
             MINIDUMP_TYPE mdt = static_cast<MINIDUMP_TYPE>(
-                MiniDumpWithDataSegs |          // lightweight, no 1GB full-memory
-                MiniDumpWithThreadInfo |
-                MiniDumpWithUnloadedModules);
+                MiniDumpWithDataSegs | MiniDumpWithUnloadedModules);
             BOOL ok = MiniDumpWriteDump(GetCurrentProcess(),
                                         GetCurrentProcessId(),
                                         hFile, mdt,
@@ -476,45 +469,6 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
         }
     }
 
-    // ---- 1.5 Resolve module+offset for addresses, for readable frames ----
-    struct ModInfo {
-        quint64 base = 0;
-        quint64 size = 0;
-        QString name;
-    };
-    QVector<ModInfo> mods;
-    {
-        HANDLE proc = GetCurrentProcess();
-        DWORD need = 0;
-        if (EnumProcessModules(proc, nullptr, 0, &need) && need > 0) {
-            QVector<HMODULE> handles(need / sizeof(HMODULE));
-            DWORD got = 0;
-            if (EnumProcessModules(proc, handles.data(),
-                                   need, &got) && got >= sizeof(HMODULE)) {
-                const int n = static_cast<int>(got / sizeof(HMODULE));
-                for (int i = 0; i < n; ++i) {
-                    MODULEINFO mi{};
-                    if (!GetModuleInformation(proc, handles[i], &mi, sizeof(mi)))
-                        continue;
-                    wchar_t b[MAX_PATH] = {};
-                    const DWORD len = GetModuleFileNameW(handles[i], b, MAX_PATH);
-                    QString nm = len ? QString::fromWCharArray(b) : QStringLiteral("?");
-                    mods.append({ reinterpret_cast<quint64>(mi.lpBaseOfDll),
-                                  mi.SizeOfImage, nm });
-                }
-            }
-        }
-    }
-    // Return "prompt+module(base)+offset" for a raw address, or empty if none.
-    const auto describeAddr = [&](quint64 a) -> QString {
-        for (const ModInfo& m : mods) {
-            if (a >= m.base && a < m.base + m.size) {
-                return QFileInfo(m.name).fileName()
-                       + QStringLiteral("+0x%1").arg(a - m.base, 0, 16);
-            }
-        }
-        return QString();
-    };
     // ---- 2. Write a plain-text crash log with the exception address ----
     {
         QFile log(logPath);
@@ -523,11 +477,8 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
             out << "SpeedyNote crash log\n";
             out << "time: " << ts << "\n";
             out << "exe : " << module << "\n";
-            if (ep && ep->ExceptionRecord) {
-                out << "crash : " << describeAddr(
-                    reinterpret_cast<quint64>(ep->ExceptionRecord->ExceptionAddress))
-                    << "\n";
-            }
+            out << "pdb : keep " << module.left(module.lastIndexOf('.')) << ".pdb"
+                << " next to the exe to decode the stack\n";
             if (ep && ep->ExceptionRecord) {
                 out << "exception code: 0x" << Qt::hex
                     << (quint64)ep->ExceptionRecord->ExceptionCode << "\n";
@@ -553,51 +504,6 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
                     out << "context rbp   : 0x" << Qt::hex
                         << (quint64)ep->ContextRecord->Rbp << "\n";
                 }
-
-                // Walk the stack so the log is self-decodable without pdb.
-                if (ep->ContextRecord) {
-                    out << "stack:\n";
-                    CONTEXT ctx = *ep->ContextRecord;
-                    STACKFRAME64 sf{};
-                    sf.AddrPC.Offset    = ctx.Rip;
-                    sf.AddrPC.Mode      = AddrModeFlat;
-                    sf.AddrFrame.Offset = ctx.Rbp;
-                    sf.AddrFrame.Mode   = AddrModeFlat;
-                    sf.AddrStack.Offset = ctx.Rsp;
-                    sf.AddrStack.Mode   = AddrModeFlat;
-                    HANDLE proc = GetCurrentProcess();
-                    HANDLE thr  = GetCurrentThread();
-                    // Enable symbol resolution so StackWalk64 can unwind
-                    // properly and SymFromAddr returns human-readable names.
-                    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME
-                                  | SYMOPT_LOAD_LINES);
-                    if (!SymInitialize(proc, nullptr, TRUE)) {
-                        SymInitialize(proc, nullptr, FALSE);
-                    }
-                    for (int i = 0; i < 48; ++i) {
-                        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thr,
-                                         &sf, &ctx, nullptr, SymFunctionTableAccess64,
-                                         SymGetModuleBase64, nullptr))
-                            break;
-                        if (sf.AddrPC.Offset == 0)
-                            break;
-                        // Resolve symbol name (module!function+offset) if pdb
-                        // is nearby; otherwise fall back to module+offset.
-                        QString sym = describeAddr(sf.AddrPC.Offset);
-                        char sbuf[512] = {};
-                        DWORD64 disp = 0;
-                        SYMBOL_INFO* si = (SYMBOL_INFO*)sbuf;
-                        si->SizeOfStruct = sizeof(SYMBOL_INFO);
-                        si->MaxNameLen = (ULONG)(sizeof(sbuf) - sizeof(SYMBOL_INFO));
-                        if (SymFromAddr(proc, sf.AddrPC.Offset, &disp, si)) {
-                            sym = QString::fromUtf8(si->Name)
-                                  + "+0x" + QString::number(disp, 16);
-                        }
-                        out << "  #" << QString::number(i).rightJustified(2) << " "
-                             << sym << "\n";
-                    }
-                    SymCleanup(proc);
-                }
             }
             out << "minidump      : " << dumpPath << "\n";
             log.close();
@@ -610,94 +516,12 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-// ---- Runtime logging (cross-platform, catches abort()/terminate()/Qt fatal
-// ---- that never reach the SEH filter) ------------------------------------
-static QString runtimeLogPath()
-{
-    return crashDumpDir() + "/speedynote_run.log";
-}
-
-static void appendRuntimeLog(const QString& line)
-{
-    QFile f(runtimeLogPath());
-    if (f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        QTextStream out(&f);
-        out << line;
-        if (!line.endsWith('\n')) {
-            out << "\n";
-        }
-        f.close();
-    }
-}
-
-static QtMessageHandler g_prevQtHandler = nullptr;
-
-static void qtMessageHandler(QtMsgType type, const QMessageLogContext& ctx,
-                             const QString& msg)
-{
-    const char* lvl = "warn";
-    switch (type) {
-        case QtDebugMsg:    lvl = "debug"; break;
-        case QtInfoMsg:     lvl = "info";  break;
-        case QtWarningMsg:  lvl = "warn";  break;
-        case QtCriticalMsg: lvl = "CRIT "; break;
-        case QtFatalMsg:    lvl = "FATAL"; break;
-    }
-
-    // Timestamp + level + source file (basename only) + message.
-    const QString tag =
-        QStringLiteral("%1 %2 [%3] %4")
-            .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz"))
-            .arg(QString::fromLatin1(lvl))
-            .arg(ctx.file ? QFileInfo(QString::fromUtf8(ctx.file)).fileName()
-                          : QStringLiteral("?"))
-            .arg(msg);
-    appendRuntimeLog(tag);
-
-    // Forward to the original handler so console/debugger output is unchanged.
-    if (g_prevQtHandler) {
-        g_prevQtHandler(type, ctx, msg);
-    }
-    // A Qt FATAL normally calls abort() internally; with a custom handler we
-    // must reproduce that behaviour ourselves.
-    if (type == QtFatalMsg) {
-        std::abort();
-    }
-}
-
-static void crashTerminateHandler()
-{
-    QString what = QStringLiteral("<no exception>");
-    if (std::current_exception()) {
-        try {
-            std::rethrow_exception(std::current_exception());
-        } catch (const std::exception& e) {
-            what = QString::fromUtf8(e.what());
-        } catch (...) {
-            what = QStringLiteral("<non-std exception>");
-        }
-    }
-    appendRuntimeLog(QStringLiteral("%1 TERMINATE std::exception::what() = %2")
-                         .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz"))
-                         .arg(what));
-    std::abort();
-}
-
 bool installCrashHandler()
 {
 #ifndef _DEBUG
     // Only meaningful when built with symbols present; harmless otherwise.
     SetUnhandledExceptionFilter(terminateCrashHandler);
 #endif
-    // Also route (and persist) every qWarning/qCritical/qFatal so crashes that
-    // abort()/terminate() without reaching the SEH filter still leave a trace.
-    g_prevQtHandler = qInstallMessageHandler(qtMessageHandler);
-    std::set_terminate(crashTerminateHandler);
-    appendRuntimeLog(QStringLiteral("%1 --- SpeedyNote runtime log started ---")
-                         .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz")));
-
-    // Print where logs will land so the user can find them easily.
-    qInfo("SpeedyNote runtime log -> %s", qPrintable(runtimeLogPath()));
     return true;
 }
 } // namespace

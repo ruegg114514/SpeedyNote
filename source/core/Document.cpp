@@ -4995,8 +4995,6 @@ bool Document::saveBundle(const QString& path, bool finalize)
 
 std::unique_ptr<Document> Document::loadBundle(const QString& path)
 {
-    qInfo() << "[OPEN] 0 enter loadBundle path=" << path
-            << "snb_marker=" << QFileInfo::exists(path + "/.snb_marker");
     QString manifestPath = path + "/document.json";
     QFile manifestFile(manifestPath);
     if (!manifestFile.open(QIODevice::ReadOnly)) {
@@ -5034,8 +5032,6 @@ std::unique_ptr<Document> Document::loadBundle(const QString& path)
     // Set bundle path and enable lazy loading
     doc->m_bundlePath = path;
     doc->m_lazyLoadEnabled = true;
-    qInfo() << "[OPEN] 1 manifest parsed mode=" << (doc->mode == Mode::Edgeless ? "edgeless" : "paged")
-            << "format=" << bundleVersion;
     
     // ========== MODE-SPECIFIC LOADING ==========
     if (doc->mode == Mode::Edgeless) {
@@ -5153,12 +5149,6 @@ std::unique_ptr<Document> Document::loadBundle(const QString& path)
         }
     }
     
-    qInfo() << "[OPEN] 2 layout indexed pageOrder=" << doc->m_pageOrder.size()
-            << "metadata=" << doc->m_pageMetadata.size()
-            << "pdfSources=" << doc->m_pdfSources.size()
-            << "pageFilesHint=1first=" << (doc->m_pageOrder.value(0).isEmpty()
-              ? QStringLiteral("<none>") : doc->m_pageOrder.first());
-    
     // ========== RESOLVE & LOAD PDF SOURCES ==========
     // Probe all referenced sources through the same validated candidate resolver used
     // by rendering/search/export. This makes missing or corrupt non-primary sources
@@ -5178,7 +5168,6 @@ std::unique_ptr<Document> Document::loadBundle(const QString& path)
         }
     }
     
-    qInfo() << "[OPEN] 3 loadBundle done returning doc";
     return doc;
 }
 
