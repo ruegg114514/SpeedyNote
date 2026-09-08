@@ -15,6 +15,7 @@
 #include <QDateTime>
 #include <QFile>
 #include <QTextStream>
+#include <QVector>
 #include <ios>
 #include <algorithm>
 #include <exception>
@@ -41,6 +42,7 @@
 // Platform helpers
 #ifdef Q_OS_ANDROID
 #include <QDebug>
+#include <QVector>
 #include <QPalette>
 #include <QJniObject>
 #endif
@@ -471,6 +473,45 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
         }
     }
 
+    // ---- 1.5 Resolve module+offset for addresses, for readable frames ----
+    struct ModInfo {
+        quint64 base = 0;
+        quint64 size = 0;
+        QString name;
+    };
+    QVector<ModInfo> mods;
+    {
+        HANDLE proc = GetCurrentProcess();
+        DWORD need = 0;
+        if (EnumProcessModules(proc, nullptr, 0, &need) && need > 0) {
+            QVector<HMODULE> handles(need / sizeof(HMODULE));
+            DWORD got = 0;
+            if (EnumProcessModules(proc, handles.data(),
+                                   need, &got) && got >= sizeof(HMODULE)) {
+                const int n = static_cast<int>(got / sizeof(HMODULE));
+                for (int i = 0; i < n; ++i) {
+                    MODULEINFO mi{};
+                    if (!GetModuleInformation(proc, handles[i], &mi, sizeof(mi)))
+                        continue;
+                    wchar_t b[MAX_PATH] = {};
+                    const DWORD len = GetModuleFileNameW(handles[i], b, MAX_PATH);
+                    QString nm = len ? QString::fromWCharArray(b) : QStringLiteral("?");
+                    mods.append({ reinterpret_cast<quint64>(mi.lpBaseOfDll),
+                                  mi.SizeOfImage, nm });
+                }
+            }
+        }
+    }
+    // Return "prompt+module(base)+offset" for a raw address, or empty if none.
+    const auto describeAddr = [&](quint64 a) -> QString {
+        for (const ModInfo& m : mods) {
+            if (a >= m.base && a < m.base + m.size) {
+                return QFileInfo(m.name).fileName()
+                       + QStringLiteral("+0x%1").arg(a - m.base, 0, 16);
+            }
+        }
+        return QString();
+    };
     // ---- 2. Write a plain-text crash log with the exception address ----
     {
         QFile log(logPath);
@@ -479,8 +520,11 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
             out << "SpeedyNote crash log\n";
             out << "time: " << ts << "\n";
             out << "exe : " << module << "\n";
-            out << "pdb : keep " << module.left(module.lastIndexOf('.')) << ".pdb"
-                << " next to the exe to decode the stack\n";
+            if (ep && ep->ExceptionRecord) {
+                out << "crash : " << describeAddr(
+                    reinterpret_cast<quint64>(ep->ExceptionRecord->ExceptionAddress))
+                    << "\n";
+            }
             if (ep && ep->ExceptionRecord) {
                 out << "exception code: 0x" << Qt::hex
                     << (quint64)ep->ExceptionRecord->ExceptionCode << "\n";
@@ -505,6 +549,31 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
                         << (quint64)ep->ContextRecord->Rsp << "\n";
                     out << "context rbp   : 0x" << Qt::hex
                         << (quint64)ep->ContextRecord->Rbp << "\n";
+                }
+
+                // Walk the stack so the log is self-decodable without pdb.
+                if (ep->ContextRecord) {
+                    out << "stack:\n";
+                    CONTEXT ctx = *ep->ContextRecord;
+                    STACKFRAME64 sf{};
+                    sf.AddrPC.Offset    = ctx.Rip;
+                    sf.AddrPC.Mode      = AddrModeFlat;
+                    sf.AddrFrame.Offset = ctx.Rbp;
+                    sf.AddrFrame.Mode   = AddrModeFlat;
+                    sf.AddrStack.Offset = ctx.Rsp;
+                    sf.AddrStack.Mode   = AddrModeFlat;
+                    HANDLE proc = GetCurrentProcess();
+                    HANDLE thr  = GetCurrentThread();
+                    for (int i = 0; i < 48; ++i) {
+                        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thr,
+                                         &sf, &ctx, nullptr, SymFunctionTableAccess64,
+                                         SymGetModuleBase64, nullptr))
+                            break;
+                        if (sf.AddrPC.Offset == 0)
+                            break;
+                        out << "  #" << QString::number(i).rightJustified(2) << " "
+                            << describeAddr(sf.AddrPC.Offset) << "\n";
+                    }
                 }
             }
             out << "minidump      : " << dumpPath << "\n";
