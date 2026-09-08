@@ -366,13 +366,15 @@ static LONG WINAPI HandleCrash(EXCEPTION_POINTERS* exceptionInfo)
         mei.ClientPointers = FALSE;
 
         // WER-style minidump: include data segments for richer diagnostics.
-        MiniDumpWriteDump(GetCurrentProcess(),
-                          GetCurrentProcessId(),
-                          hFile,
-                          MiniDumpNormal | MiniDumpWithDataSegs,
-                          exceptionInfo ? &mei : nullptr,
-                          nullptr,
-                          nullptr);
+         MINIDUMP_TYPE dumpType = static_cast<MINIDUMP_TYPE>(
+             MiniDumpNormal | MiniDumpWithDataSegs);
+         MiniDumpWriteDump(GetCurrentProcess(),
+                           GetCurrentProcessId(),
+                           hFile,
+                           dumpType,
+                           exceptionInfo ? &mei : nullptr,
+                           nullptr,
+                           nullptr);
         CloseHandle(hFile);
     }
 
