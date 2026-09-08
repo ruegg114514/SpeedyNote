@@ -21164,6 +21164,11 @@ void DocumentViewport::saveSideNotes()
 {
     if (m_sideNotesDir.isEmpty() || !m_document) return;
 
+    // Side-notes columns are a paged-document feature: an edgeless canvas has
+    // no per-page notes columns to persist, so do not write a stray side_notes
+    // file for it (symmetric with the guard in loadSideNotes).
+    if (m_document->isEdgeless()) return;
+
     QDir dir(m_sideNotesDir);
     if (!dir.exists()) {
         dir.mkpath(".");
@@ -21218,7 +21223,19 @@ void DocumentViewport::saveSideNotes()
 
 void DocumentViewport::loadSideNotes()
 {
-    if (m_sideNotesDir.isEmpty()) return;
+    if (m_sideNotesDir.isEmpty() || !m_document) return;
+
+    // Side-notes columns are a paged-document feature. Never attempt to load
+    // them into an edgeless canvas, and require the page count to be known so
+    // every restored page index stays inside [0, pageCount). Restoring notes
+    // keyed by indices that match no real page was what crashed the first
+    // paint/layout when reopening a saved document.
+    if (m_document->isEdgeless()) return;
+    const int pageCount = m_document->pageCount();
+    if (pageCount <= 0) return;
+    const auto pageInRange = [pageCount](int pageIndex) {
+        return pageIndex >= 0 && pageIndex < pageCount;
+    };
 
     QString filePath = m_sideNotesDir + "/side_notes.json";
     QFile file(filePath);
@@ -21240,7 +21257,7 @@ void DocumentViewport::loadSideNotes()
     for (auto it = widthsObj.begin(); it != widthsObj.end(); ++it) {
         qreal w = it.value().toDouble(0.0);
         int pageIndex = it.key().toInt();
-        if (w > 0.0) {
+        if (w > 0.0 && pageInRange(pageIndex)) {
             m_sideNotesWidths[pageIndex] = w;
         }
     }
@@ -21252,7 +21269,10 @@ void DocumentViewport::loadSideNotes()
         const double legacyWidth = root.value("notesWidth").toDouble(200.0);
         if (legacyWidth > 0.0) {
             for (auto it = root.value("pages").toObject().begin(); it != root.value("pages").toObject().end(); ++it) {
-                m_sideNotesWidths[it.key().toInt()] = legacyWidth;
+                const int pageIndex = it.key().toInt();
+                if (pageInRange(pageIndex)) {
+                    m_sideNotesWidths[pageIndex] = legacyWidth;
+                }
             }
         }
     }
@@ -21262,6 +21282,8 @@ void DocumentViewport::loadSideNotes()
 
     for (auto it = pagesObj.begin(); it != pagesObj.end(); ++it) {
         int pageIndex = it.key().toInt();
+        if (!pageInRange(pageIndex))
+            continue;
         QJsonArray strokesArr = it.value().toArray();
         QVector<VectorStroke> strokes;
 
@@ -21280,6 +21302,11 @@ void DocumentViewport::loadSideNotes()
                 pt.pressure = ptObj.value("pressure").toDouble(1.0);
                 stroke.points.append(pt);
             }
+            // Recompute the cached bounding box: the default-constructed
+            // VectorStroke leaves it as an empty QRectF(0,0,0,0), so restored
+            // strokes were previously invisible to eraser hit-testing and paint
+            // culling (VectorStroke::fromJson always recomputes it).
+            stroke.updateBoundingBox();
             strokes.append(stroke);
         }
 
