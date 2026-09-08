@@ -27,6 +27,10 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <shlobj.h>
+#include <dbghelp.h>
+#include <QDir>
+#include <QDateTime>
+#pragma comment(lib, "dbghelp.lib")
 #endif
 
 // Platform helpers
@@ -331,6 +335,53 @@ static void applyWindowsFonts(QApplication& app)
     font.setHintingPreference(QFont::PreferNoHinting);
     font.setFamilies({"Segoe UI", "Dengxian", "Microsoft YaHei", "SimHei"});
     app.setFont(font);
+}
+
+// ============================================================================
+// Crash Handling (WER-style minidump)
+// ============================================================================
+
+static LONG WINAPI HandleCrash(EXCEPTION_POINTERS* exceptionInfo)
+{
+    // Create a minidump file in the WER CrashDumps folder.
+    QString dumpPath = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+                       + QStringLiteral("/CrashDumps");
+    QDir().mkpath(dumpPath);
+
+    const QString dumpFile = dumpPath
+        + QStringLiteral("/SpeedyNote-%1.dmp")
+              .arg(QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"));
+
+    HANDLE hFile = CreateFileW(reinterpret_cast<LPCWSTR>(dumpFile.utf16()),
+                               GENERIC_WRITE,
+                               0,
+                               nullptr,
+                               CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL,
+                               nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mei = {};
+        mei.ThreadId = GetCurrentThreadId();
+        mei.ExceptionPointers = exceptionInfo;
+        mei.ClientPointers = FALSE;
+
+        // WER-style minidump: include data segments for richer diagnostics.
+        MiniDumpWriteDump(GetCurrentProcess(),
+                          GetCurrentProcessId(),
+                          hFile,
+                          MiniDumpNormal | MiniDumpWithDataSegs,
+                          exceptionInfo ? &mei : nullptr,
+                          nullptr,
+                          nullptr);
+        CloseHandle(hFile);
+    }
+
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static void installCrashHandler()
+{
+    SetUnhandledExceptionFilter(HandleCrash);
 }
 
 static void applyWindowsPalette(QApplication& app)
@@ -872,6 +923,12 @@ private:
 
 int main(int argc, char* argv[])
 {
+    // Install WER-style crash handler early so a crash (e.g. during document
+    // open/render) writes a minidump we can use to pinpoint the fault.
+#ifdef Q_OS_WIN
+    installCrashHandler();
+#endif
+
     // ========== CLI Mode Detection (Desktop Only) ==========
     // Check for CLI commands before creating QApplication to avoid full GUI overhead.
     // CLI mode uses QGuiApplication (not QCoreApplication) because:
