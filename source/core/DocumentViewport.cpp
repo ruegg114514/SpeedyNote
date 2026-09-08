@@ -21271,9 +21271,17 @@ void DocumentViewport::loadSideNotes()
     // path: persisted notes may be keyed by page indices that no longer exist in
     // the current PDF (file replaced / earlier or shorter version), so drop them
     // here instead of letting rendering/undo/erase feed garbage indices.
+    //
+    // Strictness fix (reopen crash): a page index is only valid when the loaded
+    // page count is known AND the index falls inside [0, pc). The previous
+    // window `pc <= 0 => accept any index` let a side_notes.json left in a
+    // document whose pages were not ready yet (pageCount() == 0) plant columns
+    // keyed by indices that match no real page, which then crashed the first
+    // paint / layout on reopen. When pages are not available we must recover
+    // nothing rather than accept arbitrary indices.
     const int pc = m_document ? m_document->pageCount() : 0;
     const auto pageInRange = [pc](int pageIndex) {
-        return pageIndex >= 0 && (pc <= 0 || pageIndex < pc);
+        return pageIndex >= 0 && pc > 0 && pageIndex < pc;
     };
 
     // Per-page widths (new format). A page has a column iff its page key is
@@ -21323,6 +21331,11 @@ void DocumentViewport::loadSideNotes()
                 pt.pressure = ptObj.value("pressure").toDouble(1.0);
                 stroke.points.append(pt);
             }
+            // Recompute the cached bounding box: the default-constructed
+            // VectorStroke leaves it as an empty QRectF(0,0,0,0), so restored
+            // strokes were previously invisible to eraser hit-testing and
+            // paint culling (VectorStroke::fromJson always calls this).
+            stroke.updateBoundingBox();
             strokes.append(stroke);
         }
 
