@@ -21415,5 +21415,19 @@ void DocumentViewport::loadSideNotes()
         }
     }
 
+    // Recompute the paged layout now that m_sideNotesWidths is populated.
+    // If a clamp/center/scroll happened before this load (e.g. the deferred
+    // loadSideNotes() after opening a saved document), the layout cache was
+    // built with every side-notes column width treated as 0, which shrank
+    // totalContentSize().width() and made clampPanOffset() pull horizontal
+    // panning back to a fixed column the moment the user dragged past the
+    // bare page edge. Marking the cache dirty forces ensurePageLayoutCache()
+    // to rebuild it with the true widths on the next layout / scroll.
+    if (m_pageLayoutDirty == false) {
+        invalidatePageLayoutCache();
+        ensurePageLayoutCache();
+        clampPanOffset();
+    }
+
     update();
 }
