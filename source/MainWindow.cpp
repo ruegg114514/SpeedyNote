@@ -524,7 +524,13 @@ MainWindow::MainWindow(QWidget *parent)
                 // the viewport pointer and access its members, so they must complete
                 // before we clear the document.
                 vp->cancelAndWaitForBackgroundThreads();
-                
+
+                // Persist the in-canvas notes columns before the viewport/document are
+                // destroyed. For a raw PDF, persistSideNotes writes to the stable
+                // per-PDF notes location (Document::notesPath), so reopening the same
+                // PDF restores the annotations made on it.
+                persistSideNotes(doc);
+
                 // Clear viewport's document pointer BEFORE deleting Document.
                 // This triggers cleanup of undo stacks and other document-related
                 // data structures while the document is still valid.
@@ -4762,6 +4768,10 @@ void MainWindow::openPdfDocument(const QString &filePath)
         qDebug() << "openPdfDocument: Loaded PDF with" << doc->pageCount() 
                  << "pages from" << filePath;
 #endif
+        // NOTE: no PDF-reopen side-notes auto-restore here on purpose. The
+        // per-PDF "reopen restore" feature is intentionally NOT enabled — plain
+        // PDFs open blank and stable (see Document::notesPath). Side notes only
+        // persist for .snb bundles via assets/notes.
     } else {
         qWarning() << "openPdfDocument: Failed to create tab for document";
     }

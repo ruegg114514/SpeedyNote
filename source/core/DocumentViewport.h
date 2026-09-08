@@ -3780,6 +3780,9 @@ private:
     int m_resizingNotesPage = -1;          ///< Page whose notes divider is being dragged (<0 = none)
     qreal m_resizeStartX = 0.0;            ///< Viewport X where the divider drag started
     qreal m_resizeStartWidth = 0.0;        ///< Column width when the drag started
+    int m_touchResizeDividerPage = -1;     ///< Page whose notes divider is being resized by a finger (<0 = none)
+    qreal m_touchResizeStartX = 0.0;       ///< Viewport X where the touch resize started
+    qreal m_touchResizeStartWidth = 0.0;   ///< Column width when the touch resize started
     QMap<int, QVector<VectorStroke>> m_sideNotesStrokes;  ///< Per-page notes strokes
     VectorStroke m_sideNotesCurrentStroke;  ///< Stroke being drawn in notes area
     bool m_isDrawingSideNotes = false;      ///< Currently drawing in notes area

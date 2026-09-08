@@ -5226,6 +5226,39 @@ bool DocumentViewport::event(QEvent* event)
             }
         }
         
+        // Notes-divider resize via touch. When the finger starts (or drifts
+        // onto) a divider grip, resizing the notes column must win over the pan
+        // gesture: otherwise the PDF pans together with the finger while the
+        // user tries to drag the column width. The sequence is therefore routed
+        // straight to setSideNotesWidthOnPage instead of the touch handler.
+        if (m_touchResizeDividerPage >= 0) {
+            if (event->type() == QEvent::TouchUpdate
+                && !SN_TOUCH_POINTS(touchEvent).isEmpty()) {
+                const QPointF tp = SN_TP_POS(SN_TOUCH_POINTS(touchEvent).first());
+                const qreal widthDelta = (tp.x() - m_touchResizeStartX) / m_zoomLevel;
+                setSideNotesWidthOnPage(m_touchResizeDividerPage,
+                                        m_touchResizeStartWidth + widthDelta);
+                event->accept();
+                return true;
+            }
+            if (event->type() == QEvent::TouchEnd || event->type() == QEvent::TouchCancel) {
+                const int page = m_touchResizeDividerPage;
+                m_touchResizeDividerPage = -1;
+                if (event->type() == QEvent::TouchEnd
+                    && !SN_TOUCH_POINTS(touchEvent).isEmpty()) {
+                    const QPointF tp = SN_TP_POS(SN_TOUCH_POINTS(touchEvent).first());
+                    const qreal widthDelta = (tp.x() - m_touchResizeStartX) / m_zoomLevel;
+                    setSideNotesWidthOnPage(page, m_touchResizeStartWidth + widthDelta);
+                }
+                saveSideNotes();
+                event->accept();
+                return true;
+            }
+            // Stray touch while already resizing: keep swallowing it.
+            event->accept();
+            return true;
+        }
+
         // Check if the touch started on a child widget (a format bar, the
         // inline editor, the add-page button). If so, let Qt's normal event
         // propagation handle it instead of intercepting.
@@ -5237,6 +5270,17 @@ bool DocumentViewport::event(QEvent* event)
             m_touchSequenceOnChild = false;
             if (!SN_TOUCH_POINTS(touchEvent).isEmpty()) {
                 QPointF touchPos = SN_TP_POS(SN_TOUCH_POINTS(touchEvent).first());
+                // If the finger lands on a notes-divider grip, start a width
+                // resize instead of a pan. The hit test checks the enlarged grip
+                // box first, so it is a comfortable touch target on a tablet.
+                const int divPage = notesDividerPageAtViewport(touchPos);
+                if (divPage >= 0) {
+                    m_touchResizeDividerPage = divPage;
+                    m_touchResizeStartX = touchPos.x();
+                    m_touchResizeStartWidth = sideNotesWidthFor(divPage);
+                    event->accept();
+                    return true;
+                }
                 QWidget* childWidget = childAt(touchPos.toPoint());
 
                 // If touch is on a child widget (not directly on DocumentViewport),
