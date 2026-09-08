@@ -15,6 +15,7 @@
 #include <QDateTime>
 #include <QFile>
 #include <QTextStream>
+#include <ios>
 #include <algorithm>
 
 #include "MainWindow.h"
@@ -423,11 +424,11 @@ QString crashDumpDir()
     // upload. If that's not writable (e.g. Program Files), fall back to the
     // local app-data folder so we never silently fail to capture.
     QString exeDir = QFileInfo(QCoreApplication::applicationFilePath()).absolutePath();
-    QDir d(exeDir);
-    if (d.exists() && d.isWritable()) {
-        return exeDir;
+    QFileInfo probe(exeDir);
+    if (exeDir.isEmpty() || !probe.exists() || !probe.isWritable()) {
+        return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     }
-    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    return exeDir;
 }
 
 LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
