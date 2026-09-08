@@ -37,6 +37,7 @@ enum class TouchGestureMode {
 #include <QStack>
 #include <QMap>
 #include <QSet>
+#include <QHash>
 
 class QContextMenuEvent;
 class QMenu;
@@ -3789,6 +3790,24 @@ private:
     int m_sideNotesActivePage = -1;         ///< Page index for active notes stroke
     QString m_sideNotesDir;                 ///< Directory for notes persistence
     
+    // Side-notes column off-screen cache. Committed note strokes were previously
+    // re-rasterized on every frame (a drawLine per segment in drawNotesStroke),
+    // which scaled O(noteCount * pointCount) and made paged scrolling over notes
+    // stutter — the more written, the worse. This caches the committed strokes
+    // once per (page, zoom, dpr, width, content-signature) and blits the result,
+    // mirroring the PDF/VectorLayer pixmap-cache design that keeps PDF-area
+    // writing smooth. The live stroke being drawn is NOT cached here — it is
+    // painted separately (paintEvent) and committed into the column afterward.
+    struct SideNotesColumnCacheEntry {
+        qreal zoom = 0.0;     ///< zoom level the column was rasterized at
+        qreal dpr = 1.0;      ///< device-pixel ratio at rasterize time
+        qreal notesW = 0.0;   ///< column width (document units) at rasterize time
+        QSizeF pageSize;      ///< page size — height determines pixmap height
+        QByteArray signature; ///< content fingerprint of the committed strokes
+        QPixmap pixmap;       ///< rendered committed-stroke layer (column-local coords)
+    };
+    QHash<int, SideNotesColumnCacheEntry> m_sideNotesColumnCache;  ///< pageIdx -> cached column
+    
     // ===== Page Layout Cache (Performance: O(1) page position lookup) =====
     mutable QVector<qreal> m_pageYCache;  ///< Cached Y position for each page (single column)
     mutable QSizeF m_cachedContentSize;   ///< Cached total content size (computed during layout)
@@ -4811,6 +4830,13 @@ private:
     void continueNotesStroke(const PointerEvent& pe);
     void endNotesStroke();
     void drawNotesStroke(QPainter& painter, const VectorStroke& stroke);
+    // Rasterizes a page's committed notes strokes into a column-local pixmap and
+    // blits it to the painter (already translated to the page's top-left corner).
+    // Uses m_sideNotesColumnCache to skip re-rasterization when (zoom, dpr, width,
+    // content-signature) are unchanged — scroll/pan repaints then become a single
+    // drawPixmap instead of O(note*point) drawLine calls. The lasso-selection
+    // hidden-stroke state is handled by the caller (drawNotesColumn) before calling.
+    void drawCachedNotesStrokes(QPainter& painter, Page* page, int pageIdx);
     // Draws the notes column (background, grid, drag handle, committed strokes) of
     // a page. Painter must already be translated to the page's top-left corner
     // (page-local coordinates).

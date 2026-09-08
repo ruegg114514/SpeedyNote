@@ -21071,22 +21071,117 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
         // at its origin); in the adopted (post-release, pre-confirm) state the
         // overlay still draws the moved copy, so leaving a note in the column
         // here makes the original reappear at its start point until confirm.
-        QSet<QString> hiddenIds;
-        if (m_lassoSelection.isValid()
-            && pageIdx == m_lassoNotesPage) {
+        const bool lassoHidesNotes =
+            m_lassoSelection.isValid() && pageIdx == m_lassoNotesPage;
+        if (lassoHidesNotes) {
+            QSet<QString> hiddenIds;
             for (int k = 0; k < m_lassoSelection.selectedStrokes.size(); ++k) {
                 if (k < m_lassoSelection.originalIndices.size()
                     && m_lassoSelection.originalIndices[k] == -1) {
                     hiddenIds.insert(m_lassoSelection.selectedStrokes[k].id);
                 }
             }
-        }
-        for (const VectorStroke& stroke : m_sideNotesStrokes[pageIdx]) {
-            if (!hiddenIds.isEmpty() && hiddenIds.contains(stroke.id)) continue;
-            drawNotesStroke(painter, stroke);
+            for (const VectorStroke& stroke : m_sideNotesStrokes[pageIdx]) {
+                if (!hiddenIds.isEmpty() && hiddenIds.contains(stroke.id)) continue;
+                drawNotesStroke(painter, stroke);
+            }
+        } else {
+            // Fast path: committed strokes are blitted from a cached pixmap so
+            // scroll/pan repaints don't re-rasterize them every frame.
+            drawCachedNotesStrokes(painter, page, pageIdx);
         }
         painter.restore();
     }
+}
+
+void DocumentViewport::drawCachedNotesStrokes(QPainter& painter, Page* page, int pageIdx)
+{
+    if (!page) return;
+    if (!m_sideNotesStrokes.contains(pageIdx)) return;
+    const QVector<VectorStroke>& strokes = m_sideNotesStrokes[pageIdx];
+    if (strokes.isEmpty()) return;
+
+    const qreal dpr = devicePixelRatioF();
+    const qreal zoom = m_zoomLevel > 0.0 ? m_zoomLevel : 1.0;
+
+    // Content signature: must change whenever the committed strokes change so the
+    // cache invalidates automatically on edit/undo/erase/etc. - we don't need to
+    // touch every mutation site. Include stroke id + point count; hashing the id
+    // keeps the fingerprint cheap (no per-point scan).
+    QByteArray sig;
+    sig.reserve(strokes.size() * 16);
+    for (const VectorStroke& st : strokes) {
+        const QByteArray id = st.id.toUtf8();
+        quint32 h = 2166136261u;         // FNV-1a over the id
+        for (char c : id) { h ^= (quint8)c; h *= 16777619u; }
+        sig.append(QByteArray::number((quint64)h).rightJustified(14, '0'));
+        sig.append(QByteArray::number(st.points.size()));
+        sig.append(';');
+    }
+
+    auto it = m_sideNotesColumnCache.find(pageIdx);
+    const bool cacheValid = it != m_sideNotesColumnCache.end()
+        && qFuzzyCompare(it->zoom, zoom)
+        && qFuzzyCompare(it->dpr, dpr)
+        && qFuzzyCompare(it->notesW, sideNotesWidthFor(pageIdx))
+        && it->pageSize == page->size
+        && it->signature == sig
+        && !it->pixmap.isNull();
+
+    if (!cacheValid) {
+        // Rasterize the committed strokes into a column-local pixmap. The painter
+        // is in page-local (document) units already scaled by zoom, so build the
+        // pixmap at (zoom*dpr) physical density with document-unit logical size —
+        // the same pattern VectorLayer uses for its stroke pixmap cache.
+        const QSizeF pageSize = page->size;
+        const qreal colW = sideNotesWidthFor(pageIdx);
+        const QSize pixPhys(
+            qMax(1, qRound(colW * zoom * dpr)),
+            qMax(1, qRound(pageSize.height() * zoom * dpr)));
+        // Guard against pathological sizes (very tall pages / high zoom): if the
+        // pixmap would exceed the stroke-cache ceiling, fall back to direct draw.
+        const qreal maxDim = VectorLayer::MAX_STROKE_CACHE_DIM;
+        if (pixPhys.width() > maxDim || pixPhys.height() > maxDim) {
+            for (const VectorStroke& stroke : strokes)
+                drawNotesStroke(painter, stroke);
+            return;
+        }
+        QPixmap pm(pixPhys);
+        pm.setDevicePixelRatio(zoom * dpr);
+        pm.fill(Qt::transparent);
+        {
+            QPainter p(&pm);
+            p.setRenderHint(QPainter::Antialiasing, true);
+            for (const VectorStroke& stroke : strokes)
+                drawNotesStroke(p, stroke);
+        }
+        SideNotesColumnCacheEntry entry;
+        entry.zoom = zoom;
+        entry.dpr = dpr;
+        entry.notesW = colW;
+        entry.pageSize = pageSize;
+        entry.signature = sig;
+        entry.pixmap = pm;
+        it = m_sideNotesColumnCache.insert(pageIdx, entry);
+
+        // Bound the cache so fast panning across a huge paged notebook (many pages
+        // each with a notes column) can't balloon memory. When over capacity, drop
+        // everything except the just-written entry — next paint rebuilds whatever
+        // is visible again, so this is only a temporary thrash for far-apart pages.
+        constexpr int kSideNotesCacheCap = 24;
+        if (m_sideNotesColumnCache.size() > kSideNotesCacheCap) {
+            for (auto cIt = m_sideNotesColumnCache.begin();
+                 cIt != m_sideNotesColumnCache.end();) {
+                if (cIt.key() == pageIdx) { ++cIt; continue; }
+                cIt = m_sideNotesColumnCache.erase(cIt);
+            }
+        }
+    }
+
+    // Blit. The pixmap's DPR is (zoom*dpr) so its logical size matches the notes
+    // column in document units; draw at the column origin (0,0 in the current,
+    // column-translated painter).
+    painter.drawPixmap(0, 0, it->pixmap);
 }
 
 void DocumentViewport::eraseNotesAt(const QPointF& viewportPos)
