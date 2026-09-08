@@ -36,6 +36,7 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <dbghelp.h>
+#include <psapi.h>
 #include <shellapi.h>
 #endif
 
