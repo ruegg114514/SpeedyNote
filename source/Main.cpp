@@ -463,7 +463,9 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
             mei.ExceptionPointers  = ep;
             mei.ClientPointers     = TRUE;
             MINIDUMP_TYPE mdt = static_cast<MINIDUMP_TYPE>(
-                MiniDumpWithDataSegs | MiniDumpWithUnloadedModules);
+                MiniDumpWithFullMemory |          // include all thread stacks
+                MiniDumpWithUnloadedModules |
+                MiniDumpWithHandleData);
             BOOL ok = MiniDumpWriteDump(GetCurrentProcess(),
                                         GetCurrentProcessId(),
                                         hFile, mdt,
@@ -565,6 +567,13 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
                     sf.AddrStack.Mode   = AddrModeFlat;
                     HANDLE proc = GetCurrentProcess();
                     HANDLE thr  = GetCurrentThread();
+                    // Enable symbol resolution so StackWalk64 can unwind
+                    // properly and SymFromAddr returns human-readable names.
+                    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME
+                                  | SYMOPT_LOAD_LINES);
+                    if (!SymInitialize(proc, nullptr, TRUE)) {
+                        SymInitialize(proc, nullptr, FALSE);
+                    }
                     for (int i = 0; i < 48; ++i) {
                         if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thr,
                                          &sf, &ctx, nullptr, SymFunctionTableAccess64,
@@ -572,9 +581,22 @@ LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
                             break;
                         if (sf.AddrPC.Offset == 0)
                             break;
+                        // Resolve symbol name (module!function+offset) if pdb
+                        // is nearby; otherwise fall back to module+offset.
+                        QString sym = describeAddr(sf.AddrPC.Offset);
+                        char sbuf[512] = {};
+                        DWORD64 disp = 0;
+                        SYMBOL_INFO* si = (SYMBOL_INFO*)sbuf;
+                        si->SizeOfStruct = sizeof(SYMBOL_INFO);
+                        si->MaxNameLen = (ULONG)(sizeof(sbuf) - sizeof(SYMBOL_INFO));
+                        if (SymFromAddr(proc, sf.AddrPC.Offset, &disp, si)) {
+                            sym = QString::fromUtf8(si->Name)
+                                  + "+0x" + QString::number(disp, 16);
+                        }
                         out << "  #" << QString::number(i).rightJustified(2) << " "
-                            << describeAddr(sf.AddrPC.Offset) << "\n";
+                             << sym << "\n";
                     }
+                    SymCleanup(proc);
                 }
             }
             out << "minidump      : " << dumpPath << "\n";
