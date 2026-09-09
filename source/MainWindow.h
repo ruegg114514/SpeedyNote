@@ -45,6 +45,7 @@
 #include "ui/NavigationBar.h"
 #include "ui/Toolbar.h"
 #include "ui/sidebars/LeftSidebarContainer.h"  // Phase S3: Left sidebar container
+// Side notes area is now integrated into DocumentViewport (no separate panel)
 
 class QThread;
 
@@ -574,6 +575,13 @@ private:
      * Used by saveDocument(), tab close handlers, and window close event.
      */
     bool saveNewDocumentWithDialog(Document* doc);
+
+    // ===== Side-notes persistence =====
+    // Writes the in-canvas notes columns (per-page strokes & widths) to the
+    // side-notes JSON beside the document, and loads them back on open. Must run
+    // only after the document has a permanent path so notesPath() is meaningful.
+    void persistSideNotes(Document* doc);
+    void loadSideNotes(DocumentViewport* viewport);
     
     /**
      * @brief Phase P.4.6: Render a thumbnail for page 0 of a document.
@@ -619,6 +627,9 @@ private:
 
     // Markdown notes sidebar functionality
     void toggleMarkdownNotesSidebar();  // Toggle markdown notes sidebar
+
+    // Side notes area (integrated into DocumentViewport)
+    void toggleSideNotesPanel();
     
     /**
      * @brief Phase M.8: Rebuild the right-sidebar outline tree from the
@@ -744,6 +755,9 @@ private:
     MarkdownNotesSidebar *markdownNotesSidebar;  // Sidebar for markdown notes
     // QPushButton *toggleMarkdownNotesButton; // Button to toggle markdown notes sidebar
     bool markdownNotesSidebarVisible = false;
+
+    // Side notes area is now integrated into DocumentViewport
+    bool m_sideNotesPanelVisible = false;  // Track visibility state for nav bar sync
 
 
     QWidget *sidebarContainer;  // Container for sidebar

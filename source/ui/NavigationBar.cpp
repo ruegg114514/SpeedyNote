@@ -75,6 +75,11 @@ void NavigationBar::setupUi()
     m_rightSidebarButton->setThemedIcon("rightsidebar");
     m_rightSidebarButton->setToolTip(tr("Toggle Markdown Notes"));
     mainLayout->addWidget(m_rightSidebarButton);
+
+    m_sideNotesButton = new ToggleButton(this);
+    m_sideNotesButton->setThemedIcon("document");  // Reuse document icon for notes
+    m_sideNotesButton->setToolTip(tr("Toggle Side Notes Panel (Ctrl+Shift+N)"));
+    mainLayout->addWidget(m_sideNotesButton);
     
     m_menuButton = new ActionButton(this);
     m_menuButton->setThemedIcon("menu");
@@ -105,6 +110,8 @@ void NavigationBar::connectSignals()
             this, &NavigationBar::shareClicked);
     connect(m_rightSidebarButton, &QPushButton::toggled,
             this, &NavigationBar::rightSidebarToggled);
+    connect(m_sideNotesButton, &QPushButton::toggled,
+            this, &NavigationBar::sideNotesToggled);
     connect(m_menuButton, &QPushButton::clicked,
             this, &NavigationBar::menuRequested);
 }
@@ -162,6 +169,7 @@ void NavigationBar::updateTheme(bool darkMode, const QColor &accentColor)
     m_fullscreenButton->setDarkMode(darkMode);
     m_shareButton->setDarkMode(darkMode);
     m_rightSidebarButton->setDarkMode(darkMode);
+    m_sideNotesButton->setDarkMode(darkMode);
     m_menuButton->setDarkMode(darkMode);
     
     // Style filename button to match theme
@@ -192,6 +200,12 @@ void NavigationBar::setRightSidebarChecked(bool checked)
 {
     const QSignalBlocker blocker(m_rightSidebarButton);
     m_rightSidebarButton->setChecked(checked);
+}
+
+void NavigationBar::setSideNotesChecked(bool checked)
+{
+    const QSignalBlocker blocker(m_sideNotesButton);
+    m_sideNotesButton->setChecked(checked);
 }
 
 void NavigationBar::setFullscreenChecked(bool checked)

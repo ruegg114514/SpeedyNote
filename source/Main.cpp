@@ -11,7 +11,14 @@
 #include <QStandardPaths>
 #include <QLibraryInfo>
 #include <QFont>
+#include <QDir>
+#include <QDateTime>
+#include <QFile>
+#include <QTextStream>
+#include <ios>
 #include <algorithm>
+#include <exception>
+#include <cstdlib>
 
 #include "MainWindow.h"
 #include "ui/launcher/Launcher.h"
@@ -27,6 +34,8 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <shlobj.h>
+#include <dbghelp.h>
+#include <shellapi.h>
 #endif
 
 // Platform helpers
@@ -395,6 +404,211 @@ static void enableDebugConsole()
     FreeConsole();
 #endif
 }
+
+// ----------------------------------------------------------------------------
+// Crash handling (Windows only)
+//
+// Installs an unhandled-exception filter that writes a minidump plus a plain
+// text crash log next to the executable whenever the process dies with an
+// access violation / terminating exception. This is a debug aid to pinpoint
+// the exact faulting stack for issues like "opening a saved paged/PDF notebook
+// crashes immediately on Windows." The dump file name embeds a timestamp so
+// multiple crashes are never overwritten.
+//
+// NOTE on symbols: to make the dumped stack human-readable you must also keep
+// the .pdb file that the build produced next to the .exe when reproducing. The
+// CI Windows build does produce speedynote.pdb; keep it alongside the app.
+// ----------------------------------------------------------------------------
+namespace {
+QString crashDumpDir()
+{
+    // Put dumps next to the executable (install dir) — easiest to find and
+    // upload. If that's not writable (e.g. Program Files), fall back to the
+    // local app-data folder so we never silently fail to capture.
+    QString exeDir = QFileInfo(QCoreApplication::applicationFilePath()).absolutePath();
+    QFileInfo probe(exeDir);
+    if (exeDir.isEmpty() || !probe.exists() || !probe.isWritable()) {
+        return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    }
+    return exeDir;
+}
+
+LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
+{
+    // 0x406D1388 is the magic "set thread name" exception used by debuggers and
+    // trigger_break — it is not a real crash, so ignore it.
+    if (ep && ep->ExceptionRecord
+        && ep->ExceptionRecord->ExceptionCode == 0x406D1388) {
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    const QString dir = crashDumpDir();
+    QDir().mkpath(dir);
+    const QString ts = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
+    const QString dumpPath = dir + "/speedynote_crash_" + ts + ".dmp";
+    const QString logPath  = dir + "/speedynote_crash_" + ts + ".txt";
+    const QString module  = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
+
+    // ---- 1. Write minidump ----
+    if (ep) {
+        HANDLE hFile = CreateFileW((const wchar_t*)dumpPath.utf16(),
+                                   GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            MINIDUMP_EXCEPTION_INFORMATION mei{};
+            mei.ThreadId           = GetCurrentThreadId();
+            mei.ExceptionPointers  = ep;
+            mei.ClientPointers     = TRUE;
+            MINIDUMP_TYPE mdt = static_cast<MINIDUMP_TYPE>(
+                MiniDumpWithDataSegs | MiniDumpWithUnloadedModules);
+            BOOL ok = MiniDumpWriteDump(GetCurrentProcess(),
+                                        GetCurrentProcessId(),
+                                        hFile, mdt,
+                                        ep ? &mei : nullptr,
+                                        nullptr, nullptr);
+            CloseHandle(hFile);
+            Q_UNUSED(ok);
+        }
+    }
+
+    // ---- 2. Write a plain-text crash log with the exception address ----
+    {
+        QFile log(logPath);
+        if (log.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&log);
+            out << "SpeedyNote crash log\n";
+            out << "time: " << ts << "\n";
+            out << "exe : " << module << "\n";
+            out << "pdb : keep " << module.left(module.lastIndexOf('.')) << ".pdb"
+                << " next to the exe to decode the stack\n";
+            if (ep && ep->ExceptionRecord) {
+                out << "exception code: 0x" << Qt::hex
+                    << (quint64)ep->ExceptionRecord->ExceptionCode << "\n";
+                out << "fault address : 0x" << Qt::hex
+                    << (quint64)ep->ExceptionRecord->ExceptionAddress << "\n";
+                if (ep->ContextRecord) {
+                    out << "context rip   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rip << "\n";
+                    out << "context rax   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rax << "\n";
+                    out << "context rbx   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rbx << "\n";
+                    out << "context rcx   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rcx << "\n";
+                    out << "context rdx   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rdx << "\n";
+                    out << "context rsi   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rsi << "\n";
+                    out << "context rdi   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rdi << "\n";
+                    out << "context rsp   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rsp << "\n";
+                    out << "context rbp   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rbp << "\n";
+                }
+            }
+            out << "minidump      : " << dumpPath << "\n";
+            log.close();
+        }
+    }
+
+    // Never return to the corrupted process: terminate hard so a minidump was
+    // already captured.
+    _exit(1);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// ---- Runtime logging (cross-platform, catches abort()/terminate()/Qt fatal
+// ---- that never reach the SEH filter) ------------------------------------
+static QString runtimeLogPath()
+{
+    return crashDumpDir() + "/speedynote_run.log";
+}
+
+static void appendRuntimeLog(const QString& line)
+{
+    QFile f(runtimeLogPath());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        QTextStream out(&f);
+        out << line;
+        if (!line.endsWith('\n')) {
+            out << "\n";
+        }
+        f.close();
+    }
+}
+
+static QtMessageHandler g_prevQtHandler = nullptr;
+
+static void qtMessageHandler(QtMsgType type, const QMessageLogContext& ctx,
+                             const QString& msg)
+{
+    const char* lvl = "warn";
+    switch (type) {
+        case QtDebugMsg:    lvl = "debug"; break;
+        case QtInfoMsg:     lvl = "info";  break;
+        case QtWarningMsg:  lvl = "warn";  break;
+        case QtCriticalMsg: lvl = "CRIT "; break;
+        case QtFatalMsg:    lvl = "FATAL"; break;
+    }
+
+    // Timestamp + level + source file (basename only) + message.
+    const QString tag =
+        QStringLiteral("%1 %2 [%3] %4")
+            .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz"))
+            .arg(QString::fromLatin1(lvl))
+            .arg(ctx.file ? QFileInfo(QString::fromUtf8(ctx.file)).fileName()
+                          : QStringLiteral("?"))
+            .arg(msg);
+    appendRuntimeLog(tag);
+
+    // Forward to the original handler so console/debugger output is unchanged.
+    if (g_prevQtHandler) {
+        g_prevQtHandler(type, ctx, msg);
+    }
+    // A Qt FATAL normally calls abort() internally; with a custom handler we
+    // must reproduce that behaviour ourselves.
+    if (type == QtFatalMsg) {
+        std::abort();
+    }
+}
+
+static void crashTerminateHandler()
+{
+    QString what = QStringLiteral("<no exception>");
+    if (std::current_exception()) {
+        try {
+            std::rethrow_exception(std::current_exception());
+        } catch (const std::exception& e) {
+            what = QString::fromUtf8(e.what());
+        } catch (...) {
+            what = QStringLiteral("<non-std exception>");
+        }
+    }
+    appendRuntimeLog(QStringLiteral("%1 TERMINATE std::exception::what() = %2")
+                         .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz"))
+                         .arg(what));
+    std::abort();
+}
+
+bool installCrashHandler()
+{
+#ifndef _DEBUG
+    // Only meaningful when built with symbols present; harmless otherwise.
+    SetUnhandledExceptionFilter(terminateCrashHandler);
+#endif
+    // Also route (and persist) every qWarning/qCritical/qFatal so crashes that
+    // abort()/terminate() without reaching the SEH filter still leave a trace.
+    g_prevQtHandler = qInstallMessageHandler(qtMessageHandler);
+    std::set_terminate(crashTerminateHandler);
+    appendRuntimeLog(QStringLiteral("%1 --- SpeedyNote runtime log started ---")
+                         .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz")));
+
+    // Print where logs will land so the user can find them easily.
+    qInfo("SpeedyNote runtime log -> %s", qPrintable(runtimeLogPath()));
+    return true;
+}
+} // namespace
 #endif // Q_OS_WIN
 
 // ============================================================================
@@ -913,6 +1127,7 @@ int main(int argc, char* argv[])
 #ifdef Q_OS_WIN
     applyWindowsPalette(app);
     applyWindowsFonts(app);
+    installCrashHandler();
 #endif
 
 #ifdef Q_OS_ANDROID

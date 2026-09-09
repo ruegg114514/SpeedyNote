@@ -524,7 +524,13 @@ MainWindow::MainWindow(QWidget *parent)
                 // the viewport pointer and access its members, so they must complete
                 // before we clear the document.
                 vp->cancelAndWaitForBackgroundThreads();
-                
+
+                // Persist the in-canvas notes columns before the viewport/document are
+                // destroyed. For a raw PDF, persistSideNotes writes to the stable
+                // per-PDF notes location (Document::notesPath), so reopening the same
+                // PDF restores the annotations made on it.
+                persistSideNotes(doc);
+
                 // Clear viewport's document pointer BEFORE deleting Document.
                 // This triggers cleanup of undo stacks and other document-related
                 // data structures while the document is still valid.
@@ -827,7 +833,17 @@ void MainWindow::setupUi() {
     markdownNotesSidebar->setMinimumWidth(220);
     markdownNotesSidebar->setMaximumWidth(600);
     markdownNotesSidebar->setVisible(false); // Hidden by default
-    
+
+    // Side notes area is now integrated into DocumentViewport (no separate panel widget)
+
+    // Keyboard shortcut: Ctrl+Shift+N to toggle side notes panel
+    {
+        auto* sideNotesShortcut = new QShortcut(QKeySequence("Ctrl+Shift+N"), this);
+        connect(sideNotesShortcut, &QShortcut::activated, this, [this]() {
+            toggleSideNotesPanel();
+        });
+    }
+
     // Phase M.3: Connect new signals for LinkObject-based markdown notes
     
     // Handle note content changes - save to file
@@ -1139,6 +1155,10 @@ void MainWindow::setupUi() {
             QApplication::processEvents();
             updateActionBarPosition();
         }
+    });
+    connect(m_navigationBar, &NavigationBar::sideNotesToggled, this, [this](bool) {
+        // The side-notes button adds/removes a notes column on the current page.
+        toggleSideNotesPanel();
     });
     connect(m_navigationBar, &NavigationBar::menuRequested, this, [this]() {
         // Show overflow menu at menu button position
@@ -3030,6 +3050,9 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
     // viewport's own state untouched, so nothing above would fire and the
     // search bar would stay pushed down by the banner that is no longer there.
     updatePdfSearchBarPosition();
+
+    // Side notes area is now integrated into DocumentViewport - no sync needed
+    // (notes area uses the same pan/zoom/tool state as the viewport automatically)
 }
 
 void MainWindow::applySubToolbarValuesToViewport(ToolType tool)
@@ -3775,6 +3798,10 @@ bool MainWindow::saveNewDocumentWithDialog(Document* doc)
             tr("Failed to save document to:\n%1").arg(filePath));
         return false;
     }
+
+    // Persist the in-canvas notes columns alongside the newly-saved bundle
+    // (covers both "Save As" and first-time saves of a new document).
+    persistSideNotes(doc);
     
     // Phase P.4.6: Save thumbnail to NotebookLibrary
     {
@@ -3864,6 +3891,9 @@ void MainWindow::saveDocument()
         return;
     }
 
+        // Persist the in-canvas notes columns alongside the saved bundle.
+        persistSideNotes(doc);
+
         // Update tab title (clear modified flag)
         int currentIndex = tabManager()->currentIndex();
         if (currentIndex >= 0) {
@@ -3917,6 +3947,30 @@ void MainWindow::saveDocument()
         tabManager()->setTabTitle(currentIndex, doc->name);
         tabManager()->markTabModified(currentIndex, false);
     }
+}
+
+void MainWindow::persistSideNotes(Document* doc)
+{
+    if (!doc || !tabManager()) return;
+    const QString notesDir = doc->notesPath();
+    if (notesDir.isEmpty()) return;
+    for (int i = 0; i < tabManager()->tabCount(); ++i) {
+        DocumentViewport* vp = tabManager()->viewportAt(i);
+        if (vp && vp->document() == doc) {
+            vp->setSideNotesDir(notesDir);
+            vp->saveSideNotes();
+            return;
+        }
+    }
+}
+
+void MainWindow::loadSideNotes(DocumentViewport* viewport)
+{
+    if (!viewport || !viewport->document()) return;
+    const QString notesDir = viewport->document()->notesPath();
+    if (notesDir.isEmpty()) return;
+    viewport->setSideNotesDir(notesDir);
+    viewport->loadSideNotes();
 }
 
 // MAC.3: "Save As..." entry point. Always prompts for a new path even if the
@@ -4714,6 +4768,10 @@ void MainWindow::openPdfDocument(const QString &filePath)
         qDebug() << "openPdfDocument: Loaded PDF with" << doc->pageCount() 
                  << "pages from" << filePath;
 #endif
+        // NOTE: no PDF-reopen side-notes auto-restore here on purpose. The
+        // per-PDF "reopen restore" feature is intentionally NOT enabled — plain
+        // PDFs open blank and stable (see Document::notesPath). Side notes only
+        // persist for .snb bundles via assets/notes.
     } else {
         qWarning() << "openPdfDocument: Failed to create tab for document";
     }
@@ -5510,6 +5568,7 @@ void MainWindow::updateTheme() {
     if (markdownNotesSidebar) {
         markdownNotesSidebar->setDarkMode(darkMode);
     }
+    // Side notes area is integrated into viewport - dark mode handled automatically
 }
     
 void MainWindow::saveThemeSettings() {
@@ -8818,11 +8877,16 @@ void MainWindow::toggleMarkdownNotesSidebar() {
         QSettings s("SpeedyNote", "App");
         int rightW = qBound(220, s.value("ui/rightSidebarWidth", 300).toInt(), 600);
         QList<int> sizes = m_contentSplitter->sizes();
-        if (sizes.size() == 3) {
+        if (sizes.size() >= 3) {
             const int total   = sizes[0] + sizes[1] + sizes[2];
             const int leftW   = sizes[0];
             const int canvasW = qMax(1, total - leftW - rightW);
-            m_contentSplitter->setSizes({leftW, canvasW, rightW});
+            // Preserve 4th element (side notes panel) if present
+            if (sizes.size() == 4) {
+                m_contentSplitter->setSizes({leftW, canvasW, rightW, sizes[3]});
+            } else {
+                m_contentSplitter->setSizes({leftW, canvasW, rightW});
+            }
         }
     }
 
@@ -8860,6 +8924,43 @@ void MainWindow::toggleMarkdownNotesSidebar() {
         // REMOVED S1: positionLeftSidebarTabs() removed - floating tabs replaced by LeftSidebarContainer
         // MW2.2: Removed dial container positioning
     });
+}
+
+// ===== Side Notes Panel (PDF annotation side panel) =====
+
+void MainWindow::toggleSideNotesPanel()
+{
+    DocumentViewport* vp = currentViewport();
+    if (!vp) return;
+
+    // The notes strokes & per-page widths are loaded once when the document
+    // opens (MainWindow::loadSideNotes), so toggling ONLY shows/hides the
+    // column and must not reload them here. Calling vp->loadSideNotes() on
+    // every click would clear m_sideNotesStrokes and force a full repaint:
+    // a stroke the user just drew is still memory-only (it is committed to
+    // m_sideNotesStrokes without an immediate save), so clearing then
+    // reloading an empty file silently drops it, desyncs the notes undo
+    // history from the cleared map, and re-enters the render path on top of
+    // the just-toggled layout - which crashes on the close-then-reopen cycle
+    // described in the bug report. Only keep the directory wiring (cheap,
+    // so consecutive saves/dir may be set even if the open-time load was
+    // skipped for a doc that opened without notes).
+    if (vp->document()) {
+        const QString notesDir = vp->document()->notesPath();
+        if (!notesDir.isEmpty()) {
+            vp->setSideNotesDir(notesDir);
+        }
+    }
+
+    // Toggle the current page's notes column on/off (default width = page width).
+    const bool on = vp->addSideNotesToCurrentPage();
+
+    // Sync navigation bar button state to the current page's column presence.
+    if (m_navigationBar) {
+        m_navigationBar->setSideNotesChecked(on);
+    }
+
+    updateActionBarPosition();
 }
 
 // Phase M.8: Rebuild right-sidebar outline tree (no .md file I/O).
@@ -9828,6 +9929,15 @@ void MainWindow::openFileInNewTab(const QString &filePath)
         // Paged: Center content horizontally within the viewport
         centerViewportContent(tabIndex);
     }
+
+    // Load any persisted in-canvas notes columns (per-page strokes & widths)
+    // for this document, once the new viewport is fully constructed.
+    QTimer::singleShot(0, this, [this, tabIndex]() {
+        if (tabManager()) {
+            loadSideNotes(tabManager()->viewportAt(tabIndex));
+        }
+    });
+
     /*
     // Step 6: Log success
     if (isEdgeless) {

@@ -47,6 +47,11 @@ public:
      * Set right sidebar toggle state (for external sync).
      */
     void setRightSidebarChecked(bool checked);
+
+    /**
+     * Set side notes panel toggle state (for external sync).
+     */
+    void setSideNotesChecked(bool checked);
     
     /**
      * Set fullscreen toggle state (for external sync).
@@ -73,6 +78,7 @@ signals:
     void fullscreenToggled(bool checked);
     void shareClicked();  // Opens the combined PDF/package export dialog
     void rightSidebarToggled(bool checked);  // Markdown notes
+    void sideNotesToggled(bool checked);     // Side notes panel for PDF annotation
     void menuRequested();
 
 private:
@@ -94,6 +100,7 @@ private:
     ToggleButton *m_fullscreenButton;
     ActionButton *m_shareButton;
     ToggleButton *m_rightSidebarButton;
+    ToggleButton *m_sideNotesButton;  // Side notes panel toggle
     ActionButton *m_menuButton;
     
     // State

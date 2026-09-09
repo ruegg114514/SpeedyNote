@@ -28,6 +28,7 @@ enum class TouchGestureMode {
 #include "Document.h"
 #include "Page.h"
 #include "ToolType.h"
+#include <QHash>
 #include "ViewportPerfMonitor.h"
 #include "../objects/HighlightRegion.h"
 #include "../objects/TextBoxObject.h"
@@ -143,6 +144,7 @@ struct UndoAction {
         int pageIndex = -1;
         Document::TileCoord tileCoord = {0, 0};
         VectorStroke stroke;
+        bool fromNotes = false;          ///< True if this segment belongs to a notes column
     };
 
     // Single-stroke actions
@@ -596,6 +598,55 @@ public:
      * Shortcut: Ctrl+2 toggles this setting.
      */
     void setAutoLayoutEnabled(bool enabled);
+
+    // ===== Side Notes Area (PDF annotation extension) =====
+
+    /**
+     * @brief Toggle the notes column for the current page on/off.
+     *
+     * Turning it on adds a notes column to the current page only, with a
+     * default width equal to the page's own width (document units). Each page
+     * independently owns its column and width.
+     * @return true if the current page now has a notes column.
+     */
+    bool addSideNotesToCurrentPage();
+
+    /**
+     * @brief Whether @p pageIndex currently has a notes column.
+     */
+    bool hasSideNotesOnPage(int pageIndex) const;
+
+    /**
+     * @brief Notes column width for @p pageIndex in document units (0 if none).
+     */
+    qreal sideNotesWidthFor(int pageIndex) const;
+
+    /**
+     * @brief Set the width (document units) of a page's notes column.
+     * @param width Width <= 0 removes the column for that page.
+     * @param pageIndex
+     */
+    void setSideNotesWidthOnPage(int pageIndex, qreal width);
+
+    /**
+     * @brief Set the directory used for notes persistence.
+     */
+    void setSideNotesDir(const QString& dir);
+
+    /**
+     * @brief Clear all notes strokes for the current page.
+     */
+    void clearSideNotesCurrentPage();
+
+    /**
+     * @brief Save all notes strokes to disk.
+     */
+    void saveSideNotes();
+
+    /**
+     * @brief Load notes strokes from disk.
+     */
+    void loadSideNotes();
     
     // ===== Tool Management (Task 2.1) =====
     
@@ -2720,7 +2771,19 @@ signals:
      * @param tool New tool type.
      */
     void toolChanged(ToolType tool);
-    
+
+    /**
+     * @brief Emitted when pen color changes.
+     * @param color New pen color.
+     */
+    void penColorChanged(QColor color);
+
+    /**
+     * @brief Emitted when pen thickness changes.
+     * @param thickness New pen thickness.
+     */
+    void penThicknessChanged(qreal thickness);
+
     /**
      * @brief Emitted when straight line mode is toggled.
      * @param enabled True if straight line mode is now enabled.
@@ -2922,6 +2985,11 @@ signals:
      * before calling convertOcrTextToTextBox().
      */
     void convertOcrTextRequested(InsertedObject* obj);
+
+    /**
+     * @brief Side notes area visibility changed.
+     */
+    void sideNotesVisibilityChanged(bool visible);
     
 protected:
     // ===== Qt Event Overrides =====
@@ -2946,6 +3014,12 @@ protected:
 #endif
     void leaveEvent(QEvent* event) override;        ///< Track pointer leaving viewport
     bool event(QEvent* event) override;  ///< Forwards touch events to handler
+
+    /// Recompute palm-contact state from the latest touch event. Returns true
+    /// when the current total down-touch count qualifies as palm contact
+    /// (>= PALM_REJECT_TOUCH_POINTS), which voids any in-flight stroke and
+    /// suppresses pen input until the hand lifts.
+    bool updatePalmRejection(class QTouchEvent* touchEvent);
 
     // Plan D2: cross-document page-transfer drop target.
     void dragEnterEvent(QDragEnterEvent* event) override;
@@ -2996,6 +3070,30 @@ private:
     /// 150ms single-shot. Restarted on every setPanOffset / setZoomLevel.
     /// On timeout, clears m_focusCacheSuspended and triggers an update().
     QTimer* m_focusRebuildTimer = nullptr;
+    /// True while the current stroke is running on a cold (Focus) page whose
+    /// viewport-clipped cache was not yet built. Forces the Direct tier for
+    /// the whole stroke so the first frame never rebuilds a cold page cache on
+    /// the UI thread (the "first stroke is blank, then appears" stall on pages
+    /// far from where the notes column was opened). Cleared in finishStroke().
+    bool m_directStrokePendingFocus = false;
+    /// Deferred single-shot: preloads the hovered page + neighbours off the
+    /// tablet event handler, so a hover over a cold, content-dense page never
+    /// blocks hover handling, while still landing the cache before the pen
+    /// usually touches down. startStroke()'s Direct fallback covers a quicker
+    /// touchdown.
+    QTimer* m_strokePreloadTimer = nullptr;
+    /// Page index queued for deferred stroke-cache preload, or -1 if none.
+    int m_strokePreloadPage = -1;
+    /// Palm-rejection threshold: when at least this many touch points are
+    /// concurrently down on the touchscreen (a palm / fingers resting on the
+    /// glass), pen input is treated as invalid - any in-flight stroke is
+    /// cancelled and new pen strokes are refused until the hand lifts.
+    static constexpr int PALM_REJECT_TOUCH_POINTS = 3;
+    /// True while palm contact (>= PALM_REJECT_TOUCH_POINTS down touches) is
+    /// active on the touchscreen.
+    bool m_palmContactActive = false;
+    /// Current down touch-point count across the active touch sequence.
+    int m_activeTouchCount = 0;
     
     // ===== Pan Tool State =====
     bool m_isPanToolDragging = false;
@@ -3136,6 +3234,11 @@ private:
         }
     };
     LassoSelection m_lassoSelection;
+    // For a paged lasso that also captured notes-column strokes: the originating
+    // page and the indices (into m_sideNotesStrokes[thatPage]) that are selected.
+    // Kept parallel to the notes copies added to m_lassoSelection.selectedStrokes.
+    int m_lassoNotesPage = -1;
+    QVector<int> m_lassoNotesIndices;
     QPolygonF m_lassoPath;               ///< The lasso path being drawn
     bool m_isDrawingLasso = false;       ///< Currently drawing a lasso path
     
@@ -3667,7 +3770,7 @@ private:
     
     // ----- Performance/Memory Settings -----
     /// CUSTOMIZABLE: PDF cache capacity - higher = more RAM, smoother scrolling (range: 4-16)
-    int m_pdfCacheCapacity = 6;  // Default for single column (visible + ±2 buffer)
+    int m_pdfCacheCapacity = 12;  // Enhanced: larger cache for smoother scrolling (was 6)
     /// CUSTOMIZABLE: Max undo actions - higher = more RAM (range: 10-200)
     static const int MAX_UNDO_ACTIONS = 100;
     
@@ -3683,7 +3786,7 @@ private:
     // ===== Async PDF Preloading =====
     QTimer* m_pdfPreloadTimer = nullptr;  ///< Debounce timer for preload requests
     QList<QFutureWatcher<QImage>*> m_activePdfWatchers;  ///< Active async render operations (returns QImage for thread safety)
-    static constexpr int PDF_PRELOAD_DELAY_MS = 150;   ///< Debounce delay (ms) before preloading
+    static constexpr int PDF_PRELOAD_DELAY_MS = 80;    ///< Debounce delay (ms) before preloading (was 150, reduced for faster preload)
 
     // ===== Scroll-activity gate (SP1) =====
     // The immediate-pan route (wheel/touchpad/scroll-bar) marks itself active on
@@ -3691,7 +3794,45 @@ private:
     // deferred housekeeping (preload/evict) once instead of on every event.
     QTimer* m_scrollSettleTimer = nullptr;  ///< Fires SCROLL_SETTLE_MS after the last scroll event
     bool m_scrollActive = false;            ///< True while actively scrolling (see isScrolling())
-    static constexpr int SCROLL_SETTLE_MS = 120;  ///< Idle delay (ms) before deferred housekeeping runs
+    static constexpr int SCROLL_SETTLE_MS = 60;   ///< Idle delay (ms) before deferred housekeeping runs (was 120, reduced for faster settle)
+
+    // ===== Pan-gesture → full-render transition =====
+    // After a deferred pan gesture ends, wheel events arriving within ~200ms
+    // would set m_scrollActive=true, causing lookupCachedPdfPage() to return
+    // null for uncached pages → blank flash. The grace period blocks
+    // m_scrollActive during this window so the full render path uses
+    // synchronous getCachedPdfPage() instead (no blank pages).
+    bool m_postPanGracePeriod = false;
+
+    // ===== Side Notes Area (PDF annotation extension) =====
+    QMap<int, qreal> m_sideNotesWidths;    ///< Per-page notes column width (pageIdx -> width). A page has a column iff present with width > 0.
+    qreal m_sideNotesMinWidth = 40.0;      ///< Minimum column width (document units)
+    qreal m_sideNotesMaxWidth = 8000.0;     ///< Maximum column width (document units). Generous so typical PDF page widths (stored in logical pixels, often >900) and free widening are not capped near the page's own default.
+    int m_resizingNotesPage = -1;          ///< Page whose notes divider is being dragged (<0 = none)
+    qreal m_resizeStartX = 0.0;            ///< Viewport X where the divider drag started
+    qreal m_resizeStartWidth = 0.0;        ///< Column width when the drag started
+    int m_touchResizeDividerPage = -1;     ///< Page whose notes divider is being resized by a finger (<0 = none)
+    qreal m_touchResizeStartX = 0.0;       ///< Viewport X where the touch resize started
+    qreal m_touchResizeStartWidth = 0.0;   ///< Column width when the touch resize started
+    QMap<int, QVector<VectorStroke>> m_sideNotesStrokes;  ///< Per-page notes strokes
+    VectorStroke m_sideNotesCurrentStroke;  ///< Stroke being drawn in notes area
+    bool m_isDrawingSideNotes = false;      ///< Currently drawing in notes area
+    int m_sideNotesActivePage = -1;         ///< Page index for active notes stroke
+    QString m_sideNotesDir;                 ///< Directory for notes persistence
+
+    // ===== Side-notes column pixel cache =====
+    // The notes column (background + dot grid + committed strokes) was re-vectorized
+    // every frame, so a drag panning over the notes region stuttered even though the
+    // main-page strokes draw from cached pixmaps. Cache the whole column per page
+    // (like the main-page stroke cache) so a pan becomes a cheap pixmap blit; rebuild
+    // when zoom / dpr / size / content fingerprint changes.
+    struct NotesColumnCacheEntry {
+        QPixmap pixmap;
+        quint64 sig = 0;   ///< content fingerprint the pixmap was built from
+    };
+    QHash<int, NotesColumnCacheEntry> m_notesColumnCache;
+    qreal m_notesCacheZoom = -1.0;  ///< zoom the cache was built at (cleared when it changes)
+    qreal m_notesCacheDpr = -1.0;   ///< dpr  the cache was built at
     
     // ===== Page Layout Cache (Performance: O(1) page position lookup) =====
     mutable QVector<qreal> m_pageYCache;  ///< Cached Y position for each page (single column)
@@ -4067,6 +4208,14 @@ private:
      * Call after scroll settles for smooth scrolling.
      */
     void preloadStrokeCaches();
+
+    /**
+     * @brief Build the stroke cache for a single page ahead of drawing.
+     * Called from hover handlers for the page currently under the pen/mouse, so a
+     * pen-down that follows never pays the synchronous first-time whole-page cache
+     * rebuild on a freshly visited page. No-op cost once the cache is already valid.
+     */
+    void preloadStrokeCacheForPage(int pageIndex);
     
     /**
      * @brief Evict tiles that are far from the visible area.
@@ -4160,6 +4309,18 @@ private:
      * and adds it to the appropriate tile.
      */
     void finishStrokeEdgeless();
+
+    // ===== Notes-column stroke splitting =====
+    // Splits an in-progress paged stroke (page-local coords) at the page's
+    // right edge when it crosses into that page's notes column. The on-page
+    // portion(s) are emitted as regular page strokes; the notes-column portions
+    // are emitted shifted into notes-local coordinates (x -= pageWidth). Both
+    // share a boundary point so the segments meet seamlessly. `pdfParts`/`notesParts`
+    // are filled; either may end up empty when the stroke never leaves/reaches
+    // that side.
+    void splitStrokeAtNotesBoundary(int pageIndex,
+                                    QVector<VectorStroke>& pdfParts,
+                                    QVector<VectorStroke>& notesParts) const;
     
     /**
      * @brief Create a straight line stroke between two points (Task 2.9).
@@ -4697,6 +4858,24 @@ private:
      * @param pressure Pressure value (0.0 to 1.0).
      */
     void addPointToStroke(const QPointF& pagePos, qreal pressure, qint64 timestamp = 0);
+
+    // ===== Side Notes Area Helpers =====
+    void startNotesStroke(const PointerEvent& pe, int pageIndex);
+    void continueNotesStroke(const PointerEvent& pe);
+    void endNotesStroke();
+    void drawNotesStroke(QPainter& painter, const VectorStroke& stroke);
+    // Draws the notes column (background, grid, drag handle, committed strokes) of
+    // a page. Painter must already be translated to the page's top-left corner
+    // (page-local coordinates).
+    void drawNotesColumn(QPainter& painter, Page* page, int pageIdx);
+    // Draws the pieces of committed notes strokes that fall OUTSIDE the notes
+    // column (swept onto the page body / past the far edge). Called after the
+    // page but before the column pixmap blit so swept ink stays on top of the
+    // page content instead of being clipped out by the column-sized cache.
+    void drawNotesColumnOverflow(QPainter& painter, Page* page, int pageIdx);
+    int notesDividerPageAtViewport(const QPointF& vpPos) const;
+    int notesPageAtViewport(const QPointF& vpPos) const;
+    void eraseNotesAt(const QPointF& viewportPos);
 
     /**
      * @brief Apply the active pen preset's minimum-width floor to a raw

@@ -1551,9 +1551,32 @@ bool Document::loadPageFromDisk(int index) const
             return true;
         }
         
-        // Not a PDF page and file doesn't exist - actual error
-        qWarning() << "Cannot load page: file not found" << pagePath;
-        return false;
+        // Not a PDF page and file doesn't exist. A bundle can legitimately hit
+        // this when it was saved before the save-side fix that guarantees every
+        // page referenced by page_order is actually flushed to <bundle>/pages/.
+        // Rather than returning false (which makes Document::page() return
+        // nullptr and the reopened notebook render blank/crash-prone), synthesize
+        // an empty default page so the document still opens. The user's edits
+        // are re-persisted on the next save.
+        qWarning() << "Cannot load page, synthesizing empty fallback: file not found"
+                   << pagePath;
+        {
+            auto page = std::make_unique<Page>();
+            page->uuid = uuid;
+            page->pageIndex = index;
+            page->backgroundType = defaultBackgroundType;
+            page->backgroundColor = defaultBackgroundColor;
+            page->gridColor = defaultGridColor;
+            page->gridSpacing = defaultGridSpacing;
+            page->lineSpacing = defaultLineSpacing;
+            auto sizeIt = m_pageMetadata.find(uuid);
+            QSizeF size = (sizeIt != m_pageMetadata.end())
+                        ? sizeIt->second : defaultPageSize;
+            if (size.isEmpty()) size = defaultPageSize;
+            page->size = size;
+            m_loadedPages[uuid] = std::move(page);
+            return true;
+        }
     }
     
     QByteArray data = file.readAll();
@@ -4909,10 +4932,19 @@ bool Document::saveBundle(const QString& path, bool finalize)
             }
             
             // When saving to new location: save ALL in-memory pages (with content)
-            // When saving to same location: only save dirty pages
-            bool needsSave = savingToNewLocation || m_dirtyPages.count(uuid) > 0;
+            // When saving to same location: only save dirty pages.
+            // Also write the page if its file is not yet on disk, mirroring the
+            // edgeless tile fallback (Document::saveBundle, "m_tileIndex.count(coord)==0").
+            // Without this, a non-dirty page that has never been flushed would be
+            // referenced by the manifest page_order but missing from <bundle>/pages/,
+            // so reopening the bundle could not load that page and the notebook
+            // opened blank/crash-prone.
+            QString pagePath = path + "/pages/" + uuid + ".json";
+            bool pageOnDisk = QFile::exists(pagePath);
+            bool needsSave = savingToNewLocation
+                             || m_dirtyPages.count(uuid) > 0
+                             || !pageOnDisk;
             if (needsSave) {
-                QString pagePath = path + "/pages/" + uuid + ".json";
                 QSaveFile file(pagePath);
                 file.setDirectWriteFallback(false);
                 QJsonDocument doc(pagePtr->toJson());
@@ -4963,6 +4995,8 @@ bool Document::saveBundle(const QString& path, bool finalize)
 
 std::unique_ptr<Document> Document::loadBundle(const QString& path)
 {
+    qInfo() << "[OPEN] 0 enter loadBundle path=" << path
+            << "snb_marker=" << QFileInfo::exists(path + "/.snb_marker");
     QString manifestPath = path + "/document.json";
     QFile manifestFile(manifestPath);
     if (!manifestFile.open(QIODevice::ReadOnly)) {
@@ -5000,6 +5034,8 @@ std::unique_ptr<Document> Document::loadBundle(const QString& path)
     // Set bundle path and enable lazy loading
     doc->m_bundlePath = path;
     doc->m_lazyLoadEnabled = true;
+    qInfo() << "[OPEN] 1 manifest parsed mode=" << (doc->mode == Mode::Edgeless ? "edgeless" : "paged")
+            << "format=" << bundleVersion;
     
     // ========== MODE-SPECIFIC LOADING ==========
     if (doc->mode == Mode::Edgeless) {
@@ -5117,6 +5153,12 @@ std::unique_ptr<Document> Document::loadBundle(const QString& path)
         }
     }
     
+    qInfo() << "[OPEN] 2 layout indexed pageOrder=" << doc->m_pageOrder.size()
+            << "metadata=" << doc->m_pageMetadata.size()
+            << "pdfSources=" << doc->m_pdfSources.size()
+            << "pageFilesHint=1first=" << (doc->m_pageOrder.value(0).isEmpty()
+              ? QStringLiteral("<none>") : doc->m_pageOrder.first());
+    
     // ========== RESOLVE & LOAD PDF SOURCES ==========
     // Probe all referenced sources through the same validated candidate resolver used
     // by rendering/search/export. This makes missing or corrupt non-primary sources
@@ -5136,6 +5178,7 @@ std::unique_ptr<Document> Document::loadBundle(const QString& path)
         }
     }
     
+    qInfo() << "[OPEN] 3 loadBundle done returning doc";
     return doc;
 }
 

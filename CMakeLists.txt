@@ -950,6 +950,7 @@ set(UI_SOURCES
     source/ui/panels/InlineTextBoxEditor.cpp
     source/ui/panels/TextBoxFormatBar.cpp
     source/ui/panels/LinkObjectBar.cpp
+    # Side notes area is now integrated into DocumentViewport (no separate panel)
     # Action bars
     source/ui/actionbars/ActionBar.cpp
     source/ui/actionbars/ActionBarContainer.cpp
@@ -1274,6 +1275,8 @@ if(WIN32)
         target_compile_definitions(speedynote PRIVATE SPEEDYNOTE_HAS_WINDOWS_INK)
         list(APPEND PLATFORM_LIBS windowsapp)
     endif()
+    # dbghelp for crash-handling (MiniDumpWriteDump)
+    list(APPEND PLATFORM_LIBS dbghelp)
     target_link_libraries(speedynote ${PLATFORM_LIBS})
 
 elseif(IOS)
