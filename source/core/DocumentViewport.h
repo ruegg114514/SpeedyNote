@@ -4868,6 +4868,11 @@ private:
     // a page. Painter must already be translated to the page's top-left corner
     // (page-local coordinates).
     void drawNotesColumn(QPainter& painter, Page* page, int pageIdx);
+    // Draws the pieces of committed notes strokes that fall OUTSIDE the notes
+    // column (swept onto the page body / past the far edge). Called after the
+    // page but before the column pixmap blit so swept ink stays on top of the
+    // page content instead of being clipped out by the column-sized cache.
+    void drawNotesColumnOverflow(QPainter& painter, Page* page, int pageIdx);
     int notesDividerPageAtViewport(const QPointF& vpPos) const;
     int notesPageAtViewport(const QPointF& vpPos) const;
     void eraseNotesAt(const QPointF& viewportPos);

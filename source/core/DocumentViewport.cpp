@@ -21352,6 +21352,12 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
         && cacheIt != m_notesColumnCache.end()
         && cacheIt->sig == sig
         && !cacheIt->pixmap.isNull()) {
+        // The cached column pixmap is column-sized, so any committed stroke ink
+        // swept outside the column (onto the page body or past the far edge) was
+        // clipped out of it. Repaint those out-of-column pieces on top of the
+        // page first; the column blit below then covers any cap spill-back at the
+        // column edges.
+        drawNotesColumnOverflow(painter, page, pageIdx);
         painter.drawPixmap(QPointF(page->size.width(), 0), cacheIt->pixmap);
         return;
     }
@@ -21377,6 +21383,12 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
         renderLocal(pp, 0.0);
         pp.end();
     }
+    if (!lassoEditingNotes) {
+        // Same overflow pass as the cache-hit path: ink swept onto the page body
+        // (or past the far edge) lies outside this column-sized pixmap, so it must
+        // be repainted on top of the page before the blit.
+        drawNotesColumnOverflow(painter, page, pageIdx);
+    }
     painter.drawPixmap(QPointF(page->size.width(), 0), px);
     if (!lassoEditingNotes) {
         // Bound memory: cached note columns are only needed while the page is near
@@ -21397,6 +21409,70 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
         }
         m_notesColumnCache.insert(pageIdx, NotesColumnCacheEntry{px, sig});
     }
+}
+
+// Repaints the parts of committed notes strokes that fall OUTSIDE the notes
+// column: notes-local x < 0 (swept onto the page body) or x > notesW (past the
+// far edge). The notes-column pixmap cache is column-sized, so those swept
+// pieces are clipped out of the cached blit; painting them here, after the page
+// content but before the column blit, keeps swept ink on top of the page body
+// after pen-up (the pre-cache renderer drew strokes fully unclipped).
+void DocumentViewport::drawNotesColumnOverflow(QPainter& painter, Page* page, int pageIdx)
+{
+    auto notesIt = m_sideNotesStrokes.constFind(pageIdx);
+    if (notesIt == m_sideNotesStrokes.constEnd()) return;
+
+    const qreal notesW = sideNotesWidthFor(pageIdx);
+    if (notesW <= 0) return;
+
+    painter.save();
+    painter.translate(page->size.width(), 0);  // into notes-column-local coords
+
+    const QVector<VectorStroke>& strokes = notesIt.value();
+    for (const VectorStroke& stroke : strokes) {
+        if (stroke.points.size() < 2) continue;
+
+        for (int i = 1; i < stroke.points.size(); ++i) {
+            const StrokePoint& p0 = stroke.points[i - 1];
+            const StrokePoint& p1 = stroke.points[i];
+            const QPointF a = p0.pos;
+            const QPointF b = p1.pos;
+
+            // Segment fully inside the column slab - already baked into the pixmap.
+            if (a.x() >= 0.0 && a.x() <= notesW
+                && b.x() >= 0.0 && b.x() <= notesW) continue;
+
+            qreal width = stroke.baseThickness * p1.pressure;
+            if (width < 0.5) width = 0.5;
+            painter.setPen(QPen(stroke.color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+
+            // Clip (a -> b) to the half-planes outside the slab [0, notesW] and
+            // draw each outside piece; the in-slab middle comes from the cached
+            // column pixmap. Any round cap spilling back into the slab is covered
+            // by that pixmap, which is blitted afterwards.
+            const qreal dx = b.x() - a.x();
+            if (a.x() < 0.0 || b.x() < 0.0) {
+                QPointF la = a, lb = b;
+                if ((a.x() < 0.0) != (b.x() < 0.0) && dx != 0.0) {
+                    const qreal t = (0.0 - a.x()) / dx;
+                    const QPointF c(a.x() + t * dx, a.y() + t * (b.y() - a.y()));
+                    if (a.x() < 0.0) lb = c; else la = c;
+                }
+                painter.drawLine(la, lb);
+            }
+            if (a.x() > notesW || b.x() > notesW) {
+                QPointF ra = a, rb = b;
+                if ((a.x() > notesW) != (b.x() > notesW) && dx != 0.0) {
+                    const qreal t = (notesW - a.x()) / dx;
+                    const QPointF c(a.x() + t * dx, a.y() + t * (b.y() - a.y()));
+                    if (a.x() > notesW) rb = c; else ra = c;
+                }
+                painter.drawLine(ra, rb);
+            }
+        }
+    }
+
+    painter.restore();
 }
 
 void DocumentViewport::eraseNotesAt(const QPointF& viewportPos)
