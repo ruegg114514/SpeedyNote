@@ -275,6 +275,22 @@ DocumentViewport::DocumentViewport(QWidget* parent)
         update();
     });
 
+    // Deferred stroke-cache preload on hover. Building the page under the pen
+    // synchronously inside the TabletMove handler could stall hover handling on
+    // a cold, content-dense page; deferring to the next idle tick keeps hover
+    // smooth while still landing the cache before pen-down in the common case.
+    // startStroke()'s Direct fallback covers the rare stroke that starts
+    // before this fires.
+    m_strokePreloadTimer = new QTimer(this);
+    m_strokePreloadTimer->setSingleShot(true);
+    connect(m_strokePreloadTimer, &QTimer::timeout, this, [this]() {
+        const int p = m_strokePreloadPage;
+        m_strokePreloadPage = -1;
+        if (p >= 0) {
+            preloadStrokeCacheForPage(p);
+        }
+    });
+
     // Tablet hover timer - detects when stylus leaves viewport by timeout
     // When stylus hovers to another widget, we stop receiving TabletMove events.
     // This timer fires if no tablet hover event received within the interval.
@@ -312,6 +328,12 @@ DocumentViewport::~DocumentViewport()
     // Cancel any pending preload requests
     if (m_pdfPreloadTimer) {
         m_pdfPreloadTimer->stop();
+    }
+
+    // Stop deferred stroke-cache preload (prevents lambda firing during
+    // destruction and dereferencing this).
+    if (m_strokePreloadTimer) {
+        m_strokePreloadTimer->stop();
     }
     
     // Stop gesture timer
@@ -390,6 +412,9 @@ DocumentViewport::~DocumentViewport()
 
 void DocumentViewport::setDocument(Document* doc)
 {
+    qInfo() << "[OPEN] 4 setDocument enter"
+            << (doc ? "newdoc" : "null")
+            << (doc ? (doc->mode == Document::Mode::Paged ? "paged" : "edgeless") : QString());
     if (m_document == doc) {
         return;
     }
@@ -4698,6 +4723,21 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
         if (m_tabletHoverTimer) {
             m_tabletHoverTimer->start();
         }
+
+        // Live-ink preparation: warm the page under the pen (and its
+        // neighbours) during hover so the pen-down that follows never pays the
+        // synchronous first-time cache rebuild on a freshly visited page.
+        // Building here is deferred to the next idle tick (m_strokePreloadTimer)
+        // so a hover over a cold, content-dense page never blocks hover
+        // handling; startStroke()'s Direct fallback covers an extra-fast
+        // touchdown that lands before the deferred build runs.
+        PageHit hoverPage = viewportToPage(newPos);
+        if (hoverPage.valid()) {
+            m_strokePreloadPage = hoverPage.pageIndex;
+            if (m_strokePreloadTimer) {
+                m_strokePreloadTimer->start(0);
+            }
+        }
         
         // Check if eraser tool is active or this is hardware eraser
         bool isEraserHover = (m_currentTool == ToolType::Eraser) ||
@@ -5205,6 +5245,15 @@ bool DocumentViewport::event(QEvent* event)
         if (touchEvent->device() &&
             touchEvent->device()->type() == SN_TOUCHPAD_DEVICE_TYPE) {
             return QWidget::event(event);
+        }
+
+        // Palm rejection: >= PALM_REJECT_TOUCH_POINTS concurrent touches mean a
+        // hand is resting on the glass. Treat that as invalid input - cancel any
+        // in-flight pen stroke and swallow the touch below so it neither draws
+        // nor pans/zooms until the hand lifts below the threshold.
+        if (updatePalmRejection(touchEvent)) {
+            event->accept();
+            return true;
         }
         
         // Touch cooldown: reject all touch events briefly after becoming visible
@@ -5894,6 +5943,12 @@ void DocumentViewport::preloadStrokeCaches()
                     && m_inlineEditSession.pageIndex == i) {
                     continue;
                 }
+                // Never evict/reset the page currently under an active pen
+                // stroke - dropping its cache mid-draw would force a rebuild on
+                // the next pen-move frame (the very hitch we're eliminating).
+                if (m_isDrawing && i == m_activeDrawingPage) {
+                    continue;
+                }
                 // CR-O1: Clear selection for objects on pages about to be evicted
                 Page* page = m_document->page(i);  // Already loaded, no disk I/O
                 if (page && !page->objects.empty()) {
@@ -5938,17 +5993,23 @@ void DocumentViewport::preloadStrokeCaches()
         Page* page = m_document->page(i);  // This triggers lazy load
         if (!page) continue;
 
-        // Skip building the capped cache when this page would switch to
-        // Focus tier on the next paint. The capped pixmap (~67 MB at high
-        // zoom) would be allocated here only to be `releaseStrokeCache()`'d
-        // immediately by `dispatchTileLayer` / `renderPage`. Off-screen-but-
-        // nearby pages keep using Capped (chooseRenderTier returns Capped
-        // when the tile doesn't intersect the viewport), so they still get
-        // the smooth-pan benefit of preload.
+        // A visible page at the writing zoom picks the Focus tier on its next
+        // paint. Skipping its Capped cache is right - the ~67 MB pixmap would
+        // be allocated only to be `releaseStrokeCache()`'d by renderPage - but
+        // skipping the page entirely left the Focus cache cold: the settle
+        // paint (while m_focusCacheSuspended) drew Direct, so a pen-down that
+        // beat the 150 ms focus-resume timer paid a synchronous Focus rebuild
+        // before the first ink frame. Warm the Focus cache here instead: this
+        // runs once on the stationary viewport (scroll settle / stroke end),
+        // so the freshly revealed page is ready before the user pens down.
+        // Off-screen-but-nearby pages keep using Capped (chooseRenderTier
+        // returns Capped when the tile doesn't intersect the viewport), so
+        // they still get the smooth-pan benefit of preload.
         const qreal pageMaxDim = qMax(page->size.width(), page->size.height());
         const bool wouldBeBlurred =
             effScale * pageMaxDim > VectorLayer::MAX_STROKE_CACHE_DIM;
         if (wouldBeBlurred && i >= first && i <= last) {
+            warmStrokeCacheForPage(i, /*allowFocusWhileInFlight=*/true);
             continue;
         }
 
@@ -5960,6 +6021,89 @@ void DocumentViewport::preloadStrokeCaches()
                 layer->ensureStrokeCacheValid(page->size, m_zoomLevel, dpr);
             }
         }
+    }
+}
+
+void DocumentViewport::warmStrokeCacheForPage(int pageIndex,
+                                              bool allowFocusWhileInFlight)
+{
+    Page* page = m_document ? m_document->page(pageIndex) : nullptr;  // May lazy-load
+    if (!page) {
+        return;
+    }
+    const qreal dpr = devicePixelRatioF();
+    const QPointF pageOrigin = pagePosition(pageIndex);
+    const QRectF tileLocalVp = visibleRect().translated(-pageOrigin);
+    QRectF focusRect;
+    const VectorLayer::RenderTier tier =
+        chooseRenderTier(page->size, tileLocalVp, &focusRect);
+
+    // The page being warmed is (or will be) the page under the pen. What it
+    // needs warm is the cache the first pen-down frame will blit: the
+    // viewport-clipped Focus cache for a visible high-zoom page. While pan/
+    // zoom/scroll is in flight the paint takes the cache-free Direct tier,
+    // but the very next settled paint (and the stroke after pen-down) uses
+    // Focus, so warming the Capped cache in that window would be dead weight
+    // (renderPage releases it on the first Focus paint) and leave pen-down
+    // cold. The hover path skips the Focus rebuild while the viewport is
+    // moving - the focus rect would be invalidated by the next move and
+    // rebuilding on every hover event would hitch the scroll - and warms
+    // nothing for that page (the scroll-settle path warms it once, on a
+    // stationary viewport). Off-screen neighbours and low-zoom pages keep
+    // the Capped cache, which is what their paints blit.
+    const bool viewportInFlight = m_focusCacheSuspended || m_scrollActive;
+    const bool isVisibleHighZoom =
+        tier == VectorLayer::RenderTier::Focus ||
+        tier == VectorLayer::RenderTier::Direct;
+    const bool warmFocus =
+        isVisibleHighZoom && !focusRect.isEmpty() &&
+        (tier == VectorLayer::RenderTier::Focus ||
+         (allowFocusWhileInFlight || !viewportInFlight));
+
+    for (int layerIdx = 0; layerIdx < page->layerCount(); ++layerIdx) {
+        VectorLayer* layer = page->layer(layerIdx);
+        if (!layer || !layer->visible || layer->isEmpty()) {
+            continue;
+        }
+        if (warmFocus) {
+            // Pre-warm the viewport-clipped focus cache (the one used on the
+            // on-screen page at high zoom). The settle/hover viewport matches
+            // the pen-down first-frame viewport, so ensureFocusCacheValid()
+            // will early-return on touchdown -> cheap blit.
+            layer->ensureFocusCacheValid(page->size, m_zoomLevel, dpr, focusRect);
+        } else if (!isVisibleHighZoom) {
+            // Context / moderate-zoom page: keep the whole-page Capped cache
+            // warm (also covers off-screen-but-nearby pages for smooth pan).
+            layer->ensureStrokeCacheValid(page->size, m_zoomLevel, dpr);
+        }
+    }
+}
+
+void DocumentViewport::preloadStrokeCacheForPage(int pageIndex)
+{
+    if (!m_document || m_document->isEdgeless()) {
+        return;
+    }
+    const int pageCount = m_document->pageCount();
+
+    // Warm each target page by the exact tier the next paint will choose, so
+    // what we pre-warm is what the first frame after pen-down actually blits.
+    // Writing zoom is on the Focus tier (effScale * pageMaxDim > 4096), so
+    // building only the whole-page Capped pixmap used to be wasted work:
+    // renderPage() releases the Capped cache on the very first Focus paint.
+    auto warmPage = [&](int idx) {
+        warmStrokeCacheForPage(idx, /*allowFocusWhileInFlight=*/false);
+    };
+
+    // Preload the hovered page plus its immediate neighbours, so a stroke that
+    // starts slightly across a page boundary, or the next page the pen drifts
+    // to, already has its cache ready too.
+    warmPage(pageIndex);
+    if (pageIndex - 1 >= 0) {
+        warmPage(pageIndex - 1);
+    }
+    if (pageIndex + 1 < pageCount) {
+        warmPage(pageIndex + 1);
     }
 }
 
@@ -6184,9 +6328,53 @@ void DocumentViewport::handlePointerEvent(const PointerEvent& pe)
     }
 }
 
+bool DocumentViewport::updatePalmRejection(QTouchEvent* touchEvent)
+{
+    if (!touchEvent) {
+        return m_palmContactActive;
+    }
+
+    // Fold the latest event's point states into a running down-counter. A
+    // QTouchEvent only carries the points that changed on some platforms, so
+    // we treat every non-Released point as currently touching the surface.
+    int down = 0;
+    const auto& pts = SN_TOUCH_POINTS(touchEvent);
+    for (const auto& tp : pts) {
+        if (tp.state() != Qt::TouchPointReleased) {
+            ++down;
+        }
+    }
+
+    if (touchEvent->type() == QEvent::TouchEnd
+        || touchEvent->type() == QEvent::TouchCancel) {
+        // Sequence fully ended - the surface is free of fingers.
+        m_activeTouchCount = 0;
+    } else if (down > 0) {
+        m_activeTouchCount = down;
+    }
+
+    const bool wasPalm = m_palmContactActive;
+    m_palmContactActive = (m_activeTouchCount >= PALM_REJECT_TOUCH_POINTS);
+
+    // A palm landing mid-draw must void the stroke already in flight, otherwise
+    // the pen keeps writing while the hand rests on the glass.
+    if (m_palmContactActive && !wasPalm && m_isDrawing) {
+        m_isDrawing = false;
+        m_currentStroke = VectorStroke();
+        m_lastRenderedPointIndex = 0;
+        update();  // Drop the partially-drawn live ink from the viewport
+    }
+
+    return m_palmContactActive;
+}
+
 void DocumentViewport::handlePointerPress(const PointerEvent& pe)
 {
     if (!m_document) return;
+
+    // Palm rejection: a hand resting on the touchscreen invalidates pen input,
+    // so don't start a new stroke while it is present.
+    if (m_palmContactActive) return;
     
     // Ensure keyboard focus for shortcuts (stylus events don't auto-focus like mouse)
     if (!hasFocus()) {
@@ -6344,6 +6532,9 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
 void DocumentViewport::handlePointerMove(const PointerEvent& pe)
 {
     if (!m_document || !m_pointerActive) return;
+
+    // Palm rejection: ignore pen movement while a hand is on the touchscreen.
+    if (m_palmContactActive) return;
     
     // Store old position for cursor update
     QPointF oldPos = m_lastPointerPos;
@@ -6528,6 +6719,17 @@ void DocumentViewport::handlePointerMove(const PointerEvent& pe)
 void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
 {
     if (!m_document) return;
+
+    // Palm rejection: if the press was voided (or never started) by a hand on
+    // the touchscreen, just unlatch pointer state instead of finalizing a
+    // stroke that was cancelled as invalid.
+    if (m_palmContactActive) {
+        m_pointerActive = false;
+        m_activeSource = PointerEvent::Unknown;
+        m_hardwareEraserActive = false;
+        update();
+        return;
+    }
     
     // ===== Side Notes Area: end stroke =====
     if (m_isDrawingSideNotes) {
@@ -6722,6 +6924,61 @@ void DocumentViewport::startStroke(const PointerEvent& pe)
     
     m_isDrawing = true;
     m_activeDrawingPage = pe.pageHit.pageIndex;
+
+    // Live-ink first-frame guarantee. Building a whole-page (Capped) or
+    // viewport-clipped (Focus) cache synchronously here blocks the UI thread
+    // on a page whose caches are still cold, which is the "first stroke is
+    // blank, then it appears" stall. The defence in depth is:
+    //  - warmStrokeCacheForPage() pre-warms the hovered page + neighbours at
+    //    the exact tier pen-down will use (Focus for a visible high-zoom
+    //    page), and preloadStrokeCaches() warms the freshly revealed visible
+    //    pages when the scroll settles - so in the normal flows the caches
+    //    below early-return at ~zero cost.
+    //  - This synchronous build is the bounded last-resort fallback for a
+    //    pen-down that still beats both (e.g. landing within the ~60 ms
+    //    settle window of a scroll with the pen lifted during the scroll).
+    //    Focus is bounded by the viewport clip (focusRect = page ∩ viewport),
+    //    so it pays at most a single screen-sized rasterise, after which the
+    //    whole stroke renders on the fast Focus blit tier.
+    //
+    // The previously tried alternative - deferring the rebuild to pen-up and
+    // forcing the Direct tier for the whole stroke when the cache was cold -
+    // was worse: Direct re-vectorises and re-rasterises every committed stroke
+    // intersecting the focus rect on every pen-move frame. On a content-dense
+    // page those frames were so slow the live ink effectively stayed invisible
+    // until pen-up, appearing as "the whole stroke renders only after I lift".
+    if (!m_document->isEdgeless()) {
+        Page* cachePage = m_document->page(m_activeDrawingPage);
+        if (cachePage) {
+            VectorLayer* cacheLayer = cachePage->activeLayer();
+            const QPointF pageOrigin2 = pagePosition(m_activeDrawingPage);
+            const QRectF tileLocalVp2 = visibleRect().translated(-pageOrigin2);
+            QRectF focusRect2;
+            const VectorLayer::RenderTier tier =
+                chooseRenderTier(cachePage->size, tileLocalVp2, &focusRect2);
+
+            if (tier == VectorLayer::RenderTier::Focus) {
+                // The write tier. ensureFocusCacheValid() is bounded by the
+                // viewport clip (focusRect is page ∩ viewport), so it early-
+                // returns at ~zero cost when the preloads above already warmed
+                // the page, and pays a single screen-sized rasterise on a
+                // still-cold page so the stroke renders on the fast Focus
+                // blit tier.
+                const qreal dpr2 = devicePixelRatioF();
+                for (int li = 0; li < cachePage->layerCount(); ++li) {
+                    VectorLayer* l = cachePage->layer(li);
+                    if (l && l->visible && !l->isEmpty()) {
+                        l->ensureFocusCacheValid(cachePage->size, m_zoomLevel,
+                                                 dpr2, focusRect2);
+                    }
+                }
+            } else if (tier == VectorLayer::RenderTier::Capped
+                       && cacheLayer && cacheLayer->visible && !cacheLayer->isEmpty()) {
+                cacheLayer->ensureStrokeCacheValid(cachePage->size, m_zoomLevel,
+                                                   devicePixelRatioF());
+            }
+        }
+    }
     
     // Initialize new stroke
     m_currentStroke = VectorStroke();
@@ -6823,6 +7080,12 @@ void DocumentViewport::finishStroke()
         m_isDrawing = false;
         m_currentStroke = VectorStroke();
         m_currentStrokeCache = QPixmap();  // Release cache memory
+        if (m_directStrokePendingFocus) {
+            m_directStrokePendingFocus = false;
+            // Re-enable the Focus tier and let the rebuild debounce schedule
+            // one paint so the page returns to the fast pixmap path.
+            if (m_focusRebuildTimer) m_focusRebuildTimer->start(0);
+        }
         return;
     }
     
@@ -6897,6 +7160,15 @@ void DocumentViewport::finishStroke()
     m_currentStroke = VectorStroke();
     m_isDrawing = false;
     m_lastRenderedPointIndex = 0;  // Reset incremental rendering state
+
+    // If this stroke ran on a cold Focus page in Direct mode (pen-down without
+    // a preceding hover preload), restore the Focus tier now and rebuild the
+    // viewport-clipped cache once, off the interaction path, so subsequent
+    // strokes on the visible page are cheap pixmap blits again.
+    if (m_directStrokePendingFocus) {
+        m_directStrokePendingFocus = false;
+        if (m_focusRebuildTimer) m_focusRebuildTimer->start(0);
+    }
     
     // Keep m_currentStrokeCache allocated for reuse by the next stroke.
     // resetCurrentStrokeCache() will clear it with fill(Qt::transparent).
@@ -20990,198 +21262,257 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
     const qreal notesW = sideNotesWidthFor(pageIdx);
     if (notesW <= 0) return;
 
-    QRectF notesRect(page->size.width(), 0, notesW, page->size.height());
+    const qreal pageH = page->size.height();
 
-    // Notes background - white (explicit user requirement)
-    painter.fillRect(notesRect, Qt::white);
+    // While a notes lasso is active the hidden-block set changes per frame and the
+    // overlay already draws the dragged strokes, so the column must be redrawn live
+    // (never from the cached copy) to keep the source strokes in step.
+    const bool lassoEditingNotes =
+        m_lassoSelection.isValid() && pageIdx == m_lassoNotesPage;
 
-    // Subtle dot grid pattern for notes area.
-    // IMPORTANT (performance): the grid loop must only cover the currently
-    // visible part of the column. During a pan the gesture fast path repaints
-    // just the thin strip that entered the viewport (clipRegion), but drawing
-    // points for the FULL column height every frame was a serialized per-frame
-    // cost on the raster thread - it made scrolling over notes regions visibly
-    // stutter even though the CPU average looked flat. Clamping to the clip
-    // turns the per-frame cost into roughly "strip size" instead of "column
-    // size". Start at the first grid line inside the clip so dots stay aligned
-    // with the full-column grid.
-    painter.setPen(QPen(QColor(205, 214, 226), 0.5 / m_zoomLevel));
-    qreal gridSpacing = 20.0;
-    QRectF gridClip(0, 0, notesW, page->size.height());
-    // clipBoundingRect() is in logical (painter) coordinates, i.e. the same
-    // page-local/document space the grid points are drawn in, so intersect
-    // directly - no manual inverse transform needed.
-    const QRectF clip = painter.clipBoundingRect();
-    if (!clip.isNull() && !clip.isEmpty()) {
-        gridClip = gridClip.intersected(clip);
-    }
-    if (gridClip.isEmpty() || gridClip.width() <= 0 || gridClip.height() <= 0) return;
-    for (qreal x = gridSpacing * qMax<qreal>(1, qCeil(gridClip.left() / gridSpacing));
-         x < qMin<qreal>(notesW, gridClip.right()); x += gridSpacing) {
-        for (qreal y = gridSpacing * qMax<qreal>(1, qCeil(gridClip.top() / gridSpacing));
-             y < qMin<qreal>(page->size.height(), gridClip.bottom()); y += gridSpacing) {
-            painter.drawPoint(QPointF(x, y));
+    // Content fingerprint: catches any committed-stroke mutation, column resize,
+    // zoom or dpr change. Iterating strokes is cheap relative to vectorizing them,
+    // and lets us skip explicit invalidation at every m_sideNotesStrokes mutation.
+    quint64 sig = 1469598103934665603ull;  // FNV offset basis
+    auto mix = [&sig](quint64 v) { sig ^= v; sig *= 1099511628211ull; };
+    auto quant = [](qreal v) { return quint64(v * 1000.0); };
+    mix(quint64(pageIdx));
+    mix(quant(notesW));
+    mix(quant(pageH));
+    mix(quant(m_zoomLevel));
+    mix(quant(devicePixelRatioF()));
+    mix(m_resizingNotesPage == pageIdx ? 1u : 0u);
+    auto notesIt = m_sideNotesStrokes.constFind(pageIdx);
+    if (notesIt != m_sideNotesStrokes.constEnd()) {
+        const QVector<VectorStroke>& strokes = notesIt.value();
+        mix(quint64(strokes.size()) + 0x100000000ull);  // non-empty marker
+        for (const VectorStroke& s : strokes) {
+            quint64 h = 1469598103934665603ull;
+            for (QChar c : s.id) { h ^= quint64(c.unicode()); h *= 1099511628211ull; }
+            mix(h);
+            mix(quint64(s.points.size()));
+            mix(quant(s.color.rgba()));
+            mix(quant(s.baseThickness));
+            if (!s.points.isEmpty()) {
+                const StrokePoint& last = s.points.last();
+                mix(quant(last.pos.x()));
+                mix(quant(last.pos.y()));
+            }
         }
+    } else {
+        mix(0x100000000ull);  // marker for "no notes map entry" vs an empty one
     }
 
-    // A visible resize grip pinned to the top of the divider. On touch/tablet
-    // this is the ONLY way the column width is adjusted (the old thin divider
-    // line was removed, so no line is drawn here): the grip gives the layout a
-    // clear, finger-sized handle (highlighted while the column is resized).
-    {
-        const qreal z = m_zoomLevel > 0.0 ? m_zoomLevel : 1.0;
-        const qreal dx = page->size.width();
-        // Sizes kept in viewport px (mins make it finger-friendlier when
-        // zoomed out), converted back to pixel-space via z here since the
-        // painter is in document units.
-        const qreal gripWpx = qMax(18.0 * z, 20.0);
-        const qreal gripHpx = qMax(44.0 * z, 48.0);
-        const qreal gripW = gripWpx / z;
-        const qreal gripH = gripHpx / z;
-        const qreal gripTop = qMax(14.0, 8.0 / z);
-        painter.save();
-        QColor gripColor = (m_resizingNotesPage == pageIdx)
-            ? QColor(76, 104, 168) : QColor(158, 172, 198);
-        painter.setBrush(gripColor);
-        painter.setPen(QPen(QColor(255, 255, 255), 1.5));
-        painter.drawRoundedRect(
-            QRectF(dx - gripW / 2.0, gripTop, gripW, gripH), 5.0 / z, 5.0 / z);
-        painter.setPen(QPen(QColor(255, 255, 255), 1.6));
-        const qreal cx = dx;
-        qreal ny = gripTop + 12.0 / z;
-        const qreal span = 5.0 / z;
-        const qreal step = gripH / 3.0;
-        for (int g = 0; g < 3; ++g) {
-            painter.drawLine(QPointF(cx - span, ny), QPointF(cx + span, ny));
-            ny += step;
+    // Column-local renderer. dx shifts it into document space (page width) when
+    // painting straight to the viewport; 0 when baking the pixmap cache.
+    auto renderLocal = [&](QPainter& p, qreal dx) {
+        p.save();
+        p.translate(dx, 0);
+
+        QRectF notesRect(0, 0, notesW, pageH);
+        p.fillRect(notesRect, Qt::white);
+
+        // Dot grid, clamped to the visible clip so the per-frame strip repaint
+        // costs ~"strip size" instead of "full column" (see comment below).
+        p.setPen(QPen(QColor(205, 214, 226), 0.5 / m_zoomLevel));
+        qreal gridSpacing = 20.0;
+        QRectF gridClip(0, 0, notesW, pageH);
+        const QRectF clip = p.clipBoundingRect();
+        if (!clip.isNull() && !clip.isEmpty()) {
+            gridClip = gridClip.intersected(clip);
         }
-        painter.restore();
-    }
-
-    // Render committed notes strokes for this page. Strokes are stored in
-    // notes-column-local coordinates (origin at the column's left edge), so
-    // translate by the page width to land them inside the column instead of at
-    // the left of the PDF page.
-    if (m_sideNotesStrokes.contains(pageIdx)) {
-        painter.save();
-        painter.translate(page->size.width(), 0);
-        // While the lasso selection is active we must NOT paint the selected
-        // notes strokes as part of the column background. During a drag the
-        // overlay already draws them at the moved position (source would linger
-        // at its origin); in the adopted (post-release, pre-confirm) state the
-        // overlay still draws the moved copy, so leaving a note in the column
-        // here makes the original reappear at its start point until confirm.
-        const bool lassoHidesNotes =
-            m_lassoSelection.isValid() && pageIdx == m_lassoNotesPage;
-        if (lassoHidesNotes) {
-            QSet<QString> hiddenIds;
-            for (int k = 0; k < m_lassoSelection.selectedStrokes.size(); ++k) {
-                if (k < m_lassoSelection.originalIndices.size()
-                    && m_lassoSelection.originalIndices[k] == -1) {
-                    hiddenIds.insert(m_lassoSelection.selectedStrokes[k].id);
+        if (!gridClip.isEmpty() && gridClip.width() > 0 && gridClip.height() > 0) {
+            for (qreal x = gridSpacing * qMax<qreal>(1, qCeil(gridClip.left() / gridSpacing));
+                 x < qMin<qreal>(notesW, gridClip.right()); x += gridSpacing) {
+                for (qreal y = gridSpacing * qMax<qreal>(1, qCeil(gridClip.top() / gridSpacing));
+                     y < qMin<qreal>(pageH, gridClip.bottom()); y += gridSpacing) {
+                    p.drawPoint(QPointF(x, y));
                 }
             }
-            for (const VectorStroke& stroke : m_sideNotesStrokes[pageIdx]) {
-                if (!hiddenIds.isEmpty() && hiddenIds.contains(stroke.id)) continue;
-                drawNotesStroke(painter, stroke);
-            }
-        } else {
-            // Fast path: committed strokes are blitted from a cached pixmap so
-            // scroll/pan repaints don't re-rasterize them every frame.
-            drawCachedNotesStrokes(painter, page, pageIdx);
         }
-        painter.restore();
+
+        // Visible resize grip pinned to the top of the divider.
+        {
+            const qreal z = m_zoomLevel > 0.0 ? m_zoomLevel : 1.0;
+            const qreal gripWpx = qMax(18.0 * z, 20.0);
+            const qreal gripHpx = qMax(44.0 * z, 48.0);
+            const qreal gripW = gripWpx / z;
+            const qreal gripH = gripHpx / z;
+            // Divider sits at column-local x=0 (column left = page right edge), and
+            // the grip spans it, centered on the divider - same as the pre-cache code.
+            const qreal gripLeft = -gripW / 2.0;
+            const qreal gripTop = qMax(14.0, 8.0 / z);
+            QColor gripColor = (m_resizingNotesPage == pageIdx)
+                ? QColor(76, 104, 168) : QColor(158, 172, 198);
+            p.setBrush(gripColor);
+            p.setPen(QPen(QColor(255, 255, 255), 1.5));
+            p.drawRoundedRect(QRectF(gripLeft, gripTop, gripW, gripH), 5.0 / z, 5.0 / z);
+            p.setPen(QPen(QColor(255, 255, 255), 1.6));
+            const qreal cx = 0.0;            // divider x (column-local)
+            const qreal cy = gripTop + 12.0 / z;   // top handle-line y
+            const qreal span = 5.0 / z;
+            const qreal step = gripH / 3.0;
+            for (int g = 0; g < 3; ++g) {
+                p.drawLine(QPointF(cx - span, cy + g * step),
+                           QPointF(cx + span, cy + g * step));
+            }
+        }
+
+        // Committed notes strokes (notes-column-local coords, so no page-width offset
+        // needed here - the translate(dx) above handled placement in document space).
+        if (notesIt != m_sideNotesStrokes.constEnd()) {
+            QSet<QString> hiddenIds;
+            if (lassoEditingNotes) {
+                for (int k = 0; k < m_lassoSelection.selectedStrokes.size(); ++k) {
+                    if (k < m_lassoSelection.originalIndices.size()
+                        && m_lassoSelection.originalIndices[k] == -1) {
+                        hiddenIds.insert(m_lassoSelection.selectedStrokes[k].id);
+                    }
+                }
+            }
+            for (const VectorStroke& stroke : notesIt.value()) {
+                if (!hiddenIds.isEmpty() && hiddenIds.contains(stroke.id)) continue;
+                drawNotesStroke(p, stroke);
+            }
+        }
+        p.restore();
+    };
+
+    // Rebuild the cache lazily. A zoom/dpr change invalidates every entry: keeping
+    // this one zoom generation bounds memory and avoids stale-signed staleness.
+    const qreal dpr = devicePixelRatioF();
+    if (m_notesCacheZoom != m_zoomLevel || m_notesCacheDpr != dpr) {
+        m_notesColumnCache.clear();
+        m_notesCacheZoom = m_zoomLevel;
+        m_notesCacheDpr = dpr;
+    }
+
+    auto cacheIt = m_notesColumnCache.find(pageIdx);
+    if (!lassoEditingNotes
+        && cacheIt != m_notesColumnCache.end()
+        && cacheIt->sig == sig
+        && !cacheIt->pixmap.isNull()) {
+        // The cached column pixmap is column-sized, so any committed stroke ink
+        // swept outside the column (onto the page body or past the far edge) was
+        // clipped out of it. Repaint those out-of-column pieces on top of the
+        // page first; the column blit below then covers any cap spill-back at the
+        // column edges.
+        drawNotesColumnOverflow(painter, page, pageIdx);
+        painter.drawPixmap(QPointF(page->size.width(), 0), cacheIt->pixmap);
+        return;
+    }
+
+    // Bake the (unclipped) column into a pixmap once, then reuse it as a blit.
+    QSize phys((int)qCeil(notesW * m_zoomLevel * dpr),
+               (int)qCeil(pageH * m_zoomLevel * dpr));
+    if (phys.isEmpty() || phys.width() <= 0 || phys.height() <= 0) return;
+    // At extreme zoom the column pixmap would balloon (same reason the main stroke
+    // cache caps at MAX_STROKE_CACHE_DIM). If it would be huge, fall back to direct
+    // per-frame rendering rather than allocating an oversized buffer.
+    const int cap = VectorLayer::MAX_STROKE_CACHE_DIM;
+    if (phys.width() > cap || phys.height() > cap) {
+        renderLocal(painter, page->size.width());
+        return;
+    }
+    QPixmap px(phys);
+    px.setDevicePixelRatio(m_zoomLevel * dpr);
+    px.fill(Qt::white);
+    {
+        QPainter pp(&px);
+        pp.setRenderHint(QPainter::Antialiasing, true);
+        renderLocal(pp, 0.0);
+        pp.end();
+    }
+    if (!lassoEditingNotes) {
+        // Same overflow pass as the cache-hit path: ink swept onto the page body
+        // (or past the far edge) lies outside this column-sized pixmap, so it must
+        // be repainted on top of the page before the blit.
+        drawNotesColumnOverflow(painter, page, pageIdx);
+    }
+    painter.drawPixmap(QPointF(page->size.width(), 0), px);
+    if (!lassoEditingNotes) {
+        // Bound memory: cached note columns are only needed while the page is near
+        // the viewport. Evict entries whose pages have scrolled away (pageRect uses
+        // manifest metadata, so this never forces a lazy reload from disk).
+        const QRectF viewRect(
+            m_panOffset, QSizeF(width() / m_zoomLevel, height() / m_zoomLevel));
+        for (auto it2 = m_notesColumnCache.begin();
+             it2 != m_notesColumnCache.end();) {
+            if (it2.key() == pageIdx) { ++it2; continue; }
+            QRectF pr = pageRect(it2.key());
+            pr.adjust(0, 0, sideNotesWidthFor(it2.key()), 0);
+            if (!pr.intersects(viewRect)) {
+                it2 = m_notesColumnCache.erase(it2);
+            } else {
+                ++it2;
+            }
+        }
+        m_notesColumnCache.insert(pageIdx, NotesColumnCacheEntry{px, sig});
     }
 }
 
-void DocumentViewport::drawCachedNotesStrokes(QPainter& painter, Page* page, int pageIdx)
+// Repaints the parts of committed notes strokes that fall OUTSIDE the notes
+// column: notes-local x < 0 (swept onto the page body) or x > notesW (past the
+// far edge). The notes-column pixmap cache is column-sized, so those swept
+// pieces are clipped out of the cached blit; painting them here, after the page
+// content but before the column blit, keeps swept ink on top of the page body
+// after pen-up (the pre-cache renderer drew strokes fully unclipped).
+void DocumentViewport::drawNotesColumnOverflow(QPainter& painter, Page* page, int pageIdx)
 {
-    if (!page) return;
-    if (!m_sideNotesStrokes.contains(pageIdx)) return;
-    const QVector<VectorStroke>& strokes = m_sideNotesStrokes[pageIdx];
-    if (strokes.isEmpty()) return;
+    auto notesIt = m_sideNotesStrokes.constFind(pageIdx);
+    if (notesIt == m_sideNotesStrokes.constEnd()) return;
 
-    const qreal dpr = devicePixelRatioF();
-    const qreal zoom = m_zoomLevel > 0.0 ? m_zoomLevel : 1.0;
+    const qreal notesW = sideNotesWidthFor(pageIdx);
+    if (notesW <= 0) return;
 
-    // Content signature: must change whenever the committed strokes change so the
-    // cache invalidates automatically on edit/undo/erase/etc. - we don't need to
-    // touch every mutation site. Include stroke id + point count; hashing the id
-    // keeps the fingerprint cheap (no per-point scan).
-    QByteArray sig;
-    sig.reserve(strokes.size() * 16);
-    for (const VectorStroke& st : strokes) {
-        const QByteArray id = st.id.toUtf8();
-        quint32 h = 2166136261u;         // FNV-1a over the id
-        for (char c : id) { h ^= (quint8)c; h *= 16777619u; }
-        sig.append(QByteArray::number((quint64)h).rightJustified(14, '0'));
-        sig.append(QByteArray::number(st.points.size()));
-        sig.append(';');
-    }
+    painter.save();
+    painter.translate(page->size.width(), 0);  // into notes-column-local coords
 
-    auto it = m_sideNotesColumnCache.find(pageIdx);
-    const bool cacheValid = it != m_sideNotesColumnCache.end()
-        && qFuzzyCompare(it->zoom, zoom)
-        && qFuzzyCompare(it->dpr, dpr)
-        && qFuzzyCompare(it->notesW, sideNotesWidthFor(pageIdx))
-        && it->pageSize == page->size
-        && it->signature == sig
-        && !it->pixmap.isNull();
+    const QVector<VectorStroke>& strokes = notesIt.value();
+    for (const VectorStroke& stroke : strokes) {
+        if (stroke.points.size() < 2) continue;
 
-    if (!cacheValid) {
-        // Rasterize the committed strokes into a column-local pixmap. The painter
-        // is in page-local (document) units already scaled by zoom, so build the
-        // pixmap at (zoom*dpr) physical density with document-unit logical size —
-        // the same pattern VectorLayer uses for its stroke pixmap cache.
-        const QSizeF pageSize = page->size;
-        const qreal colW = sideNotesWidthFor(pageIdx);
-        const QSize pixPhys(
-            qMax(1, qRound(colW * zoom * dpr)),
-            qMax(1, qRound(pageSize.height() * zoom * dpr)));
-        // Guard against pathological sizes (very tall pages / high zoom): if the
-        // pixmap would exceed the stroke-cache ceiling, fall back to direct draw.
-        const qreal maxDim = VectorLayer::MAX_STROKE_CACHE_DIM;
-        if (pixPhys.width() > maxDim || pixPhys.height() > maxDim) {
-            for (const VectorStroke& stroke : strokes)
-                drawNotesStroke(painter, stroke);
-            return;
-        }
-        QPixmap pm(pixPhys);
-        pm.setDevicePixelRatio(zoom * dpr);
-        pm.fill(Qt::transparent);
-        {
-            QPainter p(&pm);
-            p.setRenderHint(QPainter::Antialiasing, true);
-            for (const VectorStroke& stroke : strokes)
-                drawNotesStroke(p, stroke);
-        }
-        SideNotesColumnCacheEntry entry;
-        entry.zoom = zoom;
-        entry.dpr = dpr;
-        entry.notesW = colW;
-        entry.pageSize = pageSize;
-        entry.signature = sig;
-        entry.pixmap = pm;
-        it = m_sideNotesColumnCache.insert(pageIdx, entry);
+        for (int i = 1; i < stroke.points.size(); ++i) {
+            const StrokePoint& p0 = stroke.points[i - 1];
+            const StrokePoint& p1 = stroke.points[i];
+            const QPointF a = p0.pos;
+            const QPointF b = p1.pos;
 
-        // Bound the cache so fast panning across a huge paged notebook (many pages
-        // each with a notes column) can't balloon memory. When over capacity, drop
-        // everything except the just-written entry — next paint rebuilds whatever
-        // is visible again, so this is only a temporary thrash for far-apart pages.
-        constexpr int kSideNotesCacheCap = 24;
-        if (m_sideNotesColumnCache.size() > kSideNotesCacheCap) {
-            for (auto cIt = m_sideNotesColumnCache.begin();
-                 cIt != m_sideNotesColumnCache.end();) {
-                if (cIt.key() == pageIdx) { ++cIt; continue; }
-                cIt = m_sideNotesColumnCache.erase(cIt);
+            // Segment fully inside the column slab - already baked into the pixmap.
+            if (a.x() >= 0.0 && a.x() <= notesW
+                && b.x() >= 0.0 && b.x() <= notesW) continue;
+
+            qreal width = stroke.baseThickness * p1.pressure;
+            if (width < 0.5) width = 0.5;
+            painter.setPen(QPen(stroke.color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+
+            // Clip (a -> b) to the half-planes outside the slab [0, notesW] and
+            // draw each outside piece; the in-slab middle comes from the cached
+            // column pixmap. Any round cap spilling back into the slab is covered
+            // by that pixmap, which is blitted afterwards.
+            const qreal dx = b.x() - a.x();
+            if (a.x() < 0.0 || b.x() < 0.0) {
+                QPointF la = a, lb = b;
+                if ((a.x() < 0.0) != (b.x() < 0.0) && dx != 0.0) {
+                    const qreal t = (0.0 - a.x()) / dx;
+                    const QPointF c(a.x() + t * dx, a.y() + t * (b.y() - a.y()));
+                    if (a.x() < 0.0) lb = c; else la = c;
+                }
+                painter.drawLine(la, lb);
+            }
+            if (a.x() > notesW || b.x() > notesW) {
+                QPointF ra = a, rb = b;
+                if ((a.x() > notesW) != (b.x() > notesW) && dx != 0.0) {
+                    const qreal t = (notesW - a.x()) / dx;
+                    const QPointF c(a.x() + t * dx, a.y() + t * (b.y() - a.y()));
+                    if (a.x() > notesW) rb = c; else ra = c;
+                }
+                painter.drawLine(ra, rb);
             }
         }
     }
 
-    // Blit. The pixmap's DPR is (zoom*dpr) so its logical size matches the notes
-    // column in document units; draw at the column origin (0,0 in the current,
-    // column-translated painter).
-    painter.drawPixmap(0, 0, it->pixmap);
+    painter.restore();
 }
 
 void DocumentViewport::eraseNotesAt(const QPointF& viewportPos)
@@ -21363,10 +21694,11 @@ void DocumentViewport::loadSideNotes()
     if (m_sideNotesWidths.isEmpty()) {
         const double legacyWidth = root.value("notesWidth").toDouble(200.0);
         if (legacyWidth > 0.0) {
-            // Cache the QJsonObject so the begin()/end() iterators point at a
-            // live object. Calling toObject() inline yields iterators into a
-            // temporary that is destroyed before ++it/it.key(), which was the
-            // crash (access violation) when reopening legacy side-notes.
+            // IMPORTANT: hang the iterated object in a named local. Iterating
+            // over a temporary QJsonObject (root.value("pages").toObject())
+            // leaves the iterator dangling after the full expression, so the
+            // later it.key().toInt() dereferences freed memory and crashed on
+            // open for old-format notebooks that enter this migration branch.
             const QJsonObject legacyPages = root.value("pages").toObject();
             for (auto it = legacyPages.begin(); it != legacyPages.end(); ++it) {
                 const int pageIndex = it.key().toInt();
@@ -21413,20 +21745,6 @@ void DocumentViewport::loadSideNotes()
         if (!strokes.isEmpty()) {
             m_sideNotesStrokes[pageIndex] = strokes;
         }
-    }
-
-    // Recompute the paged layout now that m_sideNotesWidths is populated.
-    // If a clamp/center/scroll happened before this load (e.g. the deferred
-    // loadSideNotes() after opening a saved document), the layout cache was
-    // built with every side-notes column width treated as 0, which shrank
-    // totalContentSize().width() and made clampPanOffset() pull horizontal
-    // panning back to a fixed column the moment the user dragged past the
-    // bare page edge. Marking the cache dirty forces ensurePageLayoutCache()
-    // to rebuild it with the true widths on the next layout / scroll.
-    if (m_pageLayoutDirty == false) {
-        invalidatePageLayoutCache();
-        ensurePageLayoutCache();
-        clampPanOffset();
     }
 
     update();

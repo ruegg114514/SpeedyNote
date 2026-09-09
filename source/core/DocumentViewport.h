@@ -28,6 +28,7 @@ enum class TouchGestureMode {
 #include "Document.h"
 #include "Page.h"
 #include "ToolType.h"
+#include <QHash>
 #include "ViewportPerfMonitor.h"
 #include "../objects/HighlightRegion.h"
 #include "../objects/TextBoxObject.h"
@@ -37,7 +38,6 @@ enum class TouchGestureMode {
 #include <QStack>
 #include <QMap>
 #include <QSet>
-#include <QHash>
 
 class QContextMenuEvent;
 class QMenu;
@@ -3015,6 +3015,12 @@ protected:
     void leaveEvent(QEvent* event) override;        ///< Track pointer leaving viewport
     bool event(QEvent* event) override;  ///< Forwards touch events to handler
 
+    /// Recompute palm-contact state from the latest touch event. Returns true
+    /// when the current total down-touch count qualifies as palm contact
+    /// (>= PALM_REJECT_TOUCH_POINTS), which voids any in-flight stroke and
+    /// suppresses pen input until the hand lifts.
+    bool updatePalmRejection(class QTouchEvent* touchEvent);
+
     // Plan D2: cross-document page-transfer drop target.
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
@@ -3064,6 +3070,30 @@ private:
     /// 150ms single-shot. Restarted on every setPanOffset / setZoomLevel.
     /// On timeout, clears m_focusCacheSuspended and triggers an update().
     QTimer* m_focusRebuildTimer = nullptr;
+    /// True while the current stroke is running on a cold (Focus) page whose
+    /// viewport-clipped cache was not yet built. Forces the Direct tier for
+    /// the whole stroke so the first frame never rebuilds a cold page cache on
+    /// the UI thread (the "first stroke is blank, then appears" stall on pages
+    /// far from where the notes column was opened). Cleared in finishStroke().
+    bool m_directStrokePendingFocus = false;
+    /// Deferred single-shot: preloads the hovered page + neighbours off the
+    /// tablet event handler, so a hover over a cold, content-dense page never
+    /// blocks hover handling, while still landing the cache before the pen
+    /// usually touches down. startStroke()'s Direct fallback covers a quicker
+    /// touchdown.
+    QTimer* m_strokePreloadTimer = nullptr;
+    /// Page index queued for deferred stroke-cache preload, or -1 if none.
+    int m_strokePreloadPage = -1;
+    /// Palm-rejection threshold: when at least this many touch points are
+    /// concurrently down on the touchscreen (a palm / fingers resting on the
+    /// glass), pen input is treated as invalid - any in-flight stroke is
+    /// cancelled and new pen strokes are refused until the hand lifts.
+    static constexpr int PALM_REJECT_TOUCH_POINTS = 3;
+    /// True while palm contact (>= PALM_REJECT_TOUCH_POINTS down touches) is
+    /// active on the touchscreen.
+    bool m_palmContactActive = false;
+    /// Current down touch-point count across the active touch sequence.
+    int m_activeTouchCount = 0;
     
     // ===== Pan Tool State =====
     bool m_isPanToolDragging = false;
@@ -3789,24 +3819,20 @@ private:
     bool m_isDrawingSideNotes = false;      ///< Currently drawing in notes area
     int m_sideNotesActivePage = -1;         ///< Page index for active notes stroke
     QString m_sideNotesDir;                 ///< Directory for notes persistence
-    
-    // Side-notes column off-screen cache. Committed note strokes were previously
-    // re-rasterized on every frame (a drawLine per segment in drawNotesStroke),
-    // which scaled O(noteCount * pointCount) and made paged scrolling over notes
-    // stutter — the more written, the worse. This caches the committed strokes
-    // once per (page, zoom, dpr, width, content-signature) and blits the result,
-    // mirroring the PDF/VectorLayer pixmap-cache design that keeps PDF-area
-    // writing smooth. The live stroke being drawn is NOT cached here — it is
-    // painted separately (paintEvent) and committed into the column afterward.
-    struct SideNotesColumnCacheEntry {
-        qreal zoom = 0.0;     ///< zoom level the column was rasterized at
-        qreal dpr = 1.0;      ///< device-pixel ratio at rasterize time
-        qreal notesW = 0.0;   ///< column width (document units) at rasterize time
-        QSizeF pageSize;      ///< page size — height determines pixmap height
-        QByteArray signature; ///< content fingerprint of the committed strokes
-        QPixmap pixmap;       ///< rendered committed-stroke layer (column-local coords)
+
+    // ===== Side-notes column pixel cache =====
+    // The notes column (background + dot grid + committed strokes) was re-vectorized
+    // every frame, so a drag panning over the notes region stuttered even though the
+    // main-page strokes draw from cached pixmaps. Cache the whole column per page
+    // (like the main-page stroke cache) so a pan becomes a cheap pixmap blit; rebuild
+    // when zoom / dpr / size / content fingerprint changes.
+    struct NotesColumnCacheEntry {
+        QPixmap pixmap;
+        quint64 sig = 0;   ///< content fingerprint the pixmap was built from
     };
-    QHash<int, SideNotesColumnCacheEntry> m_sideNotesColumnCache;  ///< pageIdx -> cached column
+    QHash<int, NotesColumnCacheEntry> m_notesColumnCache;
+    qreal m_notesCacheZoom = -1.0;  ///< zoom the cache was built at (cleared when it changes)
+    qreal m_notesCacheDpr = -1.0;   ///< dpr  the cache was built at
     
     // ===== Page Layout Cache (Performance: O(1) page position lookup) =====
     mutable QVector<qreal> m_pageYCache;  ///< Cached Y position for each page (single column)
@@ -4182,6 +4208,35 @@ private:
      * Call after scroll settles for smooth scrolling.
      */
     void preloadStrokeCaches();
+
+    /**
+     * @brief Build the stroke cache for a single page ahead of drawing.
+     * Called from hover handlers for the page currently under the pen/mouse, so a
+     * pen-down that follows never pays the synchronous first-time whole-page cache
+     * rebuild on a freshly visited page. No-op cost once the cache is already valid.
+     */
+    void preloadStrokeCacheForPage(int pageIndex);
+
+    /**
+     * @brief Warm the stroke cache for one page at the tier its next paint (or
+     * the next pen-down) will actually use.
+     *
+     * A visible page at the writing zoom picks the viewport-clipped Focus
+     * cache; building the whole-page Capped pixmap for it would be released by
+     * renderPage on the very first Focus paint, i.e. wasted work that still
+     * leaves pen-down cold. Off-screen neighbours and low-zoom pages keep the
+     * Capped cache, which is what their paints blit.
+     *
+     * @param allowFocusWhileInFlight When false (hover path), a Focus rebuild
+     *        is skipped while pan/zoom/scroll is in flight, because the moving
+     *        viewport invalidates the focus rect and rebuilding on every hover
+     *        event would hitch the scroll; the page is simply not warmed (the
+     *        scroll-settle path warms it once on a stationary viewport). The
+     *        scroll-settle path passes true: it runs once on a stationary
+     *        viewport, so the Focus cache for the freshly revealed page lands
+     *        before the user's first pen-down.
+     */
+    void warmStrokeCacheForPage(int pageIndex, bool allowFocusWhileInFlight);
     
     /**
      * @brief Evict tiles that are far from the visible area.
@@ -4830,17 +4885,15 @@ private:
     void continueNotesStroke(const PointerEvent& pe);
     void endNotesStroke();
     void drawNotesStroke(QPainter& painter, const VectorStroke& stroke);
-    // Rasterizes a page's committed notes strokes into a column-local pixmap and
-    // blits it to the painter (already translated to the page's top-left corner).
-    // Uses m_sideNotesColumnCache to skip re-rasterization when (zoom, dpr, width,
-    // content-signature) are unchanged — scroll/pan repaints then become a single
-    // drawPixmap instead of O(note*point) drawLine calls. The lasso-selection
-    // hidden-stroke state is handled by the caller (drawNotesColumn) before calling.
-    void drawCachedNotesStrokes(QPainter& painter, Page* page, int pageIdx);
     // Draws the notes column (background, grid, drag handle, committed strokes) of
     // a page. Painter must already be translated to the page's top-left corner
     // (page-local coordinates).
     void drawNotesColumn(QPainter& painter, Page* page, int pageIdx);
+    // Draws the pieces of committed notes strokes that fall OUTSIDE the notes
+    // column (swept onto the page body / past the far edge). Called after the
+    // page but before the column pixmap blit so swept ink stays on top of the
+    // page content instead of being clipped out by the column-sized cache.
+    void drawNotesColumnOverflow(QPainter& painter, Page* page, int pageIdx);
     int notesDividerPageAtViewport(const QPointF& vpPos) const;
     int notesPageAtViewport(const QPointF& vpPos) const;
     void eraseNotesAt(const QPointF& viewportPos);
