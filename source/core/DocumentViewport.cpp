@@ -4701,6 +4701,16 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
         if (m_tabletHoverTimer) {
             m_tabletHoverTimer->start();
         }
+
+        // Live-ink preparation: build the page-under-the-pen stroke cache during
+        // hover, so the pen-down that follows never pays the synchronous first-time
+        // whole-page cache rebuild on a freshly visited page. Without this, drawing
+        // on a page far from the side-notes column stalls - the very first stroke
+        // shows no ink until the cache finishes building, then draws normally.
+        PageHit hoverPage = viewportToPage(newPos);
+        if (hoverPage.valid()) {
+            preloadStrokeCacheForPage(hoverPage.pageIndex);
+        }
         
         // Check if eraser tool is active or this is hardware eraser
         bool isEraserHover = (m_currentTool == ToolType::Eraser) ||
@@ -5962,6 +5972,27 @@ void DocumentViewport::preloadStrokeCaches()
                 // Build cache at current zoom level for sharp rendering
                 layer->ensureStrokeCacheValid(page->size, m_zoomLevel, dpr);
             }
+        }
+    }
+}
+
+void DocumentViewport::preloadStrokeCacheForPage(int pageIndex)
+{
+    if (!m_document || m_document->isEdgeless()) {
+        return;
+    }
+    Page* page = m_document->page(pageIndex);  // May lazy-load a not-yet-loaded page
+    if (!page) {
+        return;
+    }
+    qreal dpr = devicePixelRatioF();
+    for (int layerIdx = 0; layerIdx < page->layerCount(); ++layerIdx) {
+        VectorLayer* layer = page->layer(layerIdx);
+        if (layer && layer->visible && !layer->isEmpty()) {
+            // ensuresStrokeCacheValid() early-returns when the cache is already
+            // valid for this zoom/size, so repeated hover moves cost nothing once
+            // the page under the pen has been prepared.
+            layer->ensureStrokeCacheValid(page->size, m_zoomLevel, dpr);
         }
     }
 }

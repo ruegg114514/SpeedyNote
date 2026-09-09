@@ -4163,6 +4163,14 @@ private:
      * Call after scroll settles for smooth scrolling.
      */
     void preloadStrokeCaches();
+
+    /**
+     * @brief Build the stroke cache for a single page ahead of drawing.
+     * Called from hover handlers for the page currently under the pen/mouse, so a
+     * pen-down that follows never pays the synchronous first-time whole-page cache
+     * rebuild on a freshly visited page. No-op cost once the cache is already valid.
+     */
+    void preloadStrokeCacheForPage(int pageIndex);
     
     /**
      * @brief Evict tiles that are far from the visible area.
