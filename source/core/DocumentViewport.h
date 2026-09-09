@@ -28,6 +28,7 @@ enum class TouchGestureMode {
 #include "Document.h"
 #include "Page.h"
 #include "ToolType.h"
+#include <QHash>
 #include "ViewportPerfMonitor.h"
 #include "../objects/HighlightRegion.h"
 #include "../objects/TextBoxObject.h"
@@ -3788,6 +3789,20 @@ private:
     bool m_isDrawingSideNotes = false;      ///< Currently drawing in notes area
     int m_sideNotesActivePage = -1;         ///< Page index for active notes stroke
     QString m_sideNotesDir;                 ///< Directory for notes persistence
+
+    // ===== Side-notes column pixel cache =====
+    // The notes column (background + dot grid + committed strokes) was re-vectorized
+    // every frame, so a drag panning over the notes region stuttered even though the
+    // main-page strokes draw from cached pixmaps. Cache the whole column per page
+    // (like the main-page stroke cache) so a pan becomes a cheap pixmap blit; rebuild
+    // when zoom / dpr / size / content fingerprint changes.
+    struct NotesColumnCacheEntry {
+        QPixmap pixmap;
+        quint64 sig = 0;   ///< content fingerprint the pixmap was built from
+    };
+    QHash<int, NotesColumnCacheEntry> m_notesColumnCache;
+    qreal m_notesCacheZoom = -1.0;  ///< zoom the cache was built at (cleared when it changes)
+    qreal m_notesCacheDpr = -1.0;   ///< dpr  the cache was built at
     
     // ===== Page Layout Cache (Performance: O(1) page position lookup) =====
     mutable QVector<qreal> m_pageYCache;  ///< Cached Y position for each page (single column)

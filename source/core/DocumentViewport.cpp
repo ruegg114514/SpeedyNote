@@ -21055,102 +21055,180 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
     const qreal notesW = sideNotesWidthFor(pageIdx);
     if (notesW <= 0) return;
 
-    QRectF notesRect(page->size.width(), 0, notesW, page->size.height());
+    const qreal pageH = page->size.height();
 
-    // Notes background - white (explicit user requirement)
-    painter.fillRect(notesRect, Qt::white);
+    // While a notes lasso is active the hidden-block set changes per frame and the
+    // overlay already draws the dragged strokes, so the column must be redrawn live
+    // (never from the cached copy) to keep the source strokes in step.
+    const bool lassoEditingNotes =
+        m_lassoSelection.isValid() && pageIdx == m_lassoNotesPage;
 
-    // Subtle dot grid pattern for notes area.
-    // IMPORTANT (performance): the grid loop must only cover the currently
-    // visible part of the column. During a pan the gesture fast path repaints
-    // just the thin strip that entered the viewport (clipRegion), but drawing
-    // points for the FULL column height every frame was a serialized per-frame
-    // cost on the raster thread - it made scrolling over notes regions visibly
-    // stutter even though the CPU average looked flat. Clamping to the clip
-    // turns the per-frame cost into roughly "strip size" instead of "column
-    // size". Start at the first grid line inside the clip so dots stay aligned
-    // with the full-column grid.
-    painter.setPen(QPen(QColor(205, 214, 226), 0.5 / m_zoomLevel));
-    qreal gridSpacing = 20.0;
-    QRectF gridClip(0, 0, notesW, page->size.height());
-    // clipBoundingRect() is in logical (painter) coordinates, i.e. the same
-    // page-local/document space the grid points are drawn in, so intersect
-    // directly - no manual inverse transform needed.
-    const QRectF clip = painter.clipBoundingRect();
-    if (!clip.isNull() && !clip.isEmpty()) {
-        gridClip = gridClip.intersected(clip);
-    }
-    if (gridClip.isEmpty() || gridClip.width() <= 0 || gridClip.height() <= 0) return;
-    for (qreal x = gridSpacing * qMax<qreal>(1, qCeil(gridClip.left() / gridSpacing));
-         x < qMin<qreal>(notesW, gridClip.right()); x += gridSpacing) {
-        for (qreal y = gridSpacing * qMax<qreal>(1, qCeil(gridClip.top() / gridSpacing));
-             y < qMin<qreal>(page->size.height(), gridClip.bottom()); y += gridSpacing) {
-            painter.drawPoint(QPointF(x, y));
+    // Content fingerprint: catches any committed-stroke mutation, column resize,
+    // zoom or dpr change. Iterating strokes is cheap relative to vectorizing them,
+    // and lets us skip explicit invalidation at every m_sideNotesStrokes mutation.
+    quint64 sig = 1469598103934665603ull;  // FNV offset basis
+    auto mix = [&sig](quint64 v) { sig ^= v; sig *= 1099511628211ull; };
+    auto quant = [](qreal v) { return quint64(v * 1000.0); };
+    mix(quint64(pageIdx));
+    mix(quant(notesW));
+    mix(quant(pageH));
+    mix(quant(m_zoomLevel));
+    mix(quant(devicePixelRatioF()));
+    mix(m_resizingNotesPage == pageIdx ? 1u : 0u);
+    auto notesIt = m_sideNotesStrokes.constFind(pageIdx);
+    if (notesIt != m_sideNotesStrokes.constEnd()) {
+        const QVector<VectorStroke>& strokes = notesIt.value();
+        mix(quint64(strokes.size()) + 0x100000000ull);  // non-empty marker
+        for (const VectorStroke& s : strokes) {
+            quint64 h = 1469598103934665603ull;
+            for (QChar c : s.id) { h ^= quint64(c.unicode()); h *= 1099511628211ull; }
+            mix(h);
+            mix(quint64(s.points.size()));
+            mix(quant(s.color.rgba()));
+            mix(quant(s.baseThickness));
+            if (!s.points.isEmpty()) {
+                const StrokePoint& last = s.points.last();
+                mix(quant(last.pos.x()));
+                mix(quant(last.pos.y()));
+            }
         }
+    } else {
+        mix(0x100000000ull);  // marker for "no notes map entry" vs an empty one
     }
 
-    // A visible resize grip pinned to the top of the divider. On touch/tablet
-    // this is the ONLY way the column width is adjusted (the old thin divider
-    // line was removed, so no line is drawn here): the grip gives the layout a
-    // clear, finger-sized handle (highlighted while the column is resized).
-    {
-        const qreal z = m_zoomLevel > 0.0 ? m_zoomLevel : 1.0;
-        const qreal dx = page->size.width();
-        // Sizes kept in viewport px (mins make it finger-friendlier when
-        // zoomed out), converted back to pixel-space via z here since the
-        // painter is in document units.
-        const qreal gripWpx = qMax(18.0 * z, 20.0);
-        const qreal gripHpx = qMax(44.0 * z, 48.0);
-        const qreal gripW = gripWpx / z;
-        const qreal gripH = gripHpx / z;
-        const qreal gripTop = qMax(14.0, 8.0 / z);
-        painter.save();
-        QColor gripColor = (m_resizingNotesPage == pageIdx)
-            ? QColor(76, 104, 168) : QColor(158, 172, 198);
-        painter.setBrush(gripColor);
-        painter.setPen(QPen(QColor(255, 255, 255), 1.5));
-        painter.drawRoundedRect(
-            QRectF(dx - gripW / 2.0, gripTop, gripW, gripH), 5.0 / z, 5.0 / z);
-        painter.setPen(QPen(QColor(255, 255, 255), 1.6));
-        const qreal cx = dx;
-        qreal ny = gripTop + 12.0 / z;
-        const qreal span = 5.0 / z;
-        const qreal step = gripH / 3.0;
-        for (int g = 0; g < 3; ++g) {
-            painter.drawLine(QPointF(cx - span, ny), QPointF(cx + span, ny));
-            ny += step;
+    // Column-local renderer. dx shifts it into document space (page width) when
+    // painting straight to the viewport; 0 when baking the pixmap cache.
+    auto renderLocal = [&](QPainter& p, qreal dx) {
+        p.save();
+        p.translate(dx, 0);
+
+        QRectF notesRect(0, 0, notesW, pageH);
+        p.fillRect(notesRect, Qt::white);
+
+        // Dot grid, clamped to the visible clip so the per-frame strip repaint
+        // costs ~"strip size" instead of "full column" (see comment below).
+        p.setPen(QPen(QColor(205, 214, 226), 0.5 / m_zoomLevel));
+        qreal gridSpacing = 20.0;
+        QRectF gridClip(0, 0, notesW, pageH);
+        const QRectF clip = p.clipBoundingRect();
+        if (!clip.isNull() && !clip.isEmpty()) {
+            gridClip = gridClip.intersected(clip);
         }
-        painter.restore();
-    }
-
-    // Render committed notes strokes for this page. Strokes are stored in
-    // notes-column-local coordinates (origin at the column's left edge), so
-    // translate by the page width to land them inside the column instead of at
-    // the left of the PDF page.
-    if (m_sideNotesStrokes.contains(pageIdx)) {
-        painter.save();
-        painter.translate(page->size.width(), 0);
-        // While the lasso selection is active we must NOT paint the selected
-        // notes strokes as part of the column background. During a drag the
-        // overlay already draws them at the moved position (source would linger
-        // at its origin); in the adopted (post-release, pre-confirm) state the
-        // overlay still draws the moved copy, so leaving a note in the column
-        // here makes the original reappear at its start point until confirm.
-        QSet<QString> hiddenIds;
-        if (m_lassoSelection.isValid()
-            && pageIdx == m_lassoNotesPage) {
-            for (int k = 0; k < m_lassoSelection.selectedStrokes.size(); ++k) {
-                if (k < m_lassoSelection.originalIndices.size()
-                    && m_lassoSelection.originalIndices[k] == -1) {
-                    hiddenIds.insert(m_lassoSelection.selectedStrokes[k].id);
+        if (!gridClip.isEmpty() && gridClip.width() > 0 && gridClip.height() > 0) {
+            for (qreal x = gridSpacing * qMax<qreal>(1, qCeil(gridClip.left() / gridSpacing));
+                 x < qMin<qreal>(notesW, gridClip.right()); x += gridSpacing) {
+                for (qreal y = gridSpacing * qMax<qreal>(1, qCeil(gridClip.top() / gridSpacing));
+                     y < qMin<qreal>(pageH, gridClip.bottom()); y += gridSpacing) {
+                    p.drawPoint(QPointF(x, y));
                 }
             }
         }
-        for (const VectorStroke& stroke : m_sideNotesStrokes[pageIdx]) {
-            if (!hiddenIds.isEmpty() && hiddenIds.contains(stroke.id)) continue;
-            drawNotesStroke(painter, stroke);
+
+        // Visible resize grip pinned to the top of the divider.
+        {
+            const qreal z = m_zoomLevel > 0.0 ? m_zoomLevel : 1.0;
+            const qreal gripWpx = qMax(18.0 * z, 20.0);
+            const qreal gripHpx = qMax(44.0 * z, 48.0);
+            const qreal gripW = gripWpx / z;
+            const qreal gripH = gripHpx / z;
+            // Divider sits at column-local x=0 (column left = page right edge), and
+            // the grip spans it, centered on the divider - same as the pre-cache code.
+            const qreal gripLeft = -gripW / 2.0;
+            const qreal gripTop = qMax(14.0, 8.0 / z);
+            QColor gripColor = (m_resizingNotesPage == pageIdx)
+                ? QColor(76, 104, 168) : QColor(158, 172, 198);
+            p.setBrush(gripColor);
+            p.setPen(QPen(QColor(255, 255, 255), 1.5));
+            p.drawRoundedRect(QRectF(gripLeft, gripTop, gripW, gripH), 5.0 / z, 5.0 / z);
+            p.setPen(QPen(QColor(255, 255, 255), 1.6));
+            const qreal cx = 0.0;            // divider x (column-local)
+            const qreal cy = gripTop + 12.0 / z;   // top handle-line y
+            const qreal span = 5.0 / z;
+            const qreal step = gripH / 3.0;
+            for (int g = 0; g < 3; ++g) {
+                p.drawLine(QPointF(cx - span, cy + g * step),
+                           QPointF(cx + span, cy + g * step));
+            }
         }
-        painter.restore();
+
+        // Committed notes strokes (notes-column-local coords, so no page-width offset
+        // needed here - the translate(dx) above handled placement in document space).
+        if (notesIt != m_sideNotesStrokes.constEnd()) {
+            QSet<QString> hiddenIds;
+            if (lassoEditingNotes) {
+                for (int k = 0; k < m_lassoSelection.selectedStrokes.size(); ++k) {
+                    if (k < m_lassoSelection.originalIndices.size()
+                        && m_lassoSelection.originalIndices[k] == -1) {
+                        hiddenIds.insert(m_lassoSelection.selectedStrokes[k].id);
+                    }
+                }
+            }
+            for (const VectorStroke& stroke : notesIt.value()) {
+                if (!hiddenIds.isEmpty() && hiddenIds.contains(stroke.id)) continue;
+                drawNotesStroke(p, stroke);
+            }
+        }
+        p.restore();
+    };
+
+    // Rebuild the cache lazily. A zoom/dpr change invalidates every entry: keeping
+    // this one zoom generation bounds memory and avoids stale-signed staleness.
+    const qreal dpr = devicePixelRatioF();
+    if (m_notesCacheZoom != m_zoomLevel || m_notesCacheDpr != dpr) {
+        m_notesColumnCache.clear();
+        m_notesCacheZoom = m_zoomLevel;
+        m_notesCacheDpr = dpr;
+    }
+
+    auto cacheIt = m_notesColumnCache.find(pageIdx);
+    if (!lassoEditingNotes
+        && cacheIt != m_notesColumnCache.end()
+        && cacheIt->sig == sig
+        && !cacheIt->pixmap.isNull()) {
+        painter.drawPixmap(QPointF(page->size.width(), 0), cacheIt->pixmap);
+        return;
+    }
+
+    // Bake the (unclipped) column into a pixmap once, then reuse it as a blit.
+    QSize phys((int)qCeil(notesW * m_zoomLevel * dpr),
+               (int)qCeil(pageH * m_zoomLevel * dpr));
+    if (phys.isEmpty() || phys.width() <= 0 || phys.height() <= 0) return;
+    // At extreme zoom the column pixmap would balloon (same reason the main stroke
+    // cache caps at MAX_STROKE_CACHE_DIM). If it would be huge, fall back to direct
+    // per-frame rendering rather than allocating an oversized buffer.
+    const int cap = VectorLayer::MAX_STROKE_CACHE_DIM;
+    if (phys.width() > cap || phys.height() > cap) {
+        renderLocal(painter, page->size.width());
+        return;
+    }
+    QPixmap px(phys);
+    px.setDevicePixelRatio(m_zoomLevel * dpr);
+    px.fill(Qt::white);
+    {
+        QPainter pp(&px);
+        pp.setRenderHint(QPainter::Antialiasing, true);
+        renderLocal(pp, 0.0);
+        pp.end();
+    }
+    painter.drawPixmap(QPointF(page->size.width(), 0), px);
+    if (!lassoEditingNotes) {
+        // Bound memory: cached note columns are only needed while the page is near
+        // the viewport. Evict entries whose pages have scrolled away (pageRect uses
+        // manifest metadata, so this never forces a lazy reload from disk).
+        const QRectF viewRect(
+            m_panOffset, QSizeF(width() / m_zoomLevel, height() / m_zoomLevel));
+        for (auto it2 = m_notesColumnCache.begin();
+             it2 != m_notesColumnCache.end();) {
+            if (it2.key() == pageIdx) { ++it2; continue; }
+            QRectF pr = pageRect(it2.key());
+            pr.adjust(0, 0, sideNotesWidthFor(it2.key()), 0);
+            if (!pr.intersects(viewRect)) {
+                it2 = m_notesColumnCache.erase(it2);
+            } else {
+                ++it2;
+            }
+        }
+        m_notesColumnCache.insert(pageIdx, NotesColumnCacheEntry{px, sig});
     }
 }
 
