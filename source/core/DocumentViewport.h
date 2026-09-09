@@ -3064,6 +3064,20 @@ private:
     /// 150ms single-shot. Restarted on every setPanOffset / setZoomLevel.
     /// On timeout, clears m_focusCacheSuspended and triggers an update().
     QTimer* m_focusRebuildTimer = nullptr;
+    /// True while the current stroke is running on a cold (Focus) page whose
+    /// viewport-clipped cache was not yet built. Forces the Direct tier for
+    /// the whole stroke so the first frame never rebuilds a cold page cache on
+    /// the UI thread (the "first stroke is blank, then appears" stall on pages
+    /// far from where the notes column was opened). Cleared in finishStroke().
+    bool m_directStrokePendingFocus = false;
+    /// Deferred single-shot: preloads the hovered page + neighbours off the
+    /// tablet event handler, so a hover over a cold, content-dense page never
+    /// blocks hover handling, while still landing the cache before the pen
+    /// usually touches down. startStroke()'s Direct fallback covers a quicker
+    /// touchdown.
+    QTimer* m_strokePreloadTimer = nullptr;
+    /// Page index queued for deferred stroke-cache preload, or -1 if none.
+    int m_strokePreloadPage = -1;
     
     // ===== Pan Tool State =====
     bool m_isPanToolDragging = false;

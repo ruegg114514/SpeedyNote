@@ -275,6 +275,22 @@ DocumentViewport::DocumentViewport(QWidget* parent)
         update();
     });
 
+    // Deferred stroke-cache preload on hover. Building the page under the pen
+    // synchronously inside the TabletMove handler could stall hover handling on
+    // a cold, content-dense page; deferring to the next idle tick keeps hover
+    // smooth while still landing the cache before pen-down in the common case.
+    // startStroke()'s Direct fallback covers the rare stroke that starts
+    // before this fires.
+    m_strokePreloadTimer = new QTimer(this);
+    m_strokePreloadTimer->setSingleShot(true);
+    connect(m_strokePreloadTimer, &QTimer::timeout, this, [this]() {
+        const int p = m_strokePreloadPage;
+        m_strokePreloadPage = -1;
+        if (p >= 0) {
+            preloadStrokeCacheForPage(p);
+        }
+    });
+
     // Tablet hover timer - detects when stylus leaves viewport by timeout
     // When stylus hovers to another widget, we stop receiving TabletMove events.
     // This timer fires if no tablet hover event received within the interval.
@@ -312,6 +328,12 @@ DocumentViewport::~DocumentViewport()
     // Cancel any pending preload requests
     if (m_pdfPreloadTimer) {
         m_pdfPreloadTimer->stop();
+    }
+
+    // Stop deferred stroke-cache preload (prevents lambda firing during
+    // destruction and dereferencing this).
+    if (m_strokePreloadTimer) {
+        m_strokePreloadTimer->stop();
     }
     
     // Stop gesture timer
@@ -4702,14 +4724,19 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
             m_tabletHoverTimer->start();
         }
 
-        // Live-ink preparation: build the page-under-the-pen stroke cache during
-        // hover, so the pen-down that follows never pays the synchronous first-time
-        // whole-page cache rebuild on a freshly visited page. Without this, drawing
-        // on a page far from the side-notes column stalls - the very first stroke
-        // shows no ink until the cache finishes building, then draws normally.
+        // Live-ink preparation: warm the page under the pen (and its
+        // neighbours) during hover so the pen-down that follows never pays the
+        // synchronous first-time cache rebuild on a freshly visited page.
+        // Building here is deferred to the next idle tick (m_strokePreloadTimer)
+        // so a hover over a cold, content-dense page never blocks hover
+        // handling; startStroke()'s Direct fallback covers an extra-fast
+        // touchdown that lands before the deferred build runs.
         PageHit hoverPage = viewportToPage(newPos);
         if (hoverPage.valid()) {
-            preloadStrokeCacheForPage(hoverPage.pageIndex);
+            m_strokePreloadPage = hoverPage.pageIndex;
+            if (m_strokePreloadTimer) {
+                m_strokePreloadTimer->start(0);
+            }
         }
         
         // Check if eraser tool is active or this is hardware eraser
@@ -5907,6 +5934,12 @@ void DocumentViewport::preloadStrokeCaches()
                     && m_inlineEditSession.pageIndex == i) {
                     continue;
                 }
+                // Never evict/reset the page currently under an active pen
+                // stroke - dropping its cache mid-draw would force a rebuild on
+                // the next pen-move frame (the very hitch we're eliminating).
+                if (m_isDrawing && i == m_activeDrawingPage) {
+                    continue;
+                }
                 // CR-O1: Clear selection for objects on pages about to be evicted
                 Page* page = m_document->page(i);  // Already loaded, no disk I/O
                 if (page && !page->objects.empty()) {
@@ -5981,19 +6014,53 @@ void DocumentViewport::preloadStrokeCacheForPage(int pageIndex)
     if (!m_document || m_document->isEdgeless()) {
         return;
     }
-    Page* page = m_document->page(pageIndex);  // May lazy-load a not-yet-loaded page
-    if (!page) {
-        return;
-    }
-    qreal dpr = devicePixelRatioF();
-    for (int layerIdx = 0; layerIdx < page->layerCount(); ++layerIdx) {
-        VectorLayer* layer = page->layer(layerIdx);
-        if (layer && layer->visible && !layer->isEmpty()) {
-            // ensuresStrokeCacheValid() early-returns when the cache is already
-            // valid for this zoom/size, so repeated hover moves cost nothing once
-            // the page under the pen has been prepared.
-            layer->ensureStrokeCacheValid(page->size, m_zoomLevel, dpr);
+    const int pageCount = m_document->pageCount();
+    const qreal dpr = devicePixelRatioF();
+
+    // Warm each target page by the exact tier the next paint will choose, so
+    // what we pre-warm is what the first frame after pen-down actually blits.
+    // Writing zoom is on the Focus tier (effScale * pageMaxDim > 4096), so
+    // building only the whole-page Capped pixmap used to be wasted work:
+    // renderPage() releases the Capped cache on the very first Focus paint.
+    auto warmPage = [&](int idx) {
+        Page* page = m_document->page(idx);  // May lazy-load a not-yet-loaded page
+        if (!page) {
+            return;
         }
+        const QPointF pageOrigin = pagePosition(idx);
+        const QRectF tileLocalVp = visibleRect().translated(-pageOrigin);
+        QRectF focusRect;
+        const VectorLayer::RenderTier tier =
+            chooseRenderTier(page->size, tileLocalVp, &focusRect);
+
+        for (int layerIdx = 0; layerIdx < page->layerCount(); ++layerIdx) {
+            VectorLayer* layer = page->layer(layerIdx);
+            if (!layer || !layer->visible || layer->isEmpty()) {
+                continue;
+            }
+            if (tier == VectorLayer::RenderTier::Focus && !focusRect.isEmpty()) {
+                // Pre-warm the viewport-clipped focus cache (the one used on the
+                // on-screen page at high zoom). Hover-time viewport/pan is static,
+                // so this focusRect equals the pen-down first-frame focusRect and
+                // ensureFocusCacheValid() will early-return on touchdown -> cheap blit.
+                layer->ensureFocusCacheValid(page->size, m_zoomLevel, dpr, focusRect);
+            } else {
+                // Context / moderate-zoom page: keep the whole-page Capped cache
+                // warm (also covers off-screen-but-nearby pages for smooth pan).
+                layer->ensureStrokeCacheValid(page->size, m_zoomLevel, dpr);
+            }
+        }
+    };
+
+    // Preload the hovered page plus its immediate neighbours, so a stroke that
+    // starts slightly across a page boundary, or the next page the pen drifts
+    // to, already has its cache ready too.
+    warmPage(pageIndex);
+    if (pageIndex - 1 >= 0) {
+        warmPage(pageIndex - 1);
+    }
+    if (pageIndex + 1 < pageCount) {
+        warmPage(pageIndex + 1);
     }
 }
 
@@ -6757,31 +6824,49 @@ void DocumentViewport::startStroke(const PointerEvent& pe)
     m_isDrawing = true;
     m_activeDrawingPage = pe.pageHit.pageIndex;
 
-    // Live-ink performance: make sure the page under the pen renders from a
-    // resident stroke cache for the ENTIRE stroke. A page whose cache was never
-    // built (it lies outside the preload/keep window, e.g. far from the page
-    // where the side-notes column was opened) would otherwise re-rasterize every
-    // existing stroke on every pen-move frame. That per-frame fallback to the
-    // slow cache-miss/Direct path is what surfaces as "ink only appears once I
-    // lift the pen" on distant pages. Building the cache once here keeps every
-    // subsequent move a cheap pixmap blit, so the first stroke on any newly
-    // visited page is just as smooth as on the preloaded ones.
+    // Live-ink first-frame guarantee. Building a whole-page (Capped) or
+    // viewport-clipped (Focus) cache synchronously here blocks the UI thread
+    // on pages whose caches were evicted (far from where the side-notes column
+    // was opened), which is the "first stroke is blank, then it appears" stall.
+    // Strategy - never let the first frame touch a cold cache:
+    //  - Focus tier (high zoom, the writing tier): if the page's viewport-
+    //    clipped cache is not yet warm, force the Direct tier for the whole
+    //    stroke (bbox-cull only, no rebuild) and rebuild the Focus cache once
+    //    on pen-up. The hover preload normally keeps it warm; this is the
+    //    fallback for strokes that start without a preceding hover event.
+    //  - Capped tier (moderate zoom / off-screen context): warm the whole-page
+    //    cache on demand; cost is bounded and typically already preloaded.
     if (!m_document->isEdgeless()) {
         Page* cachePage = m_document->page(m_activeDrawingPage);
         if (cachePage) {
             VectorLayer* cacheLayer = cachePage->activeLayer();
-            // Only pre-build the whole-page Capped cache when it will actually
-            // be used next frame. At high zoom the page switches to the
-            // Focus/Direct tier and renderPage() discards the Capped pixmap, so
-            // building it here would only waste the allocation (and its first
-            // frame already builds the Focus cache once, then reuses it).
-            const qreal cacheEffScale = m_zoomLevel * devicePixelRatioF();
-            const qreal cachePageMaxDim =
-                qMax(cachePage->size.width(), cachePage->size.height());
-            const bool cacheWouldBlur =
-                cacheEffScale * cachePageMaxDim > VectorLayer::MAX_STROKE_CACHE_DIM;
-            if (cacheLayer && cacheLayer->visible && !cacheLayer->isEmpty()
-                && !cacheWouldBlur) {
+            const QPointF pageOrigin2 = pagePosition(m_activeDrawingPage);
+            const QRectF tileLocalVp2 = visibleRect().translated(-pageOrigin2);
+            QRectF focusRect2;
+            const VectorLayer::RenderTier tier =
+                chooseRenderTier(cachePage->size, tileLocalVp2, &focusRect2);
+
+            if (tier == VectorLayer::RenderTier::Focus) {
+                // Symmetric with preloadStrokeCacheForPage(): warm by tier.
+                bool focusWarm = (cacheLayer && cacheLayer->hasFocusCacheAllocated());
+                if (focusWarm) {
+                    const qreal dpr2 = devicePixelRatioF();
+                    for (int li = 0; li < cachePage->layerCount(); ++li) {
+                        VectorLayer* l = cachePage->layer(li);
+                        if (l && l->visible && !l->isEmpty()) {
+                            l->ensureFocusCacheValid(cachePage->size, m_zoomLevel,
+                                                     dpr2, focusRect2);
+                        }
+                    }
+                } else {
+                    // Cold on the writing tier: render Direct for this stroke
+                    // and rebuild the Focus cache after pen-up. Cheap, correct,
+                    // and keeps the pen-down -> first-frame latency at zero.
+                    m_focusCacheSuspended = true;
+                    m_directStrokePendingFocus = true;
+                }
+            } else if (tier == VectorLayer::RenderTier::Capped
+                       && cacheLayer && cacheLayer->visible && !cacheLayer->isEmpty()) {
                 cacheLayer->ensureStrokeCacheValid(cachePage->size, m_zoomLevel,
                                                    devicePixelRatioF());
             }
@@ -6888,6 +6973,12 @@ void DocumentViewport::finishStroke()
         m_isDrawing = false;
         m_currentStroke = VectorStroke();
         m_currentStrokeCache = QPixmap();  // Release cache memory
+        if (m_directStrokePendingFocus) {
+            m_directStrokePendingFocus = false;
+            // Re-enable the Focus tier and let the rebuild debounce schedule
+            // one paint so the page returns to the fast pixmap path.
+            if (m_focusRebuildTimer) m_focusRebuildTimer->start(0);
+        }
         return;
     }
     
@@ -6962,6 +7053,15 @@ void DocumentViewport::finishStroke()
     m_currentStroke = VectorStroke();
     m_isDrawing = false;
     m_lastRenderedPointIndex = 0;  // Reset incremental rendering state
+
+    // If this stroke ran on a cold Focus page in Direct mode (pen-down without
+    // a preceding hover preload), restore the Focus tier now and rebuild the
+    // viewport-clipped cache once, off the interaction path, so subsequent
+    // strokes on the visible page are cheap pixmap blits again.
+    if (m_directStrokePendingFocus) {
+        m_directStrokePendingFocus = false;
+        if (m_focusRebuildTimer) m_focusRebuildTimer->start(0);
+    }
     
     // Keep m_currentStrokeCache allocated for reuse by the next stroke.
     // resetCurrentStrokeCache() will clear it with fill(Qt::transparent).
