@@ -6032,7 +6032,17 @@ void DocumentViewport::preloadStrokeCacheForPage(int pageIndex)
     // building only the whole-page Capped pixmap used to be wasted work:
     // renderPage() releases the Capped cache on the very first Focus paint.
     auto warmPage = [&](int idx) {
-        Page* page = m_document->page(idx);  // May lazy-load a not-yet-loaded page
+        // Match the mouse hover path, which never pre-warms. A pen hovering
+        // over a far page must NOT trigger a synchronous disk lazy-load (the
+        // page plus its neighbours decode here, blocking the UI thread and
+        // racing the pen-down that follows, which is the "first stroke ink is
+        // delayed" stall). Skip pages not yet in memory; loading them stays
+        // with startStroke()'s synchronous warm-up, exactly like a mouse press.
+        // Already-loaded pages are still warmed so a fast touchdown blits cheaply.
+        if (!m_document->isPageLoaded(idx)) {
+            return;
+        }
+        Page* page = m_document->page(idx);  // Already in memory - no disk I/O
         if (!page) {
             return;
         }
