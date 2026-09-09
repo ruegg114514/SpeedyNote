@@ -3368,13 +3368,6 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
             notesOrigin += QPointF(notesPage->size.width(), 0);
         }
         painter.translate(notesOrigin);
-        // Confine the live stroke to the column: swept ink must never render on
-        // the page body (notes cross into body with negative notes-local x and
-        // get dropped on commit - the "ink disappears on pen-up" bug).
-        if (notesPage) {
-            const qreal notesW = sideNotesWidthFor(m_sideNotesActivePage);
-            painter.setClipRect(QRectF(0.0, 0.0, notesW, notesPage->size.height()));
-        }
         drawNotesStroke(painter, m_sideNotesCurrentStroke);
         
         painter.restore();
@@ -21123,18 +21116,6 @@ void DocumentViewport::startNotesStroke(const PointerEvent& pe, int pageIndex)
     }
     QPointF notesLocal = docPt - notesOrigin;
 
-    // Confine the stroke to the notes column. A note stroke is stored in
-    // notes-local coordinates (origin = page right edge); without clamping, a
-    // press/point sent while the pen sits right on the divider gets a negative
-    // x and, once committed, is clipped away by the column renderer - so ink
-    // would briefly draw over the page body and then "disappear" on pen-up.
-    const qreal notesW = sideNotesWidthFor(pageIndex);
-    if (notesLocal.x() < 0.0) {
-        notesLocal.setX(0.0);
-    } else if (notesW > 0.0 && notesLocal.x() > notesW) {
-        notesLocal.setX(notesW);
-    }
-
     // Add first point
     StrokePoint pt;
     pt.pos = notesLocal;
@@ -21159,16 +21140,6 @@ void DocumentViewport::continueNotesStroke(const PointerEvent& pe)
     // Convert viewport position to notes-local coordinates
     QPointF docPt = viewportToDocument(pe.viewportPos);
     QPointF notesLocal = docPt - notesOrigin;
-
-    // Clamp into the column (same rationale as startNotesStroke): points dragged
-    // over the divider would otherwise carry a negative x, show on the page body
-    // while drawing, and then be dropped when the stroke is committed/clipped.
-    const qreal cNotesW = sideNotesWidthFor(m_sideNotesActivePage);
-    if (notesLocal.x() < 0.0) {
-        notesLocal.setX(0.0);
-    } else if (cNotesW > 0.0 && notesLocal.x() > cNotesW) {
-        notesLocal.setX(cNotesW);
-    }
 
     // Add point
     bool useFixedPressure = (m_currentTool == ToolType::Marker);
@@ -21361,13 +21332,7 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
             }
             for (const VectorStroke& stroke : notesIt.value()) {
                 if (!hiddenIds.isEmpty() && hiddenIds.contains(stroke.id)) continue;
-                // Clip committed strokes to the column so any legacy stroke whose
-                // points escaped past the divider (negative x) cannot paint over
-                // the page body. The grip above is drawn outside this clip.
-                p.save();
-                p.setClipRect(notesRect);
                 drawNotesStroke(p, stroke);
-                p.restore();
             }
         }
         p.restore();
