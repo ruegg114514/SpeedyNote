@@ -5246,6 +5246,15 @@ bool DocumentViewport::event(QEvent* event)
             touchEvent->device()->type() == SN_TOUCHPAD_DEVICE_TYPE) {
             return QWidget::event(event);
         }
+
+        // Palm rejection: >= PALM_REJECT_TOUCH_POINTS concurrent touches mean a
+        // hand is resting on the glass. Treat that as invalid input - cancel any
+        // in-flight pen stroke and swallow the touch below so it neither draws
+        // nor pans/zooms until the hand lifts below the threshold.
+        if (updatePalmRejection(touchEvent)) {
+            event->accept();
+            return true;
+        }
         
         // Touch cooldown: reject all touch events briefly after becoming visible
         // This prevents crashes from stale touch state after sleep/wake on Android
@@ -6285,9 +6294,53 @@ void DocumentViewport::handlePointerEvent(const PointerEvent& pe)
     }
 }
 
+bool DocumentViewport::updatePalmRejection(QTouchEvent* touchEvent)
+{
+    if (!touchEvent) {
+        return m_palmContactActive;
+    }
+
+    // Fold the latest event's point states into a running down-counter. A
+    // QTouchEvent only carries the points that changed on some platforms, so
+    // we treat every non-Released point as currently touching the surface.
+    int down = 0;
+    const auto& pts = SN_TOUCH_POINTS(touchEvent);
+    for (const auto& tp : pts) {
+        if (tp.state() != Qt::TouchPointReleased) {
+            ++down;
+        }
+    }
+
+    if (touchEvent->type() == QEvent::TouchEnd
+        || touchEvent->type() == QEvent::TouchCancel) {
+        // Sequence fully ended - the surface is free of fingers.
+        m_activeTouchCount = 0;
+    } else if (down > 0) {
+        m_activeTouchCount = down;
+    }
+
+    const bool wasPalm = m_palmContactActive;
+    m_palmContactActive = (m_activeTouchCount >= PALM_REJECT_TOUCH_POINTS);
+
+    // A palm landing mid-draw must void the stroke already in flight, otherwise
+    // the pen keeps writing while the hand rests on the glass.
+    if (m_palmContactActive && !wasPalm && m_isDrawing) {
+        m_isDrawing = false;
+        m_currentStroke = VectorStroke();
+        m_lastRenderedPointIndex = 0;
+        update();  // Drop the partially-drawn live ink from the viewport
+    }
+
+    return m_palmContactActive;
+}
+
 void DocumentViewport::handlePointerPress(const PointerEvent& pe)
 {
     if (!m_document) return;
+
+    // Palm rejection: a hand resting on the touchscreen invalidates pen input,
+    // so don't start a new stroke while it is present.
+    if (m_palmContactActive) return;
     
     // Ensure keyboard focus for shortcuts (stylus events don't auto-focus like mouse)
     if (!hasFocus()) {
@@ -6445,6 +6498,9 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
 void DocumentViewport::handlePointerMove(const PointerEvent& pe)
 {
     if (!m_document || !m_pointerActive) return;
+
+    // Palm rejection: ignore pen movement while a hand is on the touchscreen.
+    if (m_palmContactActive) return;
     
     // Store old position for cursor update
     QPointF oldPos = m_lastPointerPos;
@@ -6629,6 +6685,17 @@ void DocumentViewport::handlePointerMove(const PointerEvent& pe)
 void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
 {
     if (!m_document) return;
+
+    // Palm rejection: if the press was voided (or never started) by a hand on
+    // the touchscreen, just unlatch pointer state instead of finalizing a
+    // stroke that was cancelled as invalid.
+    if (m_palmContactActive) {
+        m_pointerActive = false;
+        m_activeSource = PointerEvent::Unknown;
+        m_hardwareEraserActive = false;
+        update();
+        return;
+    }
     
     // ===== Side Notes Area: end stroke =====
     if (m_isDrawingSideNotes) {

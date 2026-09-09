@@ -3015,6 +3015,12 @@ protected:
     void leaveEvent(QEvent* event) override;        ///< Track pointer leaving viewport
     bool event(QEvent* event) override;  ///< Forwards touch events to handler
 
+    /// Recompute palm-contact state from the latest touch event. Returns true
+    /// when the current total down-touch count qualifies as palm contact
+    /// (>= PALM_REJECT_TOUCH_POINTS), which voids any in-flight stroke and
+    /// suppresses pen input until the hand lifts.
+    bool updatePalmRejection(class QTouchEvent* touchEvent);
+
     // Plan D2: cross-document page-transfer drop target.
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
@@ -3078,6 +3084,16 @@ private:
     QTimer* m_strokePreloadTimer = nullptr;
     /// Page index queued for deferred stroke-cache preload, or -1 if none.
     int m_strokePreloadPage = -1;
+    /// Palm-rejection threshold: when at least this many touch points are
+    /// concurrently down on the touchscreen (a palm / fingers resting on the
+    /// glass), pen input is treated as invalid - any in-flight stroke is
+    /// cancelled and new pen strokes are refused until the hand lifts.
+    static constexpr int PALM_REJECT_TOUCH_POINTS = 3;
+    /// True while palm contact (>= PALM_REJECT_TOUCH_POINTS down touches) is
+    /// active on the touchscreen.
+    bool m_palmContactActive = false;
+    /// Current down touch-point count across the active touch sequence.
+    int m_activeTouchCount = 0;
     
     // ===== Pan Tool State =====
     bool m_isPanToolDragging = false;
