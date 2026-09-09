@@ -6914,23 +6914,28 @@ void DocumentViewport::startStroke(const PointerEvent& pe)
                 chooseRenderTier(cachePage->size, tileLocalVp2, &focusRect2);
 
             if (tier == VectorLayer::RenderTier::Focus) {
-                // Symmetric with preloadStrokeCacheForPage(): warm by tier.
-                bool focusWarm = (cacheLayer && cacheLayer->hasFocusCacheAllocated());
-                if (focusWarm) {
-                    const qreal dpr2 = devicePixelRatioF();
-                    for (int li = 0; li < cachePage->layerCount(); ++li) {
-                        VectorLayer* l = cachePage->layer(li);
-                        if (l && l->visible && !l->isEmpty()) {
-                            l->ensureFocusCacheValid(cachePage->size, m_zoomLevel,
-                                                     dpr2, focusRect2);
-                        }
+                // The write tier. ensureFocusCacheValid() is bounded by the
+                // viewport clip (focusRect is page ∩ viewport), so it early-
+                // returns at ~zero cost when the hover preload already warmed
+                // the page, and pays a single screen-sized rasterise on a cold
+                // page so the stroke renders on the fast Focus blit tier.
+                //
+                // The previous path deferred the rebuild to pen-up and forced
+                // the Direct tier for the whole stroke when the cache was cold:
+                // Direct re-vectorises and re-rasterises every committed stroke
+                // intersecting the focus rect on every pen-move frame. On a
+                // content-dense page that hasn't been pre-warmed (e.g. one far
+                // from where the side-notes column was opened, beyond the
+                // page+neighbours hover preload window) those frames were so
+                // slow the live ink effectively stayed invisible until pen-up,
+                // appearing as "the whole stroke renders only after I lift".
+                const qreal dpr2 = devicePixelRatioF();
+                for (int li = 0; li < cachePage->layerCount(); ++li) {
+                    VectorLayer* l = cachePage->layer(li);
+                    if (l && l->visible && !l->isEmpty()) {
+                        l->ensureFocusCacheValid(cachePage->size, m_zoomLevel,
+                                                 dpr2, focusRect2);
                     }
-                } else {
-                    // Cold on the writing tier: render Direct for this stroke
-                    // and rebuild the Focus cache after pen-up. Cheap, correct,
-                    // and keeps the pen-down -> first-frame latency at zero.
-                    m_focusCacheSuspended = true;
-                    m_directStrokePendingFocus = true;
                 }
             } else if (tier == VectorLayer::RenderTier::Capped
                        && cacheLayer && cacheLayer->visible && !cacheLayer->isEmpty()) {
