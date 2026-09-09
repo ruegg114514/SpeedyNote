@@ -1,0 +1,1402 @@
+// ============================================================================
+// SpeedyNote - Main Entry Point
+// ============================================================================
+
+#include <QApplication>
+#include <QTranslator>
+#include <QLocale>
+#include <QFileInfo>
+#include <QMessageBox>
+#include <QSettings>
+#include <QStandardPaths>
+#include <QLibraryInfo>
+#include <QFont>
+#include <QDir>
+#include <QDateTime>
+#include <QFile>
+#include <QTextStream>
+#include <ios>
+#include <algorithm>
+#include <exception>
+#include <cstdlib>
+
+#include "MainWindow.h"
+#include "ui/launcher/Launcher.h"
+#include "platform/SystemNotification.h"
+#include "core/DocumentViewport.h"
+// CLI support (Desktop only)
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+#include <QGuiApplication>
+#include "cli/CliParser.h"
+#endif
+
+// Platform-specific includes
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <shlobj.h>
+#include <dbghelp.h>
+#include <shellapi.h>
+#endif
+
+// Platform helpers
+#ifdef Q_OS_ANDROID
+#include <QDebug>
+#include <QPalette>
+#include <QJniObject>
+#endif
+
+#ifdef Q_OS_IOS
+#include "ios/IOSPlatformHelper.h"
+#include "ios/IOSTouchTracker.h"
+#endif
+
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+#include <QDialog>
+#include <QEvent>
+#include <QPointer>
+#include <QScreen>
+#include <QTimer>
+
+/**
+ * @brief Event filter that maximizes top-level QDialog windows on mobile.
+ *
+ * Android: on some OEM skins (notably Samsung One UI), Qt's QDialog windows
+ * are placed behind the main activity window, making them invisible while
+ * still blocking input (modal). This makes the app appear frozen. The deferred
+ * raise handles skins that process the show event asynchronously and override
+ * the initial z-order.
+ *
+ * iOS: every top-level QWindow is a QUIView inside a single UIWindow, without
+ * decorations or any move/resize implementation, so whatever geometry a dialog
+ * requests is final -- the user cannot adjust it, not even with a pencil.
+ * Maximizing also keeps desktop-sized dialogs from overflowing a narrow Split
+ * View or Stage Manager window.
+ *
+ * Qt::WindowMaximized rather than Qt::WindowFullScreen is deliberate:
+ * QIOSWindow derives the maximized geometry from availableGeometry()
+ * intersected with the current UIWindow bounds, so the dialog stays inside the
+ * safe area and follows multitasking resizes.
+ */
+class MobileDialogFilter : public QObject {
+public:
+    using QObject::QObject;
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override {
+        if (event->type() == QEvent::Show) {
+            auto* dialog = qobject_cast<QDialog*>(obj);
+            if (dialog && dialog->isWindow()) {
+                // Desktop-oriented size constraints would keep the dialog from
+                // filling the window, and neither platform offers a way to
+                // resize it by hand.
+                dialog->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+                if (QScreen* screen = dialog->screen()) {
+                    const QSize avail = screen->availableGeometry().size();
+                    dialog->setMinimumSize(
+                        qMin(dialog->minimumWidth(), avail.width()),
+                        qMin(dialog->minimumHeight(), avail.height()));
+                }
+                dialog->setWindowState(dialog->windowState() | Qt::WindowMaximized);
+                dialog->raise();
+                dialog->activateWindow();
+#ifdef Q_OS_ANDROID
+                QPointer<QDialog> guard(dialog);
+                QTimer::singleShot(50, dialog, [guard]() {
+                    if (guard) {
+                        guard->raise();
+                        guard->activateWindow();
+                    }
+                });
+#endif
+            }
+        }
+        return QObject::eventFilter(obj, event);
+    }
+};
+#endif
+
+#ifdef Q_OS_MACOS
+#include "macos/MacMenuBar.h"
+#endif
+
+#ifdef Q_OS_ANDROID
+
+static void logAndroidPaths()
+{
+    // Log storage paths for debugging
+    qDebug() << "=== Android Storage Paths ===";
+    qDebug() << "  AppDataLocation:" << QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    qDebug() << "  DocumentsLocation:" << QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    qDebug() << "  DownloadLocation:" << QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    qDebug() << "  CacheLocation:" << QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    qDebug() << "=============================";
+    
+    // Note: On Android 13+ (API 33+), READ_EXTERNAL_STORAGE is deprecated.
+    // PDF file access requires Storage Access Framework (SAF).
+    // QFileDialog uses SAF, but content:// URI handling in Qt may have issues.
+}
+
+/**
+ * Query Android system for dark mode setting via JNI.
+ * Calls SpeedyNoteActivity.isDarkMode() static method.
+ */
+static bool isAndroidDarkMode()
+{
+    // callStaticMethod<jboolean> returns the primitive directly, not a QJniObject
+    return QJniObject::callStaticMethod<jboolean>(
+        "org/speedynote/app/SpeedyNoteActivity",
+        "isDarkMode",
+        "()Z"
+    );
+}
+
+/**
+ * Apply appropriate palette based on Android system theme.
+ * Uses Fusion style for consistent cross-platform theming.
+ */
+static void applyAndroidPalette(QApplication& app)
+{
+    // Use Fusion style on Android - it properly respects palette colors
+    // The default "android" style has inconsistent palette support
+    app.setStyle("Fusion");
+    
+    bool darkMode = isAndroidDarkMode();
+    qDebug() << "Android dark mode:" << darkMode;
+    
+    if (darkMode) {
+        // Dark palette - same colors as Windows dark mode for consistency
+        QPalette darkPalette;
+        
+        QColor darkGray(53, 53, 53);
+        QColor gray(128, 128, 128);
+        QColor blue("#316882");  // SpeedyNote default teal accent
+        
+        darkPalette.setColor(QPalette::Window, QColor(45, 45, 45));
+        darkPalette.setColor(QPalette::WindowText, Qt::white);
+        darkPalette.setColor(QPalette::Base, QColor(35, 35, 35));
+        darkPalette.setColor(QPalette::AlternateBase, darkGray);
+        darkPalette.setColor(QPalette::Text, Qt::white);
+        darkPalette.setColor(QPalette::ToolTipBase, QColor(60, 60, 60));
+        darkPalette.setColor(QPalette::ToolTipText, Qt::white);
+        darkPalette.setColor(QPalette::Button, darkGray);
+        darkPalette.setColor(QPalette::ButtonText, Qt::white);
+        darkPalette.setColor(QPalette::Light, QColor(80, 80, 80));
+        darkPalette.setColor(QPalette::Midlight, QColor(65, 65, 65));
+        darkPalette.setColor(QPalette::Dark, QColor(35, 35, 35));
+        darkPalette.setColor(QPalette::Mid, QColor(50, 50, 50));
+        darkPalette.setColor(QPalette::Shadow, QColor(20, 20, 20));
+        darkPalette.setColor(QPalette::BrightText, Qt::red);
+        darkPalette.setColor(QPalette::Link, blue);
+        darkPalette.setColor(QPalette::LinkVisited, QColor(blue).lighter());
+        darkPalette.setColor(QPalette::Highlight, blue);
+        darkPalette.setColor(QPalette::HighlightedText, Qt::white);
+        darkPalette.setColor(QPalette::PlaceholderText, gray);
+        
+        darkPalette.setColor(QPalette::Disabled, QPalette::WindowText, gray);
+        darkPalette.setColor(QPalette::Disabled, QPalette::Text, gray);
+        darkPalette.setColor(QPalette::Disabled, QPalette::ButtonText, gray);
+        darkPalette.setColor(QPalette::Disabled, QPalette::Base, QColor(50, 50, 50));
+        darkPalette.setColor(QPalette::Disabled, QPalette::Button, QColor(50, 50, 50));
+        darkPalette.setColor(QPalette::Disabled, QPalette::Highlight, QColor(80, 80, 80));
+        
+        app.setPalette(darkPalette);
+    } else {
+        // Light palette - explicitly set for consistency
+        QPalette lightPalette;
+        
+        QColor lightGray(240, 240, 240);
+        QColor gray(160, 160, 160);
+        QColor linkBlue(0, 120, 215);
+        QColor accent("#cffff5");  // SpeedyNote light mint accent
+        
+        lightPalette.setColor(QPalette::Window, QColor(240, 240, 240));
+        lightPalette.setColor(QPalette::WindowText, Qt::black);
+        lightPalette.setColor(QPalette::Base, Qt::white);
+        lightPalette.setColor(QPalette::AlternateBase, lightGray);
+        lightPalette.setColor(QPalette::Text, Qt::black);
+        lightPalette.setColor(QPalette::ToolTipBase, QColor(255, 255, 220));
+        lightPalette.setColor(QPalette::ToolTipText, Qt::black);
+        lightPalette.setColor(QPalette::Button, lightGray);
+        lightPalette.setColor(QPalette::ButtonText, Qt::black);
+        lightPalette.setColor(QPalette::Light, Qt::white);
+        lightPalette.setColor(QPalette::Midlight, QColor(227, 227, 227));
+        lightPalette.setColor(QPalette::Dark, QColor(160, 160, 160));
+        lightPalette.setColor(QPalette::Mid, QColor(200, 200, 200));
+        lightPalette.setColor(QPalette::Shadow, QColor(105, 105, 105));
+        lightPalette.setColor(QPalette::BrightText, Qt::red);
+        lightPalette.setColor(QPalette::Link, linkBlue);
+        lightPalette.setColor(QPalette::LinkVisited, QColor(linkBlue).darker());
+        lightPalette.setColor(QPalette::Highlight, accent);
+        lightPalette.setColor(QPalette::HighlightedText, Qt::black);
+        lightPalette.setColor(QPalette::PlaceholderText, gray);
+        
+        lightPalette.setColor(QPalette::Disabled, QPalette::WindowText, gray);
+        lightPalette.setColor(QPalette::Disabled, QPalette::Text, gray);
+        lightPalette.setColor(QPalette::Disabled, QPalette::ButtonText, gray);
+        lightPalette.setColor(QPalette::Disabled, QPalette::Base, lightGray);
+        lightPalette.setColor(QPalette::Disabled, QPalette::Button, lightGray);
+        lightPalette.setColor(QPalette::Disabled, QPalette::Highlight, QColor(180, 180, 180));
+        
+        app.setPalette(lightPalette);
+    }
+}
+
+/**
+ * Apply proper fonts for Android with CJK (Chinese-Japanese-Korean) support.
+ * 
+ * Qt on Android doesn't properly use Android's locale-aware font fallback,
+ * causing CJK characters to display with mixed glyphs (SC/TC/JP variants).
+ * 
+ * This function sets up a font family list that:
+ * 1. Uses Roboto as the primary font (Android's default)
+ * 2. Falls back to Noto Sans CJK SC for Simplified Chinese
+ * 3. Includes other CJK variants as additional fallbacks
+ */
+static void applyAndroidFonts(QApplication& app)
+{
+    // Get current system locale to determine CJK preference
+    QString locale = QLocale::system().name();  // e.g., "zh_CN", "zh_TW", "ja_JP"
+    
+    QFont font("Roboto", 14);  // Android's default font, slightly larger for touch
+    font.setStyleHint(QFont::SansSerif);
+    
+    // Set up CJK fallback chain based on locale
+    // The order matters - first matching font with the glyph wins
+    if (locale.startsWith("zh_CN") || locale.startsWith("zh_Hans")) {
+        // Simplified Chinese - prioritize SC variant
+        font.setFamilies({"Roboto", "Noto Sans CJK SC", "Noto Sans SC", 
+                          "Source Han Sans SC", "Droid Sans Fallback"});
+    } else if (locale.startsWith("zh_TW") || locale.startsWith("zh_HK") || locale.startsWith("zh_Hant")) {
+        // Traditional Chinese - prioritize TC variant
+        font.setFamilies({"Roboto", "Noto Sans CJK TC", "Noto Sans TC",
+                          "Source Han Sans TC", "Droid Sans Fallback"});
+    } else if (locale.startsWith("ja")) {
+        // Japanese - prioritize JP variant
+        font.setFamilies({"Roboto", "Noto Sans CJK JP", "Noto Sans JP",
+                          "Source Han Sans JP", "Droid Sans Fallback"});
+    } else if (locale.startsWith("ko")) {
+        // Korean - prioritize KR variant
+        font.setFamilies({"Roboto", "Noto Sans CJK KR", "Noto Sans KR",
+                          "Source Han Sans KR", "Droid Sans Fallback"});
+    } else {
+        // Default: use SC as fallback (most complete CJK coverage)
+        font.setFamilies({"Roboto", "Noto Sans CJK SC", "Noto Sans SC",
+                          "Droid Sans Fallback"});
+    }
+    
+    app.setFont(font);
+    #ifdef SPEEDYNOTE_DEBUG
+    qDebug() << "Android font configured for locale:" << locale 
+             << "families:" << font.families();
+    #endif
+}
+#endif
+
+// Test includes (desktop debug builds only)
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS) && defined(SPEEDYNOTE_DEBUG)
+#include "core/PageTests.h"
+#include "core/DocumentTests.h"
+#include "core/NotebookLibraryTests.h"
+#include "core/DocumentViewportTests.h"
+#include "ui/ToolbarButtonTests.h"
+#include "objects/LinkObjectTests.h"
+#include "objects/TextBoxObjectTests.h"
+#include "pdf/MuPdfExporterTests.h"
+#include "ui/actionbars/ActionBarContainerTests.h"
+#include "ui/ToolbarButtonTestWidget.h"
+#include "ocr/OcrRasterTests.h"
+#include "ocr/OcrGoldenTests.h"
+#ifdef SPEEDYNOTE_HAS_VISION_OCR
+#include "ocr/OcrVisionTests.h"
+#endif
+#ifdef SPEEDYNOTE_HAS_PADDLE_OCR
+#include "ocr/OcrPaddleTests.h"
+#endif
+#endif
+
+// ============================================================================
+// Platform Helpers
+// ============================================================================
+
+#ifdef Q_OS_WIN
+static bool isWindowsDarkMode()
+{
+    QSettings settings("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                       QSettings::NativeFormat);
+    return settings.value("AppsUseLightTheme", 1).toInt() == 0;
+}
+
+static bool isWindows11()
+{
+    return QSysInfo::kernelVersion().split('.')[2].toInt() >= 22000;
+}
+
+static void applyWindowsFonts(QApplication& app)
+{
+    QFont font("Segoe UI", 9);
+    font.setStyleHint(QFont::SansSerif);
+    // Full hinting snaps glyphs to integer pixel boundaries, causing
+    // inconsistent character spacing from accumulated rounding errors.
+    // Affects Qt5 (GDI engine) and Qt6 (DirectWrite) on older Windows versions.
+    font.setHintingPreference(QFont::PreferNoHinting);
+    font.setFamilies({"Segoe UI", "Dengxian", "Microsoft YaHei", "SimHei"});
+    app.setFont(font);
+}
+
+static void applyWindowsPalette(QApplication& app)
+{
+    if (!isWindows11()) {
+        app.setStyle(isWindowsDarkMode() ? "Fusion" : "windowsvista");
+    }
+
+    if (isWindowsDarkMode()) {
+        QPalette darkPalette;
+
+        QColor darkGray(53, 53, 53);
+        QColor gray(128, 128, 128);
+        QColor blue("#316882");  // SpeedyNote default teal accent
+
+        darkPalette.setColor(QPalette::Window, QColor(45, 45, 45));
+        darkPalette.setColor(QPalette::WindowText, Qt::white);
+        darkPalette.setColor(QPalette::Base, QColor(35, 35, 35));
+        darkPalette.setColor(QPalette::AlternateBase, darkGray);
+        darkPalette.setColor(QPalette::Text, Qt::white);
+        darkPalette.setColor(QPalette::ToolTipBase, QColor(60, 60, 60));
+        darkPalette.setColor(QPalette::ToolTipText, Qt::white);
+        darkPalette.setColor(QPalette::Button, darkGray);
+        darkPalette.setColor(QPalette::ButtonText, Qt::white);
+        darkPalette.setColor(QPalette::Light, QColor(80, 80, 80));
+        darkPalette.setColor(QPalette::Midlight, QColor(65, 65, 65));
+        darkPalette.setColor(QPalette::Dark, QColor(35, 35, 35));
+        darkPalette.setColor(QPalette::Mid, QColor(50, 50, 50));
+        darkPalette.setColor(QPalette::Shadow, QColor(20, 20, 20));
+        darkPalette.setColor(QPalette::BrightText, Qt::red);
+        darkPalette.setColor(QPalette::Link, blue);
+        darkPalette.setColor(QPalette::LinkVisited, QColor(blue).lighter());
+        darkPalette.setColor(QPalette::Highlight, blue);
+        darkPalette.setColor(QPalette::HighlightedText, Qt::white);
+        darkPalette.setColor(QPalette::PlaceholderText, gray);
+
+        darkPalette.setColor(QPalette::Disabled, QPalette::WindowText, gray);
+        darkPalette.setColor(QPalette::Disabled, QPalette::Text, gray);
+        darkPalette.setColor(QPalette::Disabled, QPalette::ButtonText, gray);
+        darkPalette.setColor(QPalette::Disabled, QPalette::Base, QColor(50, 50, 50));
+        darkPalette.setColor(QPalette::Disabled, QPalette::Button, QColor(50, 50, 50));
+        darkPalette.setColor(QPalette::Disabled, QPalette::Highlight, QColor(80, 80, 80));
+
+        app.setPalette(darkPalette);
+    }
+}
+
+static void enableDebugConsole()
+{
+#ifdef SPEEDYNOTE_DEBUG
+    // Only attach a console when stdout has nowhere to go. Reopening the
+    // standard streams on CONOUT$ points them at the console device, which
+    // would discard any pipe or file redirection the caller set up, making
+    // test-suite output impossible to capture.
+    const HANDLE existingStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (existingStdOut == nullptr || existingStdOut == INVALID_HANDLE_VALUE) {
+        AllocConsole();
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
+    }
+#else
+    FreeConsole();
+#endif
+}
+
+// ----------------------------------------------------------------------------
+// Crash handling (Windows only)
+//
+// Installs an unhandled-exception filter that writes a minidump plus a plain
+// text crash log next to the executable whenever the process dies with an
+// access violation / terminating exception. This is a debug aid to pinpoint
+// the exact faulting stack for issues like "opening a saved paged/PDF notebook
+// crashes immediately on Windows." The dump file name embeds a timestamp so
+// multiple crashes are never overwritten.
+//
+// NOTE on symbols: to make the dumped stack human-readable you must also keep
+// the .pdb file that the build produced next to the .exe when reproducing. The
+// CI Windows build does produce speedynote.pdb; keep it alongside the app.
+// ----------------------------------------------------------------------------
+namespace {
+QString crashDumpDir()
+{
+    // Put dumps next to the executable (install dir) — easiest to find and
+    // upload. If that's not writable (e.g. Program Files), fall back to the
+    // local app-data folder so we never silently fail to capture.
+    QString exeDir = QFileInfo(QCoreApplication::applicationFilePath()).absolutePath();
+    QFileInfo probe(exeDir);
+    if (exeDir.isEmpty() || !probe.exists() || !probe.isWritable()) {
+        return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    }
+    return exeDir;
+}
+
+LONG WINAPI terminateCrashHandler(EXCEPTION_POINTERS* ep)
+{
+    // 0x406D1388 is the magic "set thread name" exception used by debuggers and
+    // trigger_break — it is not a real crash, so ignore it.
+    if (ep && ep->ExceptionRecord
+        && ep->ExceptionRecord->ExceptionCode == 0x406D1388) {
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    const QString dir = crashDumpDir();
+    QDir().mkpath(dir);
+    const QString ts = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
+    const QString dumpPath = dir + "/speedynote_crash_" + ts + ".dmp";
+    const QString logPath  = dir + "/speedynote_crash_" + ts + ".txt";
+    const QString module  = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
+
+    // ---- 1. Write minidump ----
+    if (ep) {
+        HANDLE hFile = CreateFileW((const wchar_t*)dumpPath.utf16(),
+                                   GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            MINIDUMP_EXCEPTION_INFORMATION mei{};
+            mei.ThreadId           = GetCurrentThreadId();
+            mei.ExceptionPointers  = ep;
+            mei.ClientPointers     = TRUE;
+            MINIDUMP_TYPE mdt = static_cast<MINIDUMP_TYPE>(
+                MiniDumpWithDataSegs | MiniDumpWithUnloadedModules);
+            BOOL ok = MiniDumpWriteDump(GetCurrentProcess(),
+                                        GetCurrentProcessId(),
+                                        hFile, mdt,
+                                        ep ? &mei : nullptr,
+                                        nullptr, nullptr);
+            CloseHandle(hFile);
+            Q_UNUSED(ok);
+        }
+    }
+
+    // ---- 2. Write a plain-text crash log with the exception address ----
+    {
+        QFile log(logPath);
+        if (log.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&log);
+            out << "SpeedyNote crash log\n";
+            out << "time: " << ts << "\n";
+            out << "exe : " << module << "\n";
+            out << "pdb : keep " << module.left(module.lastIndexOf('.')) << ".pdb"
+                << " next to the exe to decode the stack\n";
+            if (ep && ep->ExceptionRecord) {
+                out << "exception code: 0x" << Qt::hex
+                    << (quint64)ep->ExceptionRecord->ExceptionCode << "\n";
+                out << "fault address : 0x" << Qt::hex
+                    << (quint64)ep->ExceptionRecord->ExceptionAddress << "\n";
+                if (ep->ContextRecord) {
+                    out << "context rip   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rip << "\n";
+                    out << "context rax   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rax << "\n";
+                    out << "context rbx   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rbx << "\n";
+                    out << "context rcx   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rcx << "\n";
+                    out << "context rdx   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rdx << "\n";
+                    out << "context rsi   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rsi << "\n";
+                    out << "context rdi   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rdi << "\n";
+                    out << "context rsp   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rsp << "\n";
+                    out << "context rbp   : 0x" << Qt::hex
+                        << (quint64)ep->ContextRecord->Rbp << "\n";
+                }
+            }
+            out << "minidump      : " << dumpPath << "\n";
+            log.close();
+        }
+    }
+
+    // Never return to the corrupted process: terminate hard so a minidump was
+    // already captured.
+    _exit(1);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// ---- Runtime logging (cross-platform, catches abort()/terminate()/Qt fatal
+// ---- that never reach the SEH filter) ------------------------------------
+static QString runtimeLogPath()
+{
+    return crashDumpDir() + "/speedynote_run.log";
+}
+
+static void appendRuntimeLog(const QString& line)
+{
+    QFile f(runtimeLogPath());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        QTextStream out(&f);
+        out << line;
+        if (!line.endsWith('\n')) {
+            out << "\n";
+        }
+        f.close();
+    }
+}
+
+static QtMessageHandler g_prevQtHandler = nullptr;
+
+static void qtMessageHandler(QtMsgType type, const QMessageLogContext& ctx,
+                             const QString& msg)
+{
+    const char* lvl = "warn";
+    switch (type) {
+        case QtDebugMsg:    lvl = "debug"; break;
+        case QtInfoMsg:     lvl = "info";  break;
+        case QtWarningMsg:  lvl = "warn";  break;
+        case QtCriticalMsg: lvl = "CRIT "; break;
+        case QtFatalMsg:    lvl = "FATAL"; break;
+    }
+
+    // Timestamp + level + source file (basename only) + message.
+    const QString tag =
+        QStringLiteral("%1 %2 [%3] %4")
+            .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz"))
+            .arg(QString::fromLatin1(lvl))
+            .arg(ctx.file ? QFileInfo(QString::fromUtf8(ctx.file)).fileName()
+                          : QStringLiteral("?"))
+            .arg(msg);
+    appendRuntimeLog(tag);
+
+    // Forward to the original handler so console/debugger output is unchanged.
+    if (g_prevQtHandler) {
+        g_prevQtHandler(type, ctx, msg);
+    }
+    // A Qt FATAL normally calls abort() internally; with a custom handler we
+    // must reproduce that behaviour ourselves.
+    if (type == QtFatalMsg) {
+        std::abort();
+    }
+}
+
+static void crashTerminateHandler()
+{
+    QString what = QStringLiteral("<no exception>");
+    if (std::current_exception()) {
+        try {
+            std::rethrow_exception(std::current_exception());
+        } catch (const std::exception& e) {
+            what = QString::fromUtf8(e.what());
+        } catch (...) {
+            what = QStringLiteral("<non-std exception>");
+        }
+    }
+    appendRuntimeLog(QStringLiteral("%1 TERMINATE std::exception::what() = %2")
+                         .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz"))
+                         .arg(what));
+    std::abort();
+}
+
+bool installCrashHandler()
+{
+#ifndef _DEBUG
+    // Only meaningful when built with symbols present; harmless otherwise.
+    SetUnhandledExceptionFilter(terminateCrashHandler);
+#endif
+    // Also route (and persist) every qWarning/qCritical/qFatal so crashes that
+    // abort()/terminate() without reaching the SEH filter still leave a trace.
+    g_prevQtHandler = qInstallMessageHandler(qtMessageHandler);
+    std::set_terminate(crashTerminateHandler);
+    appendRuntimeLog(QStringLiteral("%1 --- SpeedyNote runtime log started ---")
+                         .arg(QDateTime::currentDateTime().toString("MMdd_HH:mm:ss.zzz")));
+
+    // Print where logs will land so the user can find them easily.
+    qInfo("SpeedyNote runtime log -> %s", qPrintable(runtimeLogPath()));
+    return true;
+}
+} // namespace
+#endif // Q_OS_WIN
+
+// ============================================================================
+// Translation Loading
+// ============================================================================
+
+static void loadTranslations(QApplication& app, QTranslator& translator)
+{
+    QSettings settings("SpeedyNote", "App");
+    bool useSystemLanguage = settings.value("useSystemLanguage", true).toBool();
+
+    // Preserve the full BCP-47 / region-tagged code when in system mode so the
+    // QTranslator::load(QLocale, ...) overload below can probe regional Qt
+    // catalogs (e.g. qtbase_zh_CN.qm exists; qtbase_zh.qm does not).
+    QString fullLocale;
+    QString langCode;
+    if (useSystemLanguage) {
+        fullLocale = QLocale::system().name();
+        langCode   = fullLocale.section('_', 0, 0);
+    } else {
+        langCode   = settings.value("languageOverride", "en").toString();
+        fullLocale = langCode;
+    }
+    QLocale uiLocale(fullLocale);
+
+    // Common search paths for Qt's own catalog. Order matters:
+    //   1. Deployed/install layouts (so a packaged build never accidentally
+    //      picks up a translation from the build machine's Qt prefix).
+    //   2. ":/qt-translations" - embedded fallback populated on mobile by
+    //      CMakeLists.txt's qt_translations.qrc generation. Universal, so
+    //      desktop also benefits if the on-disk paths are unreadable for
+    //      any reason.
+    //   3. QLibraryInfo::TranslationsPath - dev convenience for running
+    //      out of the build tree against a system Qt.
+    QStringList qtSearchPaths;
+    qtSearchPaths
+        << QCoreApplication::applicationDirPath() + "/translations"
+        << QCoreApplication::applicationDirPath()
+        << "/usr/share/speedynote/translations"
+        << "/usr/local/share/speedynote/translations"
+        << QStringLiteral(":/qt-translations");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    qtSearchPaths << QLibraryInfo::path(QLibraryInfo::TranslationsPath);
+#else
+    qtSearchPaths << QLibraryInfo::location(QLibraryInfo::TranslationsPath);
+#endif
+
+    // Load Qt's base translations (Save / Discard / Cancel / Open / Yes / No
+    // and other QMessageBox / QFileDialog standard strings).
+    // QTranslator::load(QLocale, ...) probes the full regional fallback chain
+    // (e.g. qtbase_zh_CN -> qtbase_zh -> qtbase), so we don't need a manual
+    // langCode -> region map. We try `qtbase` first (the Qt 6 catalog that
+    // actually carries the widget strings) and fall back to `qt` for
+    // dev/Qt 5 setups and for the legacy aggregated catalog that
+    // windeployqt6 still ships.
+    //
+    // qtBaseTranslator is static so it survives the function return; the
+    // QApplication translator stack holds a non-owning pointer. Each load()
+    // discards the previous catalog, so repeated calls (e.g. after a
+    // hypothetical hot language switch) stay leak-free.
+    static QTranslator qtBaseTranslator;
+    bool qtLoaded = false;
+    for (const QString& path : qtSearchPaths) {
+        if (path.isEmpty()) continue;
+        if (qtBaseTranslator.load(uiLocale, "qtbase", "_", path) ||
+            qtBaseTranslator.load(uiLocale, "qt",     "_", path)) {
+            app.installTranslator(&qtBaseTranslator);
+            qtLoaded = true;
+            break;
+        }
+    }
+#ifdef SPEEDYNOTE_DEBUG
+    qDebug() << "[i18n] Qt base translator loaded:" << qtLoaded
+             << "| locale =" << uiLocale.name() << "| langCode =" << langCode;
+#else
+    Q_UNUSED(qtLoaded);
+#endif
+
+    // Load SpeedyNote's translations. Same QLocale-aware overload so a user
+    // whose system locale is e.g. de_AT still picks up app_de.qm.
+    // ":/resources/translations" is the universal embedded fallback baked
+    // into the binary via resources.qrc - works on every platform.
+    QStringList translationPaths = {
+        QCoreApplication::applicationDirPath(),
+        QCoreApplication::applicationDirPath() + "/translations",
+        "/usr/share/speedynote/translations",
+        "/usr/local/share/speedynote/translations",
+        QStandardPaths::locate(QStandardPaths::GenericDataLocation,
+                               "speedynote/translations", QStandardPaths::LocateDirectory),
+        QStringLiteral(":/resources/translations")
+    };
+
+    bool appLoaded = false;
+    for (const QString& path : translationPaths) {
+        if (path.isEmpty()) continue;
+        if (translator.load(uiLocale, "app", "_", path)) {
+            app.installTranslator(&translator);
+            appLoaded = true;
+            break;
+        }
+    }
+#ifdef SPEEDYNOTE_DEBUG
+    qDebug() << "[i18n] App translator loaded:" << appLoaded
+             << "| locale =" << uiLocale.name() << "| langCode =" << langCode;
+#else
+    Q_UNUSED(appLoaded);
+#endif
+}
+
+// ============================================================================
+// Launcher Setup
+// ============================================================================
+
+static void connectLauncherSignals(Launcher* launcher)
+{
+    // Helper to get or create MainWindow
+    auto getMainWindow = [](Launcher* l) -> std::pair<MainWindow*, bool> {
+        MainWindow* w = MainWindow::findExistingMainWindow();
+        bool existing = (w != nullptr);
+        if (!w) {
+            w = new MainWindow();
+            w->setAttribute(Qt::WA_DeleteOnClose);
+        }
+        w->preserveWindowState(l, existing);
+        w->bringToFront();
+        return {w, existing};
+    };
+
+    QObject::connect(launcher, &Launcher::notebookSelected, [=](const QString& bundlePath) {
+        auto [w, _] = getMainWindow(launcher);
+        if (!w->switchToDocument(bundlePath)) {
+            w->openFileInNewTab(bundlePath);
+        }
+        launcher->hideWithAnimation();
+    });
+
+    QObject::connect(launcher, &Launcher::createNewEdgeless, [=]() {
+        auto [w, _] = getMainWindow(launcher);
+        w->addNewEdgelessTab();
+        launcher->hideWithAnimation();
+    });
+
+    QObject::connect(launcher, &Launcher::createNewPaged, [=]() {
+        auto [w, _] = getMainWindow(launcher);
+        w->addNewTab();
+        launcher->hideWithAnimation();
+    });
+
+    QObject::connect(launcher, &Launcher::openPdfRequested, [=]() {
+        auto [w, _] = getMainWindow(launcher);
+        w->showOpenPdfDialog();
+        launcher->hideWithAnimation();
+    });
+
+    QObject::connect(launcher, &Launcher::openNotebookRequested, [=]() {
+        auto [w, _] = getMainWindow(launcher);
+        w->loadFolderDocument();
+        launcher->hideWithAnimation();
+    });
+    
+    // Handle Escape/return to MainWindow request
+    // Only return if MainWindow exists and has open tabs
+    QObject::connect(launcher, &Launcher::returnToMainWindowRequested, [=]() {
+        MainWindow* w = MainWindow::findExistingMainWindow();
+        if (w && w->tabCount() > 0) {
+            // MainWindow exists with open tabs - toggle back to it
+            w->preserveWindowState(launcher, true);
+            w->bringToFront();
+            launcher->hideWithAnimation();
+        }
+        // Otherwise, do nothing (stay on Launcher)
+    });
+}
+
+// Pre-create the Launcher used for the entire app lifetime. On macOS,
+// also show() it immediately and run one event-loop tick so NSApp
+// transitions to .regular activation before the heavyweight MainWindow
+// is shown on top. Without this priming, on macOS 26 NSApp stays in a
+// half-active state where QMenu popups (Add / Overflow), the fullscreen
+// toggle, and the back-to-Launcher button all misbehave until the user
+// manually activates the app via the dock icon.
+//
+// On Windows / Linux / iOS / Android this is a no-op (Launcher created
+// but not shown), preserving today's behavior on those platforms.
+static Launcher* createLauncherForColdStart()
+{
+    auto* launcher = new Launcher();
+    launcher->setAttribute(Qt::WA_DeleteOnClose);
+    connectLauncherSignals(launcher);
+#ifdef Q_OS_MACOS
+    launcher->show();
+    // Exclude user-input events: at this point in main() the only events
+    // we want to process are the ones that realize the NSWindow / activate
+    // NSApp. We don't want the launcher to spuriously react to a stray
+    // mouse or key event delivered during the priming tick.
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+#endif
+    return launcher;
+}
+
+// Show MainWindow at cold start. On macOS this routes through the
+// already-visible Launcher using the exact sequence that the proven-
+// working Launcher::notebookSelected click uses (preserveWindowState +
+// bringToFront + launcher->hide()). On other platforms it just calls
+// show().
+static void showMainWindowAtColdStart(MainWindow* w, Launcher* launcher)
+{
+#ifdef Q_OS_MACOS
+    w->preserveWindowState(launcher, /*existing*/false);
+    w->bringToFront();
+    launcher->hide();
+#else
+    (void)launcher;
+    w->show();
+#endif
+}
+
+// Make Launcher visible at cold start for branches that want to land on
+// the Launcher. On macOS the Launcher is already visible from
+// createLauncherForColdStart(), so this is a no-op there.
+static void showLauncherAtColdStart(Launcher* launcher)
+{
+#ifndef Q_OS_MACOS
+    launcher->show();
+#else
+    (void)launcher;
+#endif
+}
+
+// ============================================================================
+// Test Runners (Desktop Debug Builds Only)
+// ============================================================================
+
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS) && defined(SPEEDYNOTE_DEBUG)
+static int runTests(const QString& testType)
+{
+    // Windows console setup already happened in enableDebugConsole().
+
+    bool success = false;
+
+    if (testType == "page") {
+        success = PageTests::runAllTests();
+    } else if (testType == "document") {
+        success = DocumentTests::runAllTests();
+    } else if (testType == "notebooklibrary") {
+        success = NotebookLibraryTests::runAllTests();
+    } else if (testType == "viewport-unit") {
+        success = DocumentViewportTests::runUnitTests();
+    } else if (testType == "linkobject") {
+        success = LinkObjectTests::runAllTests();
+    } else if (testType == "textboxobject") {
+        success = TextBoxObjectTests::runAllTests();
+    } else if (testType == "pdfexporter") {
+        success = MuPdfExporterTests::runAllTests();
+    } else if (testType == "actionbars") {
+        success = ActionBarContainerTests::runAllTests();
+    } else if (testType == "ocr-raster") {
+        success = OcrRasterTests::runAllTests();
+    } else if (testType == "ocr-golden") {
+        success = OcrGoldenTests::runAllTests();
+#ifdef SPEEDYNOTE_HAS_VISION_OCR
+    } else if (testType == "ocr-vision") {
+        success = OcrVisionTests::runAllTests();
+#endif
+#ifdef SPEEDYNOTE_HAS_PADDLE_OCR
+    } else if (testType == "ocr-paddle") {
+        success = OcrPaddleTests::runAllTests();
+#endif
+    } else if (testType == "buttons") {
+        return QTest::qExec(new ToolbarButtonTests());
+    }
+
+    return success ? 0 : 1;
+}
+#endif
+
+// ============================================================================
+// macOS: QFileOpenEvent handler (works on macOS, NOT on iOS)
+// ============================================================================
+#if defined(Q_OS_MACOS)
+#include <QFileOpenEvent>
+#include <QFileInfo>
+#include <QDir>
+
+class FileOpenEventFilter : public QObject
+{
+public:
+    using QObject::QObject;
+
+    void setLauncher(Launcher *l) { m_launcher = l; }
+    void setMainWindow(MainWindow *w) { m_mainWindow = w; }
+
+protected:
+    bool eventFilter(QObject *obj, QEvent *event) override
+    {
+        if (event->type() != QEvent::FileOpen)
+            return QObject::eventFilter(obj, event);
+
+        auto *foe = static_cast<QFileOpenEvent *>(event);
+        QString path = foe->file();
+        if (path.isEmpty())
+            return true;
+        #ifdef SPEEDYNOTE_DEBUG
+        fprintf(stderr, "[FileOpen] received: %s\n", qPrintable(path));
+        #endif
+
+        QFileInfo fi(path);
+        QString ext = fi.suffix().toLower();
+
+        if (ext == "snbx") {
+            if (m_launcher) {
+                m_launcher->importFiles(QStringList{path});
+            }
+        } else if (ext == "pdf" || (fi.isDir() && path.endsWith(".snb"))) {
+            MainWindow *w = m_mainWindow
+                ? m_mainWindow
+                : MainWindow::findExistingMainWindow();
+            if (w) {
+                w->openFileInNewTab(path);
+            }
+        }
+        return true;
+    }
+
+private:
+    Launcher *m_launcher = nullptr;
+    MainWindow *m_mainWindow = nullptr;
+};
+#endif // Q_OS_MACOS
+
+// ============================================================================
+// iOS: Inbox directory watcher
+// ============================================================================
+// Qt's iOS plugin does NOT deliver QFileOpenEvent. Instead it tries
+// QPlatformServices::openDocument() which is unimplemented. However iOS
+// correctly copies incoming files to Documents/Inbox/. We watch that
+// directory and process new arrivals.
+#if defined(Q_OS_IOS)
+#include <QFileSystemWatcher>
+#include <QTimer>
+#include <QFileInfo>
+#include <QDir>
+#include <QPointer>
+
+class IOSInboxWatcher : public QObject
+{
+public:
+    explicit IOSInboxWatcher(QObject *parent = nullptr)
+        : QObject(parent)
+    {
+        m_inboxPath = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+                      + QStringLiteral("/Inbox");
+        QDir().mkpath(m_inboxPath);
+
+        m_watcher.addPath(m_inboxPath);
+        connect(&m_watcher, &QFileSystemWatcher::directoryChanged,
+                this, &IOSInboxWatcher::onDirectoryChanged);
+
+        // Process anything already sitting in Inbox at launch
+        QTimer::singleShot(800, this, &IOSInboxWatcher::processInbox);
+    }
+
+    void setLauncher(Launcher *l) { m_launcher = l; }
+    void setMainWindow(MainWindow *w) { m_mainWindow = w; }
+
+private:
+    void onDirectoryChanged(const QString &)
+    {
+        if (m_processing)
+            return;
+        QTimer::singleShot(400, this, &IOSInboxWatcher::processInbox);
+    }
+
+    QString copyPdfToPermanentStorage(const QString &inboxPath)
+    {
+        QString pdfsDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                          + QStringLiteral("/pdfs");
+        QDir().mkpath(pdfsDir);
+
+        QFileInfo fi(inboxPath);
+        QString destPath = pdfsDir + "/" + fi.fileName();
+
+        if (QFile::exists(destPath)) {
+            QString baseName = fi.completeBaseName();
+            QString ext = fi.suffix();
+            int counter = 1;
+            do {
+                destPath = pdfsDir + "/" + baseName
+                           + QString("_%1.").arg(counter++) + ext;
+            } while (QFile::exists(destPath));
+        }
+
+        if (QFile::copy(inboxPath, destPath))
+            return destPath;
+        return QString();
+    }
+
+    MainWindow* getOrCreateMainWindow()
+    {
+        MainWindow *w = m_mainWindow
+            ? m_mainWindow.data()
+            : MainWindow::findExistingMainWindow();
+        if (w)
+            return w;
+
+        w = new MainWindow();
+        w->setAttribute(Qt::WA_DeleteOnClose);
+        if (m_launcher) {
+            w->preserveWindowState(m_launcher, false);
+            m_launcher->hideWithAnimation();
+        }
+        w->show();
+        m_mainWindow = w;
+        return w;
+    }
+
+    void processInbox()
+    {
+        if (m_processing)
+            return;
+        m_processing = true;
+
+        QDir inbox(m_inboxPath);
+        const QFileInfoList entries = inbox.entryInfoList(
+            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
+
+        QStringList snbxFiles;
+
+        for (const QFileInfo &fi : entries) {
+            QString ext = fi.suffix().toLower();
+            QString path = fi.absoluteFilePath();
+
+            if (ext == "snbx") {
+                snbxFiles.append(path);
+            } else if (ext == "pdf") {
+                QString permanentPath = copyPdfToPermanentStorage(path);
+                if (!permanentPath.isEmpty()) {
+                    MainWindow *w = getOrCreateMainWindow();
+                    if (w)
+                        w->openFileInNewTab(permanentPath);
+                }
+                QFile::remove(path);
+            } else if (fi.isDir() && path.endsWith(QStringLiteral(".snb"))) {
+                MainWindow *w = getOrCreateMainWindow();
+                if (w)
+                    w->openFileInNewTab(path);
+            }
+        }
+
+        // performBatchImport handles Inbox cleanup internally, no need to
+        // remove snbx files here (it would be a harmless double-delete).
+        if (!snbxFiles.isEmpty() && m_launcher) {
+            m_launcher->importFiles(snbxFiles);
+        }
+
+        // Re-add the path in case QFileSystemWatcher dropped it
+        if (!m_watcher.directories().contains(m_inboxPath)) {
+            m_watcher.addPath(m_inboxPath);
+        }
+
+        m_processing = false;
+    }
+
+    QFileSystemWatcher m_watcher;
+    QString m_inboxPath;
+    QPointer<Launcher> m_launcher;
+    QPointer<MainWindow> m_mainWindow;
+    bool m_processing = false;
+};
+#endif // Q_OS_IOS
+
+// ============================================================================
+// Main Entry Point
+// ============================================================================
+
+int main(int argc, char* argv[])
+{
+    // ========== CLI Mode Detection (Desktop Only) ==========
+    // Check for CLI commands before creating QApplication to avoid full GUI overhead.
+    // CLI mode uses QGuiApplication (not QCoreApplication) because:
+    // - PDF export needs to render ImageObjects which use QPixmap
+    // - QPixmap requires a GUI application context (platform plugin)
+    // - QGuiApplication is lightweight and doesn't create any windows
+    //
+    // IMPORTANT: This must happen BEFORE enableDebugConsole() on Windows.
+    // In release builds, enableDebugConsole() calls FreeConsole() to hide the
+    // console window in GUI mode, but that would also disconnect stdout/stderr
+    // for CLI mode, causing all terminal output to be silently lost.
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    if (Cli::isCliMode(argc, argv)) {
+        QGuiApplication app(argc, argv);
+        app.setOrganizationName("SpeedyNote");
+        app.setApplicationName("App");
+        return Cli::run(app, argc, argv);
+    }
+#endif
+
+#ifdef Q_OS_WIN
+    enableDebugConsole();
+#endif
+
+    // ========== GUI Mode ==========
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+    QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+    QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    QApplication::setHighDpiScaleFactorRoundingPolicy(
+        Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+#endif
+#endif
+
+    QApplication app(argc, argv);
+    app.setOrganizationName("SpeedyNote");
+    app.setApplicationName("App");
+
+#ifdef Q_OS_WIN
+    applyWindowsPalette(app);
+    applyWindowsFonts(app);
+    installCrashHandler();
+#endif
+
+#ifdef Q_OS_ANDROID
+    logAndroidPaths();
+    applyAndroidPalette(app);
+    applyAndroidFonts(app);
+#elif defined(Q_OS_IOS)
+    IOSPlatformHelper::applyPalette(app);
+    IOSPlatformHelper::applyFonts(app);
+    IOSPlatformHelper::installKeyboardFilter(app);
+    IOSTouchTracker::install();
+#endif
+
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+    app.installEventFilter(new MobileDialogFilter(&app));
+#endif
+
+    QTranslator translator;
+    loadTranslations(app, translator);
+
+    // ========== Initialize Tool Settings ==========
+    // Note: the old global minimum stroke width has moved to per-preset state
+    // on PenSubToolbar.  The legacy `tools/minStrokeWidth` key is read there
+    // as a one-shot migration seed and requires no bootstrap here.
+    {
+        QSettings toolSettings("SpeedyNote", "App");
+        DocumentViewport::setWheelScrollSpeed(
+            toolSettings.value("tools/wheelScrollSpeed", 40.0).toDouble());
+        DocumentViewport::setPanOutsidePagesEnabled(
+            toolSettings.value("tools/panOutsidePages", true).toBool());
+    }
+
+    // ========== Initialize System Notifications ==========
+    // Step 3.11: Initialize notification system for export/import completion
+    // On Android: Creates notification channel (required for Android 8.0+)
+    // On Linux: Initializes DBus connection for desktop notifications
+    SystemNotification::initialize();
+    
+    // Request notification permission on Android 13+
+    // This shows the permission dialog if not already granted
+    if (!SystemNotification::hasPermission()) {
+        SystemNotification::requestPermission();
+    }
+
+    // ========== Parse Command Line Arguments ==========
+    QString inputFile;
+    bool createNewPackage = false;
+
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS) && defined(SPEEDYNOTE_DEBUG)
+    QString testToRun;
+    bool runButtonVisualTest = false;
+    bool runViewportTests = false;
+#endif
+
+    for (int i = 1; i < argc; ++i) {
+        QString arg = QString::fromLocal8Bit(argv[i]);
+
+        if (arg == "--create-new" && i + 1 < argc) {
+            createNewPackage = true;
+            inputFile = QString::fromLocal8Bit(argv[++i]);
+        }
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS) && defined(SPEEDYNOTE_DEBUG)
+        else if (arg == "--test-page") {
+            testToRun = "page";
+        } else if (arg == "--test-document") {
+            testToRun = "document";
+        } else if (arg == "--test-notebooklibrary") {
+            testToRun = "notebooklibrary";
+        } else if (arg == "--test-viewport-unit") {
+            testToRun = "viewport-unit";
+        } else if (arg == "--test-viewport") {
+            runViewportTests = true;
+        } else if (arg == "--test-buttons") {
+            testToRun = "buttons";
+        } else if (arg == "--test-buttons-visual") {
+            runButtonVisualTest = true;
+        } else if (arg == "--test-linkobject") {
+            testToRun = "linkobject";
+        } else if (arg == "--test-textboxobject") {
+            testToRun = "textboxobject";
+        } else if (arg == "--test-pdfexporter") {
+            testToRun = "pdfexporter";
+        } else if (arg == "--test-actionbars") {
+            testToRun = "actionbars";
+        } else if (arg == "--test-ocr-raster") {
+            testToRun = "ocr-raster";
+        } else if (arg == "--test-ocr-golden") {
+            testToRun = "ocr-golden";
+        } else if (arg == "--test-ocr-vision") {
+            testToRun = "ocr-vision";
+        } else if (arg == "--test-ocr-paddle") {
+            testToRun = "ocr-paddle";
+        }
+#endif
+        else if (!arg.startsWith("--") && inputFile.isEmpty()) {
+            inputFile = arg;
+        }
+    }
+
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS) && defined(SPEEDYNOTE_DEBUG)
+    // Handle test commands
+    if (!testToRun.isEmpty()) {
+        return runTests(testToRun);
+    }
+
+    if (runViewportTests) {
+        int result = DocumentViewportTests::runVisualTest();
+        return result;
+    }
+
+    if (runButtonVisualTest) {
+        auto* testWidget = new ToolbarButtonTestWidget();
+        testWidget->setAttribute(Qt::WA_DeleteOnClose);
+        testWidget->show();
+        int result = app.exec();
+        return result;
+    }
+#endif
+
+    // ========== Single Instance Check ==========
+    if (MainWindow::isInstanceRunning()) {
+        if (!inputFile.isEmpty()) {
+            QString command = createNewPackage
+                ? QString("--create-new|%1").arg(inputFile)
+                : inputFile;
+
+            if (MainWindow::sendToExistingInstance(command)) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    // ========== macOS File Open Handler ==========
+#if defined(Q_OS_MACOS)
+    // MAC.2: Instantiate the global system menu bar before any MainWindow.
+    // The QMenuBar inside MacMenuBar is parent-less so it stays alive for
+    // the QApplication's lifetime and remains visible when no window is open.
+    MacMenuBar::instance();
+
+    FileOpenEventFilter fileOpenFilter;
+    app.installEventFilter(&fileOpenFilter);
+#endif
+
+    // ========== iOS Inbox Watcher ==========
+#if defined(Q_OS_IOS)
+    IOSInboxWatcher inboxWatcher;
+#endif
+
+    // ========== Session Restore ==========
+    QSettings sessionSettings("SpeedyNote", "App");
+    QStringList sessionTabs = sessionSettings.value("session/lastOpenTabs").toStringList();
+    int sessionActiveIndex = sessionSettings.value("session/activeTabIndex", 0).toInt();
+
+    // Clear immediately so a crash during restore doesn't loop
+    sessionSettings.remove("session/lastOpenTabs");
+    sessionSettings.remove("session/activeTabIndex");
+    sessionSettings.sync();
+
+    // Filter out files that no longer exist
+    sessionTabs.erase(std::remove_if(sessionTabs.begin(), sessionTabs.end(),
+        [](const QString& p) { return !QFileInfo::exists(p); }), sessionTabs.end());
+
+    // If launching with a file argument, remove it from session list to avoid duplicate
+    bool inputFileWasInSession = false;
+    if (!inputFile.isEmpty() && !sessionTabs.isEmpty()) {
+        QString normalizedInput = QFileInfo(inputFile).absoluteFilePath();
+        int sizeBefore = sessionTabs.size();
+        sessionTabs.erase(std::remove_if(sessionTabs.begin(), sessionTabs.end(),
+            [&normalizedInput](const QString& p) {
+                return QFileInfo(p).absoluteFilePath() == normalizedInput;
+            }), sessionTabs.end());
+        inputFileWasInSession = (sessionTabs.size() < sizeBefore);
+    }
+
+    // ========== Launch Application ==========
+    // Always create the Launcher upfront. On macOS this also show()s it
+    // briefly to prime NSApp activation; on other platforms it's hidden
+    // until a branch decides to surface it. See createLauncherForColdStart.
+    auto* launcher = createLauncherForColdStart();
+
+    // Local helpers fold the per-branch platform-conditional registration
+    // into one place. fileOpenFilter / inboxWatcher are local-to-main and
+    // platform-conditional themselves, hence the lambdas (a free function
+    // would force ifdef'd parameters).
+    auto registerMainWindowWithPlatform = [&](MainWindow* w) {
+#if defined(Q_OS_MACOS)
+        fileOpenFilter.setMainWindow(w);
+#elif defined(Q_OS_IOS)
+        inboxWatcher.setMainWindow(w);
+        QTimer::singleShot(0, []{ IOSPlatformHelper::disableEditMenuOverlay(); });
+#endif
+        (void)w;
+    };
+    auto registerLauncherWithPlatform = [&](Launcher* l) {
+#if defined(Q_OS_MACOS)
+        fileOpenFilter.setLauncher(l);
+#elif defined(Q_OS_IOS)
+        inboxWatcher.setLauncher(l);
+        QTimer::singleShot(0, []{ IOSPlatformHelper::disableEditMenuOverlay(); });
+#endif
+        (void)l;
+    };
+
+    // Parent for the session-restore prompt in the no-file branch.
+    // On macOS the launcher is visible (priming pass), so we get a real
+    // sheet/window-modal dialog. On other platforms the launcher is
+    // hidden, so a hidden parent would weaken modality - keep nullptr
+    // (preserves the original application-modal behavior).
+#ifdef Q_OS_MACOS
+    QWidget* sessionPromptParent = launcher;
+#else
+    QWidget* sessionPromptParent = nullptr;
+#endif
+
+    if (!inputFile.isEmpty()) {
+        // File argument provided - open in MainWindow.
+        auto* w = new MainWindow();
+        w->setAttribute(Qt::WA_DeleteOnClose);
+        showMainWindowAtColdStart(w, launcher);
+        w->openFileInNewTab(inputFile);
+
+        if (!sessionTabs.isEmpty()) {
+            auto reply = QMessageBox::question(w,
+                QObject::tr("Restore Previous Session"),
+                QObject::tr("You had %1 other tab(s) open last time. Restore them?")
+                    .arg(sessionTabs.size()),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+            if (reply == QMessageBox::Yes) {
+                for (const QString& path : sessionTabs)
+                    w->openFileInNewTab(path);
+                int adjustedIndex = inputFileWasInSession
+                    ? sessionActiveIndex : sessionActiveIndex + 1;
+                if (adjustedIndex >= 0 && adjustedIndex < w->tabCount())
+                    w->switchToTabIndex(adjustedIndex);
+            }
+        }
+
+        registerMainWindowWithPlatform(w);
+    } else if (!sessionTabs.isEmpty()) {
+        // No file, but previous session exists - ask to restore.
+        auto reply = QMessageBox::question(sessionPromptParent,
+            QObject::tr("Restore Previous Session"),
+            QObject::tr("You had %1 tab(s) open last time. Restore them?")
+                .arg(sessionTabs.size()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+
+        if (reply == QMessageBox::Yes) {
+            auto* w = new MainWindow();
+            w->setAttribute(Qt::WA_DeleteOnClose);
+            showMainWindowAtColdStart(w, launcher);
+            for (const QString& path : sessionTabs)
+                w->openFileInNewTab(path);
+            if (sessionActiveIndex >= 0 && sessionActiveIndex < w->tabCount())
+                w->switchToTabIndex(sessionActiveIndex);
+
+            registerMainWindowWithPlatform(w);
+        } else {
+            // User declined - land on the Launcher.
+            showLauncherAtColdStart(launcher);
+            registerLauncherWithPlatform(launcher);
+        }
+    } else {
+        // No file, no session - land on the Launcher.
+        showLauncherAtColdStart(launcher);
+        registerLauncherWithPlatform(launcher);
+    }
+
+    int exitCode = app.exec();
+
+    return exitCode;
+}

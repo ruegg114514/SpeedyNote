@@ -1,0 +1,138 @@
+# SpeedyNote Flatpak Manifest
+
+
+app-id: org.speedynote.SpeedyNote
+runtime: org.kde.Platform
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+command: speedynote
+
+finish-args:
+  # Display (Wayland preferred, X11 fallback)
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # GPU rendering
+  - --device=dri
+  # Access ~/Documents for notebook storage and PDF files.
+  # Other locations are accessible via the file chooser portal.
+  - --filesystem=xdg-documents
+  # On-demand OCR model download (Phase 4D): the bundled latin/ch/korean models
+  # work offline; selecting an additional script (cyrillic/arabic/devanagari)
+  # fetches that model from RapidOCR into ~/.var/app/.../data/SpeedyNote/ocr-models.
+  - --share=network
+cleanup:
+  - /include
+modules:
+  # =========================================================================
+  # MuPDF - PDF rendering and export library
+  # =========================================================================
+  # Built as a shared library. Uses runtime-provided libraries where available;
+  # bundles only libraries not present in the KDE runtime.
+  # SpeedyNote uses MuPDF exclusively for all PDF operations.
+  - name: mupdf
+    buildsystem: simple
+    build-commands:
+      - |-
+        make \
+          HAVE_X11=no \
+          HAVE_GLUT=no \
+          HAVE_CURL=no \
+          HAVE_OBJCOPY=no \
+          USE_SYSTEM_FREETYPE=yes \
+          USE_SYSTEM_HARFBUZZ=yes \
+          USE_SYSTEM_LIBJPEG=yes \
+          USE_SYSTEM_ZLIB=yes \
+          USE_SYSTEM_OPENJPEG=yes \
+          USE_SYSTEM_JBIG2DEC=no \
+          USE_SYSTEM_LCMS2=yes \
+          USE_SYSTEM_MUJS=no \
+          USE_SYSTEM_GUMBO=no \
+          USE_SYSTEM_LEPTONICA=no \
+          USE_SYSTEM_TESSERACT=no \
+          shared=yes \
+          build=release \
+          libs \
+          -j${FLATPAK_BUILDER_N_JOBS}
+      - install -d /app/lib /app/include
+      - cp -a build/shared-release/libmupdf.so* /app/lib/
+      - cp -r include/mupdf /app/include/
+    sources:
+      - type: archive
+        url: https://mupdf.com/downloads/archive/mupdf-1.25.1-source.tar.gz
+        sha256: 81aa1361252418cc45347b4ac075532096957a7ab772e20e046f3bb418d7263c
+
+  # =========================================================================
+  # SpeedyNote - main application
+  # =========================================================================
+  # PaddleOCR (Linux handwriting OCR) needs a vendored ONNX Runtime + the
+  # PP-OCRv5 recognition models. Flathub has no network during `build`, so they
+  # are declared as checksummed `sources` here (fetched in the download phase)
+  # and laid out under linux/ exactly where CMakeLists.txt expects them
+  # (linux/onnxruntime-build + linux/ocr-models). CMake then auto-enables
+  # PaddleOCR and installs libonnxruntime.so* to /app/lib and the models to
+  # /app/share/speedynote/ocr-models; the INSTALL_RPATH=$ORIGIN/../lib resolves
+  # /app/bin -> /app/lib at runtime. OCR is CPU-only. The bundled models work
+  # offline; --share=network (in finish-args above) is only needed so the
+  # Phase 4D on-demand download can fetch additional script models at runtime.
+  #
+  # NOTE: this file is a MIRROR of the manifest in the Flathub repository; the
+  # same changes must be made there. The ONNX Runtime archive SHA256 and the
+  # app archive SHA256 below are PLACEHOLDERS that must be filled with the real
+  # digests (sha256sum of each downloaded file / the release tarball).
+  - name: speedynote
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DMUPDF_INCLUDE_DIR=/app/include
+    sources:
+      - type: archive
+        url: https://github.com/alpha-liu-01/SpeedyNote/archive/refs/tags/v1.4.7.tar.gz
+        sha256: 0000000000000000000000000000000000000000000000000000000000000000  # TODO: sha256 of the v1.4.7 release tarball
+      # --- Vendored ONNX Runtime (CPU EP), per target arch ------------------
+      # Extracts onnxruntime-linux-<arch>-1.20.1/{include,lib,...}; strip the
+      # top-level dir so it lands at linux/onnxruntime-build/{include,lib}.
+      - type: archive
+        only-arches:
+          - x86_64
+        url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
+        sha256: 67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105  # TODO: sha256 of onnxruntime-linux-x64-1.20.1.tgz
+        dest: linux/onnxruntime-build
+        strip-components: 1
+      - type: archive
+        only-arches:
+          - aarch64
+        url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-aarch64-1.20.1.tgz
+        sha256: ae4fedbdc8c18d688c01306b4b50c63de3445cdf2dbd720e01a2fa3810b8106a  # TODO: sha256 of onnxruntime-linux-aarch64-1.20.1.tgz
+        dest: linux/onnxruntime-build
+        strip-components: 1
+      # --- PP-OCRv5 mobile recognition models (arch-independent) ------------
+      # SHA256s match linux/fetch-ocr-models.sh. Dicts are embedded in the ONNX.
+      #
+      # IMPORTANT: ModelScope is the PRIMARY url and HuggingFace is a fallback
+      # mirror (same order as linux/fetch-ocr-models.sh). HuggingFace's resolve/
+      # CDN returns HTTP 429 (rate limit) for Flathub's shared build IPs, which
+      # fails the download phase if it is the only source. flatpak-builder tries
+      # `url` first and falls back to each `mirror-urls` entry on failure.
+      - type: file
+        url: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv5/rec/latin_PP-OCRv5_rec_mobile.onnx
+        mirror-urls:
+          - https://huggingface.co/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv5/rec/latin_PP-OCRv5_rec_mobile.onnx
+        sha256: b20bd37c168a570f583afbc8cd7925603890efbcdc000a59e22c269d160b5f5a
+        dest: linux/ocr-models
+        dest-filename: latin_rec.onnx
+      - type: file
+        url: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_mobile.onnx
+        mirror-urls:
+          - https://huggingface.co/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_mobile.onnx
+        sha256: 5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5
+        dest: linux/ocr-models
+        dest-filename: ch_rec.onnx
+      - type: file
+        url: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv5/rec/korean_PP-OCRv5_rec_mobile.onnx
+        mirror-urls:
+          - https://huggingface.co/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv5/rec/korean_PP-OCRv5_rec_mobile.onnx
+        sha256: cd6e2ea50f6943ca7271eb8c56a877a5a90720b7047fe9c41a2e541a25773c9b
+        dest: linux/ocr-models
+        dest-filename: korean_rec.onnx
+

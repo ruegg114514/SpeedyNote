@@ -1,0 +1,581 @@
+# SpeedyNote Android Build Guide
+
+**Document Version:** 1.1  
+**Date:** April 2026  
+**Status:** ✅ VERIFIED WORKING
+
+---
+
+## Overview
+
+This guide provides step-by-step instructions for building SpeedyNote for Android using the Docker-based build system. The build produces an APK that can be installed on Android tablets and phones.
+
+### Architecture
+
+- **Target:** Android arm64-v8a (64-bit ARM)
+- **PDF Backend:** MuPDF (cross-compiled)
+- **OCR Backend:** Google ML Kit Digital Ink Recognition (downloaded via Gradle)
+- **UI Framework:** Qt 6.9.3 for Android
+- **Minimum API:** 26 (Android 8.0)
+- **Target API:** 34 (Android 14)
+
+---
+
+## Prerequisites
+
+### Host System Requirements
+
+- Linux host (Ubuntu 22.04+ recommended)
+- Docker installed and running
+- At least 20GB free disk space
+- ADB (Android Debug Bridge) for device installation
+
+### Android Device Requirements
+
+- Android 8.0 (API 26) or higher
+- arm64-v8a architecture (most modern devices)
+- USB debugging enabled
+
+---
+
+## Quick Start
+
+If you just want to build quickly and the Docker image already exists:
+
+```bash
+# Enter Docker container
+./android/docker-shell.sh
+
+# Inside container: build MuPDF (first time only)
+./android/build-mupdf.sh
+
+# Build SpeedyNote APK (for testing)
+./android/build-speedynote.sh
+
+# Or build both APK and AAB (for testing + Play Store)
+./android/build-speedynote.sh --both
+
+# Exit container and install on device
+exit
+adb install android/SpeedyNote.apk
+```
+
+---
+
+## Detailed Build Instructions
+
+### Phase 1: Build the Docker Image
+
+The Docker image contains all build dependencies:
+- Ubuntu 22.04 base
+- Android SDK (API 34)
+- Android NDK 26.1
+- Qt 6.9.3 (Android arm64-v8a + Linux host tools)
+- CMake, Ninja, OpenJDK 17
+
+#### 1.1 Build the Docker image
+
+```bash
+cd /path/to/SpeedyNote
+./android/docker-build.sh
+```
+
+This takes 10-20 minutes depending on your internet connection. The image is cached for subsequent builds.
+
+#### 1.2 Verify the image
+
+```bash
+docker images | grep speedynote-android
+```
+
+You should see `speedynote-android-builder` in the list.
+
+---
+
+### Phase 2: Cross-compile MuPDF
+
+MuPDF is the PDF rendering library used on Android (replacing Poppler from desktop).
+
+#### 2.1 Enter the Docker container
+
+```bash
+./android/docker-shell.sh
+```
+
+This mounts the SpeedyNote source at `/workspace` inside the container.
+
+#### 2.2 Build MuPDF
+
+```bash
+./android/build-mupdf.sh
+```
+
+This script:
+1. Downloads MuPDF 1.24.10 source
+2. Configures cross-compilation for Android arm64-v8a
+3. Builds static libraries
+4. Installs to `android/mupdf-build/`
+
+Output files:
+- `android/mupdf-build/lib/libmupdf.a`
+- `android/mupdf-build/lib/libmupdf-third.a`
+- `android/mupdf-build/include/mupdf/`
+
+**Note:** This only needs to be done once. The built libraries persist on your host filesystem.
+
+---
+
+### Phase 3: Build SpeedyNote APK
+
+#### 3.1 Run the build script
+
+Still inside the Docker container:
+
+```bash
+./android/build-speedynote.sh
+```
+
+This script:
+1. Configures CMake with Qt Android toolchain
+2. Compiles all C++ source files (including the ML Kit JNI bridge)
+3. Links with MuPDF and Qt libraries
+4. Runs `androiddeployqt` to create the APK (Gradle downloads ML Kit dependencies automatically)
+5. Signs the APK with a debug key
+
+**Note:** The first build requires internet access inside the Docker container, as Gradle downloads the ML Kit Digital Ink Recognition library and its transitive dependencies from Google's Maven repository. Subsequent builds use the Gradle cache.
+
+#### 3.2 Build output
+
+The APK is created at:
+- `android/build-app/android-build/build/outputs/apk/release/android-build-release-unsigned.apk`
+- Copied to: `android/SpeedyNote.apk`
+
+#### 3.3 Exit the container
+
+```bash
+exit
+```
+
+---
+
+### Phase 4: Install on Device
+
+#### 4.1 Connect your Android device
+
+1. Enable **Developer Options** on your device
+2. Enable **USB Debugging**
+3. Connect via USB cable
+4. Accept the debugging prompt on the device
+
+#### 4.2 Verify ADB connection
+
+```bash
+adb devices
+```
+
+You should see your device listed.
+
+#### 4.3 Install the APK
+
+```bash
+adb install android/SpeedyNote.apk
+```
+
+For reinstalling after updates:
+```bash
+adb install -r android/SpeedyNote.apk
+```
+
+---
+
+## Build Scripts Reference
+
+### `android/docker-build.sh`
+
+Builds the Docker image with all dependencies.
+
+```bash
+#!/bin/bash
+docker build -t speedynote-android-builder android/
+```
+
+### `android/docker-shell.sh`
+
+Enters an interactive shell in the Docker container.
+
+```bash
+#!/bin/bash
+docker run -it --rm \
+    -v "$(pwd):/workspace" \
+    -w /workspace \
+    speedynote-android-builder \
+    /bin/bash
+```
+
+### `android/build-mupdf.sh`
+
+Cross-compiles MuPDF for Android arm64-v8a.
+
+Key environment variables:
+- `ANDROID_NDK` - Path to NDK (default: `/opt/android-sdk/ndk/26.1.10909125`)
+- `ANDROID_API` - Target API level (default: 26)
+
+### `android/build-speedynote.sh`
+
+Builds the SpeedyNote APK and/or AAB (Android App Bundle).
+
+**Usage:**
+```bash
+./android/build-speedynote.sh [options]
+```
+
+**Options:**
+| Option | Description |
+|--------|-------------|
+| `--apk` | Build APK only (default) |
+| `--aab` | Build AAB only (for Play Store submission) |
+| `--both` | Build both APK and AAB |
+| `--release` | Use release keystore (requires environment variables) |
+| `--help` | Show usage information |
+
+**Examples:**
+```bash
+# Build APK only (default, backward compatible, debug signed)
+./android/build-speedynote.sh
+
+# Build AAB for Play Store (debug signed - for testing only)
+./android/build-speedynote.sh --aab
+
+# Build both APK and AAB
+./android/build-speedynote.sh --both
+
+# Build release-signed AAB for Play Store submission
+export RELEASE_KEYSTORE=/path/to/release.keystore
+export RELEASE_KEY_ALIAS=speedynote
+export RELEASE_STORE_PASS=your_secure_password
+./android/build-speedynote.sh --aab --release
+```
+
+**Output files:**
+- `android/SpeedyNote.apk` - For testing and sideloading (if `--apk` or `--both`)
+- `android/SpeedyNote.aab` - For Google Play Store submission (if `--aab` or `--both`)
+
+**Release signing environment variables:**
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `RELEASE_KEYSTORE` | Yes | Path to your release keystore file |
+| `RELEASE_KEY_ALIAS` | Yes | Key alias in the keystore |
+| `RELEASE_STORE_PASS` | Yes | Keystore password |
+| `RELEASE_KEY_PASS` | No | Key password (defaults to `RELEASE_STORE_PASS`) |
+
+**Build environment variables:**
+- `QT_ANDROID` - Qt Android installation (default: `/opt/qt/6.9.3/android_arm64_v8a`)
+- `QT_HOST` - Qt host tools (default: `/opt/qt/6.9.3/gcc_64`)
+- `MUPDF_INCLUDE_DIR` - MuPDF headers
+- `MUPDF_LIBRARIES` - MuPDF static libraries
+
+---
+
+## Directory Structure
+
+```
+SpeedyNote/
+├── android/
+│   ├── Dockerfile              # Docker image definition
+│   ├── docker-build.sh         # Build Docker image
+│   ├── docker-shell.sh         # Enter Docker container
+│   ├── build-mupdf.sh          # Cross-compile MuPDF
+│   ├── build-speedynote.sh     # Build full APK
+│   ├── app-resources/          # Android app resources
+│   │   ├── AndroidManifest.xml # App manifest
+│   │   ├── build.gradle        # Gradle build (includes ML Kit dependency)
+│   │   ├── res/
+│   │   │   └── xml/
+│   │   │       └── file_paths.xml  # FileProvider paths
+│   │   └── src/org/speedynote/app/  # Java source files
+│   │       ├── SpeedyNoteActivity.java     # Custom Activity
+│   │       ├── PdfFileHelper.java          # PDF picker with SAF handling
+│   │       ├── MlKitDigitalInkHelper.java  # ML Kit OCR bridge (JNI)
+│   │       ├── NotificationHelper.java     # Notification support
+│   │       ├── ShareHelper.java            # Share sheet support
+│   │       └── ImportHelper.java           # File import support
+│   ├── mupdf-build/            # Built MuPDF (generated)
+│   │   ├── include/
+│   │   └── lib/
+│   ├── build-app/              # CMake build directory (generated)
+│   ├── SpeedyNote.apk          # Final APK (generated, --apk or --both)
+│   └── SpeedyNote.aab          # Final AAB (generated, --aab or --both)
+├── source/
+│   ├── pdf/
+│   │   ├── PdfProvider.h       # Abstract PDF interface
+│   │   ├── PdfProviderFactory.cpp  # Platform selection
+│   │   ├── MuPdfProvider.cpp   # Android: MuPDF backend
+│   │   └── PopplerPdfProvider.cpp  # Desktop: Poppler backend
+│   └── ocr/engines/
+│       ├── MlKitOcrEngine.h         # ML Kit OCR engine (shared header)
+│       ├── MlKitOcrEngine.cpp       # ML Kit OCR engine (shared logic)
+│       └── MlKitOcrEngine_android.cpp  # Android JNI bridge
+└── CMakeLists.txt              # Build configuration
+```
+
+---
+
+## Platform-Specific Code
+
+### PDF Provider Selection
+
+The build system automatically selects the appropriate PDF backend:
+
+```cmake
+# In CMakeLists.txt
+if(ANDROID)
+    set(PDF_SOURCES
+        source/pdf/PdfProviderFactory.cpp
+        source/pdf/MuPdfProvider.cpp      # MuPDF for Android
+    )
+else()
+    set(PDF_SOURCES
+        source/pdf/PdfProviderFactory.cpp
+        source/pdf/PopplerPdfProvider.cpp  # Poppler for desktop
+    )
+endif()
+```
+
+### Conditional Compilation
+
+Several features are conditionally compiled for Android:
+
+```cpp
+// QSharedMemory not available on Android
+#ifndef Q_OS_ANDROID
+#include <QSharedMemory>
+#endif
+
+// Signal handlers only for desktop Linux
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+void setupLinuxSignalHandlers() { ... }
+#endif
+
+// Tests excluded from Android build
+#ifndef Q_OS_ANDROID
+#include "ui/ToolbarButtonTests.h"
+#endif
+```
+
+### OCR (ML Kit Digital Ink Recognition)
+
+SpeedyNote uses Google ML Kit Digital Ink Recognition for stroke-based handwriting OCR on Android. The dependency is declared in `android/app-resources/build.gradle`:
+
+```gradle
+implementation 'com.google.mlkit:digital-ink-recognition:19.0.0'
+```
+
+Gradle downloads the library automatically during the APK/AAB build. The C++ side communicates with ML Kit through JNI via `MlKitDigitalInkHelper.java`, which handles model downloading, stroke conversion, and recognition. CMake enables OCR on Android builds automatically (`SPEEDYNOTE_ENABLE_MLKIT_OCR=ON`).
+
+At runtime, ML Kit downloads language models on-demand (requires network access on first use per language). A Kotlin stdlib version resolution strategy in `build.gradle` prevents duplicate-class errors from transitive dependencies.
+
+### PDF File Picker (BUG-A003)
+
+Android's Storage Access Framework (SAF) requires special handling. Qt's `QFileDialog` returns `content://` URIs, but the temporary permission expires before our code can use it.
+
+**Solution:** Custom Java classes handle the file picker and copy the file while permission is valid:
+
+```java
+// SpeedyNoteActivity.java - Extends QtActivity
+@Override
+protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+    if (PdfFileHelper.handleActivityResult(requestCode, resultCode, data)) {
+        return; // Our helper handled it
+    }
+    super.onActivityResult(requestCode, resultCode, data);
+}
+```
+
+### High-Rate Stylus Input (BUG-A004)
+
+Android batches touch events at 60Hz by default. To get the full hardware rate (e.g., 240Hz):
+
+```java
+// SpeedyNoteActivity.java - Enable unbuffered dispatch
+@Override
+public boolean dispatchTouchEvent(MotionEvent event) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        View contentView = findViewById(android.R.id.content);
+        if (contentView != null) {
+            contentView.requestUnbufferedDispatch(event);
+        }
+    }
+    return super.dispatchTouchEvent(event);
+}
+
+// PdfFileHelper.java - Copies file while permission is valid
+public static boolean handleActivityResult(...) {
+    Uri uri = data.getData();
+    String localPath = copyUriToLocal(uri, destDir);  // ← Permission valid here
+    onPdfFilePicked(localPath);  // JNI callback to C++
+    return true;
+}
+```
+
+The C++ side waits for the callback:
+
+```cpp
+#ifdef Q_OS_ANDROID
+// In openPdfDocument()
+pdfPath = pickPdfFileAndroid();  // Calls Java, waits for result
+#else
+pdfPath = QFileDialog::getOpenFileName(...);
+#endif
+```
+
+**Imported PDFs are stored at:** `/data/data/org.speedynote.app/files/pdfs/`
+
+---
+
+## Troubleshooting
+
+### Docker permission denied
+
+**Error:** `permission denied while trying to connect to the Docker daemon socket`
+
+**Fix:** Add your user to the docker group:
+```bash
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+Or run Docker commands with `sudo`.
+
+### QT_HOST_PATH not set
+
+**Error:** `To use a cross-compiled Qt, please set the QT_HOST_PATH cache variable`
+
+**Fix:** Ensure `QT_HOST` environment variable is correct:
+```bash
+export QT_HOST=/opt/qt/6.9.3/gcc_64
+```
+
+### APK installation fails with INSTALL_PARSE_FAILED_NO_CERTIFICATES
+
+**Error:** APK is unsigned
+
+**Fix:** The build script should sign automatically. If not, manually sign:
+```bash
+${QT_HOST}/bin/androiddeployqt \
+    --input android-speedynote-deployment-settings.json \
+    --output android-build \
+    --sign \
+    --storepass android \
+    --keypass android
+```
+
+### Resource not found: xml/file_paths
+
+**Error:** `resource xml/file_paths not found`
+
+**Fix:** Ensure `android/app-resources/res/xml/file_paths.xml` exists.
+
+### Missing MuPDF libraries
+
+**Error:** Linker can't find libmupdf.a
+
+**Fix:** Run `./android/build-mupdf.sh` first.
+
+### Poppler header not found (on Android build)
+
+**Error:** `poppler/qt6/poppler-qt6.h not found`
+
+**Fix:** Code still references Poppler. Check that:
+1. `PdfProviderFactory.cpp` uses `#ifdef Q_OS_ANDROID` correctly
+2. Source files include `PdfProvider.h`, not `PopplerPdfProvider.h`
+
+---
+
+## Clean Build
+
+To perform a completely clean build:
+
+```bash
+# On host
+rm -rf android/build-app
+rm -rf android/mupdf-build
+
+# Then rebuild
+./android/docker-shell.sh
+./android/build-mupdf.sh
+./android/build-speedynote.sh
+```
+
+---
+
+## Release Build
+
+For Google Play Store submission, you need to sign your app with a release keystore.
+
+### Step 1: Create Release Keystore (One-Time Setup)
+
+```bash
+# Create a release keystore (keep this file safe forever!)
+keytool -genkey -v \
+    -keystore release.keystore \
+    -alias speedynote \
+    -keyalg RSA \
+    -keysize 2048 \
+    -validity 10000 \
+    -storepass YOUR_SECURE_PASSWORD \
+    -keypass YOUR_SECURE_PASSWORD \
+    -dname "CN=Your Name,O=Your Organization,L=City,ST=State,C=Country"
+```
+
+⚠️ **Critical:** 
+- Use a strong, unique password
+- **Back up the keystore file** in multiple secure locations
+- **If you lose it, you can NEVER update your app** on Play Store
+
+### Step 2: Build Release AAB
+
+```bash
+# Set environment variables (don't commit these to git!)
+export RELEASE_KEYSTORE=/path/to/release.keystore
+export RELEASE_KEY_ALIAS=speedynote
+export RELEASE_STORE_PASS=your_secure_password
+
+# Enter Docker and build
+./android/docker-shell.sh
+./android/build-speedynote.sh --aab --release
+```
+
+### Step 3: Upload to Play Store
+
+1. Go to [Google Play Console](https://play.google.com/console)
+2. Create or select your app
+3. Go to **Release** → **Production** (or Testing track)
+4. Upload `android/SpeedyNote.aab`
+5. Enable **Play App Signing** (recommended - Google manages your signing key)
+
+### Security Tips
+
+| Do | Don't |
+|----|-------|
+| Store keystore in secure backup | Commit keystore to git |
+| Use environment variables for passwords | Hardcode passwords in scripts |
+| Enable Play App Signing | Share keystore with others |
+| Keep password in password manager | Use simple passwords |
+
+---
+
+## Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0 | 2026-01-15 | Initial Android port with MuPDF backend |
+| 1.1 | 2026-04-11 | Added ML Kit Digital Ink Recognition OCR, updated directory structure |
+
+---
+
+## See Also
+
+- [ANDROID_PORT_QA.md](ANDROID_PORT_QA.md) - Design decisions and Q&A
+- [MuPDF Documentation](https://mupdf.com/docs/)
+- [Qt for Android](https://doc.qt.io/qt-6/android.html)
+

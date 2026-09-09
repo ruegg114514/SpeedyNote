@@ -1,0 +1,482 @@
+name: Build SpeedyNote Linux Packages
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags (e.g., v1.2.1, v2.0.0-beta)
+  workflow_dispatch:  # Allow manual trigger  
+
+# Required for release uploads
+permissions:
+  contents: write
+
+jobs:
+  # Strategy for the .deb jobs:
+  #   1. Build inside a Debian 12 (Bookworm) container so glibc and Qt6
+  #      stay forward-compatible (Debian 12: glibc 2.36, Qt 6.4). A single
+  #      .deb then installs on Debian 12/13 and Ubuntu 24.04/25.04/26.04.
+  #      The `libqt6core6t64 | libqt6core6` alternate deps in
+  #      build-package.sh handle the Debian/Ubuntu t64 rename at install.
+  #   2. Statically link our own libmujs.a (built from upstream source in
+  #      the "Build static libmujs from source" step). This dodges the
+  #      libmujs2 → libmujs3 SONAME bump between Debian 12 and 13, which
+  #      no Depends: line could fix because the SONAME is baked into the
+  #      ELF at link time. See that step's body for the full rationale.
+  #   3. Detect runtime deps from the actual built binary (objdump -p) in
+  #      build-package.sh::detect_deb_runtime_deps. The Audit step here
+  #      then re-verifies that every DT_NEEDED has a Depends: covering it
+  #      and FAILS the build if anything is missing — so a broken .deb
+  #      can never be uploaded.
+  build-deb:
+    name: Build DEB Package (amd64, Debian 12 base)
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:12-slim
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          # debian:12-slim has no compiler by default; build-essential pulls
+          # in gcc, g++, libc6-dev, make, and dpkg-dev.
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            git \
+            curl \
+            file \
+            sudo \
+            build-essential \
+            cmake \
+            pkg-config \
+            qt6-base-dev \
+            qt6-tools-dev \
+            libqt6svg6-dev \
+            libasound2-dev \
+            libmupdf-dev \
+            libharfbuzz-dev \
+            libfreetype-dev \
+            libjpeg-dev \
+            libopenjp2-7-dev \
+            libjbig2dec0-dev \
+            libgumbo-dev \
+            libmujs-dev \
+            devscripts
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build static libmujs from source (avoids SONAME drift)
+        run: |
+          # Why: Debian's libmujs SONAME bumps between releases (libmujs.so.2
+          # on Debian 12, libmujs.so.3 on Debian 13 — no compat symlink). A
+          # Debian-12-built binary with DT_NEEDED libmujs.so.2 fails to load
+          # on Debian 13 even with libmujs3 installed. By building libmujs as
+          # a static archive and replacing libmujs-dev's .so handle with our
+          # .a, find_library(NAMES mujs) picks the static path, mujs symbols
+          # get embedded in the speedynote binary, and DT_NEEDED no longer
+          # mentions libmujs at all. The .deb becomes mujs-version-agnostic.
+          #
+          # mujs is a single-file ISC-licensed JS interpreter (~50 KB
+          # compiled, ~10 s build). Pin to 1.3.4 to match Debian 12's
+          # libmupdf.a (which was compiled against mujs 1.3.4 headers).
+          apt-get install -y --no-install-recommends git
+          git clone --depth 1 -b 1.3.4 https://github.com/ccxvii/mujs.git /tmp/mujs
+          make -C /tmp/mujs -j"$(nproc)" HAVE_READLINE=no build/release/libmujs.a
+          ARCH_TRIPLET=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+          # Replace libmujs-dev's dynamic-linkage handle (libmujs.so symlink)
+          # with our static archive. CMake's find_library(NAMES mujs) will
+          # then resolve to libmujs.a since libmujs.so is gone.
+          rm -f "/usr/lib/$ARCH_TRIPLET/libmujs.so"
+          install -Dm644 /tmp/mujs/build/release/libmujs.a \
+            "/usr/lib/$ARCH_TRIPLET/libmujs.a"
+          echo "Installed static libmujs:"
+          ls -l "/usr/lib/$ARCH_TRIPLET/libmujs."*
+
+      - name: Fetch ONNX Runtime + OCR models (PaddleOCR)
+        run: |
+          # PaddleOCR (Linux OCR backend) needs a vendored, prebuilt ONNX
+          # Runtime and the PP-OCRv5 recognition models. build-package.sh would
+          # fetch these itself, but we run them explicitly so the step is
+          # visible in CI logs and fails fast on a download/checksum error.
+          chmod +x ./linux/fetch-onnxruntime.sh ./linux/fetch-ocr-models.sh
+          ORT_ARCH=x64 ./linux/fetch-onnxruntime.sh
+          ./linux/fetch-ocr-models.sh
+
+      - name: Build and create DEB package
+        run: |
+          chmod +x ./build-package.sh
+          ./build-package.sh --deb
+
+      - name: Verify glibc compat (sanity check)
+        run: |
+          MAX_GLIBC=$(objdump -T build/speedynote 2>/dev/null \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -V | tail -1)
+          echo "Highest GLIBC symbol required: ${MAX_GLIBC:-none}"
+          # Debian 12 ships glibc 2.36; warn if we somehow exceed it.
+          if [ -n "$MAX_GLIBC" ]; then
+            VER="${MAX_GLIBC#GLIBC_}"
+            awk -v v="$VER" 'BEGIN{
+              split(v,a,".");
+              if (a[1]>2 || (a[1]==2 && a[2]>36)) {
+                print "WARNING: binary requires glibc " v " > 2.36 (Debian 12)";
+                exit 0;
+              }
+            }'
+          fi
+
+      - name: Audit dynamic library dependencies
+        run: |
+          set -e
+          DEB_FILE=$(ls speedynote_*.deb 2>/dev/null | head -1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "No .deb produced — failing audit." >&2
+            exit 1
+          fi
+
+          # Extract the binary from the .deb. We don't read build/speedynote
+          # because build-package.sh::cleanup() removes the build directory
+          # after packaging. Auditing the .deb's payload also matches what
+          # users actually install, so it's strictly more accurate.
+          rm -rf _audit && mkdir _audit
+          dpkg-deb -x "$DEB_FILE" _audit
+          BIN=_audit/usr/bin/speedynote
+
+          echo "=== Verifying bundled PaddleOCR runtime ==="
+          ls _audit/usr/lib/libonnxruntime.so* >/dev/null 2>&1 \
+            && echo "  [ok] libonnxruntime.so* bundled in usr/lib" \
+            || { echo "  [MISS] libonnxruntime.so* not bundled in .deb" >&2; exit 1; }
+          test -f _audit/usr/share/speedynote/ocr-models/latin_rec.onnx \
+            && echo "  [ok] OCR models bundled in usr/share/speedynote/ocr-models" \
+            || { echo "  [MISS] ocr-models not bundled in .deb" >&2; exit 1; }
+          echo
+
+          echo "=== NEEDED entries (DT_NEEDED) ==="
+          objdump -p "$BIN" | grep NEEDED
+          echo
+          DEPENDS=$(dpkg-deb -f "$DEB_FILE" Depends)
+          echo "Declared Depends: $DEPENDS"
+          echo
+          echo "=== Verifying every DT_NEEDED is covered by Depends: ==="
+          ARCH_TRIPLET=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+          MISSING=0
+          for lib in $(objdump -p "$BIN" | awk '/NEEDED/ {print $2}'); do
+            # Skip the base-system / Qt-baseline libs that we never declare.
+            case "$lib" in
+              libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|\
+              libresolv.so.*|libnsl.so.*|libutil.so.*|ld-linux*.so.*|\
+              libgcc_s.so.*|libstdc++.so.*)
+                echo "  [skip-base] $lib"
+                continue ;;
+              libQt6Core.so.*|libQt6Gui.so.*|libQt6Widgets.so.*)
+                # Covered by libqt6{core6,gui6,widgets6}t64 | libqt6{core6,gui6,widgets6}.
+                echo "  [skip-qt6 ] $lib"
+                continue ;;
+              libonnxruntime.so.*)
+                # Vendored in usr/lib and resolved via the binary's
+                # $ORIGIN/../lib RPATH — no Debian package owns it, by design.
+                echo "  [skip-ort ] $lib"
+                continue ;;
+            esac
+
+            # Locate the SONAME and resolve its package owner.
+            LIB_PATH=""
+            for d in "/usr/lib/$ARCH_TRIPLET" "/lib/$ARCH_TRIPLET" "/usr/lib" "/lib"; do
+              if [ -e "$d/$lib" ]; then LIB_PATH="$d/$lib"; break; fi
+            done
+            if [ -z "$LIB_PATH" ]; then
+              echo "  [MISS-fs ] $lib — not found on filesystem"
+              MISSING=$((MISSING+1))
+              continue
+            fi
+            REAL=$(readlink -f "$LIB_PATH")
+            OWNER=$(dpkg -S "$REAL" 2>/dev/null | head -1 | cut -d: -f1)
+            [ -z "$OWNER" ] && OWNER=$(dpkg -S "$LIB_PATH" 2>/dev/null | head -1 | cut -d: -f1)
+            # usrmerge fallback: dpkg's DB often still registers files at
+            # /lib/$ARCH/* even though they live at /usr/lib/$ARCH/* on
+            # post-merge systems. Glob by basename to find the package.
+            if [ -z "$OWNER" ]; then
+              OWNER=$(dpkg -S "*/$(basename "$REAL")" 2>/dev/null | head -1 | cut -d: -f1)
+            fi
+            OWNER="${OWNER%%:*}"
+            if [ -z "$OWNER" ]; then
+              echo "  [MISS-pkg] $lib ($REAL) — no Debian package owner"
+              MISSING=$((MISSING+1))
+              continue
+            fi
+
+            if echo "$DEPENDS" | grep -qE "(^|[ ,|])$OWNER([ ,|(]|$)"; then
+              echo "  [   ok   ] $lib  →  $OWNER"
+            else
+              echo "  [  MISS  ] $lib  →  $OWNER  (not in Depends:)"
+              MISSING=$((MISSING+1))
+            fi
+          done
+          if [ "$MISSING" -gt 0 ]; then
+            echo
+            echo "FATAL: $MISSING DT_NEEDED entry/entries not covered by Depends:" >&2
+            echo "       The .deb would fail at runtime on a clean system." >&2
+            echo "       Check detect_deb_runtime_deps() output above for clues." >&2
+            exit 1
+          fi
+          echo
+          echo "All DT_NEEDED entries are covered."
+
+      - name: Upload DEB package
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedynote-deb-amd64
+          path: "*.deb"
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: "*.deb"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-deb-arm64:
+    name: Build DEB Package (arm64, Debian 12 base)
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:12-slim
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          # debian:12-slim has no compiler by default; build-essential pulls
+          # in gcc, g++, libc6-dev, make, and dpkg-dev.
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            git \
+            curl \
+            file \
+            sudo \
+            build-essential \
+            cmake \
+            pkg-config \
+            qt6-base-dev \
+            qt6-tools-dev \
+            libqt6svg6-dev \
+            libasound2-dev \
+            libmupdf-dev \
+            libharfbuzz-dev \
+            libfreetype-dev \
+            libjpeg-dev \
+            libopenjp2-7-dev \
+            libjbig2dec0-dev \
+            libgumbo-dev \
+            libmujs-dev \
+            devscripts
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build static libmujs from source (avoids SONAME drift)
+        run: |
+          # See full rationale in the amd64 job. TL;DR: Debian's libmujs
+          # SONAME bumped from libmujs.so.2 (Debian 12) to libmujs.so.3
+          # (Debian 13). Statically linking our own libmujs.a makes the
+          # binary mujs-version-agnostic.
+          apt-get install -y --no-install-recommends git
+          git clone --depth 1 -b 1.3.4 https://github.com/ccxvii/mujs.git /tmp/mujs
+          make -C /tmp/mujs -j"$(nproc)" HAVE_READLINE=no build/release/libmujs.a
+          ARCH_TRIPLET=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+          rm -f "/usr/lib/$ARCH_TRIPLET/libmujs.so"
+          install -Dm644 /tmp/mujs/build/release/libmujs.a \
+            "/usr/lib/$ARCH_TRIPLET/libmujs.a"
+          echo "Installed static libmujs:"
+          ls -l "/usr/lib/$ARCH_TRIPLET/libmujs."*
+
+      - name: Fetch ONNX Runtime + OCR models (PaddleOCR)
+        run: |
+          # arm64 build: fetch the aarch64 ONNX Runtime. See the amd64 job for
+          # the rationale; the models are architecture-independent.
+          chmod +x ./linux/fetch-onnxruntime.sh ./linux/fetch-ocr-models.sh
+          ORT_ARCH=aarch64 ./linux/fetch-onnxruntime.sh
+          ./linux/fetch-ocr-models.sh
+
+      - name: Build and create DEB package
+        run: |
+          chmod +x ./build-package.sh
+          ./build-package.sh --deb
+
+      - name: Verify glibc compat (sanity check)
+        run: |
+          MAX_GLIBC=$(objdump -T build/speedynote 2>/dev/null \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -V | tail -1)
+          echo "Highest GLIBC symbol required: ${MAX_GLIBC:-none}"
+          if [ -n "$MAX_GLIBC" ]; then
+            VER="${MAX_GLIBC#GLIBC_}"
+            awk -v v="$VER" 'BEGIN{
+              split(v,a,".");
+              if (a[1]>2 || (a[1]==2 && a[2]>36)) {
+                print "WARNING: binary requires glibc " v " > 2.36 (Debian 12)";
+                exit 0;
+              }
+            }'
+          fi
+
+      - name: Audit dynamic library dependencies
+        run: |
+          set -e
+          DEB_FILE=$(ls speedynote_*.deb 2>/dev/null | head -1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "No .deb produced — failing audit." >&2
+            exit 1
+          fi
+
+          # Extract the binary from the .deb (build/speedynote was deleted
+          # by build-package.sh::cleanup() after packaging).
+          rm -rf _audit && mkdir _audit
+          dpkg-deb -x "$DEB_FILE" _audit
+          BIN=_audit/usr/bin/speedynote
+
+          echo "=== Verifying bundled PaddleOCR runtime ==="
+          ls _audit/usr/lib/libonnxruntime.so* >/dev/null 2>&1 \
+            && echo "  [ok] libonnxruntime.so* bundled in usr/lib" \
+            || { echo "  [MISS] libonnxruntime.so* not bundled in .deb" >&2; exit 1; }
+          test -f _audit/usr/share/speedynote/ocr-models/latin_rec.onnx \
+            && echo "  [ok] OCR models bundled in usr/share/speedynote/ocr-models" \
+            || { echo "  [MISS] ocr-models not bundled in .deb" >&2; exit 1; }
+          echo
+
+          echo "=== NEEDED entries (DT_NEEDED) ==="
+          objdump -p "$BIN" | grep NEEDED
+          echo
+          DEPENDS=$(dpkg-deb -f "$DEB_FILE" Depends)
+          echo "Declared Depends: $DEPENDS"
+          echo
+          echo "=== Verifying every DT_NEEDED is covered by Depends: ==="
+          ARCH_TRIPLET=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+          MISSING=0
+          for lib in $(objdump -p "$BIN" | awk '/NEEDED/ {print $2}'); do
+            case "$lib" in
+              libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|\
+              libresolv.so.*|libnsl.so.*|libutil.so.*|ld-linux*.so.*|\
+              libgcc_s.so.*|libstdc++.so.*)
+                echo "  [skip-base] $lib"
+                continue ;;
+              libQt6Core.so.*|libQt6Gui.so.*|libQt6Widgets.so.*)
+                echo "  [skip-qt6 ] $lib"
+                continue ;;
+              libonnxruntime.so.*)
+                # Vendored in usr/lib, resolved via the binary RPATH (no owner).
+                echo "  [skip-ort ] $lib"
+                continue ;;
+            esac
+
+            LIB_PATH=""
+            for d in "/usr/lib/$ARCH_TRIPLET" "/lib/$ARCH_TRIPLET" "/usr/lib" "/lib"; do
+              if [ -e "$d/$lib" ]; then LIB_PATH="$d/$lib"; break; fi
+            done
+            if [ -z "$LIB_PATH" ]; then
+              echo "  [MISS-fs ] $lib — not found on filesystem"
+              MISSING=$((MISSING+1))
+              continue
+            fi
+            REAL=$(readlink -f "$LIB_PATH")
+            OWNER=$(dpkg -S "$REAL" 2>/dev/null | head -1 | cut -d: -f1)
+            [ -z "$OWNER" ] && OWNER=$(dpkg -S "$LIB_PATH" 2>/dev/null | head -1 | cut -d: -f1)
+            # usrmerge fallback: see amd64 audit step for explanation.
+            if [ -z "$OWNER" ]; then
+              OWNER=$(dpkg -S "*/$(basename "$REAL")" 2>/dev/null | head -1 | cut -d: -f1)
+            fi
+            OWNER="${OWNER%%:*}"
+            if [ -z "$OWNER" ]; then
+              echo "  [MISS-pkg] $lib ($REAL) — no Debian package owner"
+              MISSING=$((MISSING+1))
+              continue
+            fi
+
+            if echo "$DEPENDS" | grep -qE "(^|[ ,|])$OWNER([ ,|(]|$)"; then
+              echo "  [   ok   ] $lib  →  $OWNER"
+            else
+              echo "  [  MISS  ] $lib  →  $OWNER  (not in Depends:)"
+              MISSING=$((MISSING+1))
+            fi
+          done
+          if [ "$MISSING" -gt 0 ]; then
+            echo
+            echo "FATAL: $MISSING DT_NEEDED entry/entries not covered by Depends:" >&2
+            echo "       The .deb would fail at runtime on a clean system." >&2
+            echo "       Check detect_deb_runtime_deps() output above for clues." >&2
+            exit 1
+          fi
+          echo
+          echo "All DT_NEEDED entries are covered."
+
+      - name: Upload DEB package
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedynote-deb-arm64
+          path: "*.deb"
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: "*.deb"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-rpm:
+    name: Build RPM Package (Fedora/RHEL)
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          dnf install -y \
+            cmake \
+            make \
+            pkgconf \
+            qt6-qtbase-devel \
+            qt6-qttools-devel \
+            qt6-qtsvg-devel \
+            alsa-lib-devel \
+            mupdf-devel \
+            harfbuzz-devel \
+            freetype-devel \
+            libjpeg-turbo-devel \
+            openjpeg2-devel \
+            jbig2dec-devel \
+            gumbo-parser-devel \
+            mujs-devel \
+            patchelf \
+            rpm-build \
+            rpm-devel
+
+      - name: Fetch ONNX Runtime + OCR models (PaddleOCR)
+        run: |
+          # Fetch the vendored ONNX Runtime + models before packaging so the
+          # source tarball rpmbuild consumes includes linux/, enabling OCR.
+          chmod +x ./linux/fetch-onnxruntime.sh ./linux/fetch-ocr-models.sh
+          ORT_ARCH=x64 ./linux/fetch-onnxruntime.sh
+          ./linux/fetch-ocr-models.sh
+
+      - name: Build and create RPM package
+        run: |
+          chmod +x ./build-package.sh
+          ./build-package.sh --rpm
+
+      - name: Upload RPM package
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedynote-rpm-x86_64
+          path: "*.rpm"
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: "*.rpm"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

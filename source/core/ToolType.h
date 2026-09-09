@@ -1,0 +1,34 @@
+#pragma once
+
+// ============================================================================
+// ToolType - Available drawing/editing tools
+// ============================================================================
+// Part of the new SpeedyNote document architecture
+// All tools are vector-based with full undo/redo support.
+// ============================================================================
+
+/**
+ * @brief Available drawing and editing tools.
+ * 
+ * All tools work with vector strokes stored in VectorLayer.
+ * The pixmap-based tools from the old InkCanvas are obsolete.
+ */
+enum class ToolType {
+    Pen,        ///< Vector pen - pressure-sensitive drawing with undo support
+    Marker,     ///< Vector marker - semi-transparent strokes
+    Eraser,     ///< Vector eraser - stroke-based removal
+    Highlighter,///< Vector highlighter - highlight blend mode (Phase 2B)
+    Lasso,      ///< Selection tool - select and manipulate strokes (Phase 2B)
+    ObjectSelect,///< Object selection tool - select and manipulate inserted objects (Phase O2)
+    Pan         ///< Hand tool - click-drag to pan the viewport
+};
+
+// Qt5 does not auto-generate qHash for enum class types used as QHash keys.
+// Qt6 provides it automatically via QHashPrivate::Stores enum specialization.
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+#include <QtCore/qhashfunctions.h>
+inline uint qHash(ToolType key, uint seed = 0) noexcept
+{
+    return qHash(static_cast<int>(key), seed);
+}
+#endif

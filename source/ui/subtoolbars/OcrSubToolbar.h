@@ -1,0 +1,101 @@
+#ifndef OCRSUBTOOLBAR_H
+#define OCRSUBTOOLBAR_H
+
+#include "SubToolbar.h"
+#include <QHash>
+
+class QPushButton;
+class QLabel;
+class QTimer;
+class QFrame;
+
+class OcrSubToolbar : public SubToolbar {
+    Q_OBJECT
+
+public:
+    explicit OcrSubToolbar(QWidget* parent = nullptr);
+
+    void refreshFromSettings() override;
+    void restoreTabState(int tabId) override;
+    void saveTabState(int tabId) override;
+    void clearTabState(int tabId) override;
+    void setDarkMode(bool darkMode) override;
+
+    void setOcrAvailable(bool available);
+    /// Show or hide the confidence toggle. Hidden when the engine reports no
+    /// real score, in which case the toggle would silently do nothing.
+    void setConfidenceSupported(bool supported);
+    void setStatusText(const QString& text);
+    void clearStatusAfterDelay(int ms = 5000);
+    bool isAutoOcrEnabled() const;
+    bool isShowTextEnabled() const;
+    bool isConfidenceEnabled() const;
+    bool isSnapToGridEnabled() const;
+    // Seeded from the document on every viewport switch; see the TabState note
+    // below for why these three are not cached per tab.
+    void setAutoOcrChecked(bool checked);
+    void setShowTextChecked(bool checked);
+    void setSnapToGridChecked(bool checked);
+
+    // Keyboard-shortcut entry points. Each forwards to the corresponding
+    // private button's click()/toggle(), so the existing signal path
+    // (scanPageClicked, autoOcrToggled, etc.) and all MainWindow wiring
+    // keep working unchanged. Gated by isEnabled() so they respect
+    // setOcrAvailable(false).
+    void triggerScanPage();
+    void triggerScanAll();
+    void toggleAutoOcr();
+    void toggleShowText();
+    void toggleSnapToGrid();
+
+signals:
+    void scanPageClicked();
+    void scanAllClicked();
+    void autoOcrToggled(bool enabled);
+    void showTextToggled(bool enabled);
+    void confidenceToggled(bool enabled);
+    void snapToGridToggled(bool enabled);
+
+private:
+    void createWidgets();
+    void setupConnections();
+    void updateIcons();
+    void applyButtonStyle();
+
+    QPushButton* m_scanPageButton = nullptr;
+    QPushButton* m_scanAllButton = nullptr;
+    QPushButton* m_autoOcrButton = nullptr;
+    QPushButton* m_showTextButton = nullptr;
+    QPushButton* m_confidenceButton = nullptr;
+    QPushButton* m_snapButton = nullptr;
+    QFrame* m_scanSeparator = nullptr;
+    QLabel* m_statusLabel = nullptr;
+    QTimer* m_statusClearTimer = nullptr;
+
+    bool m_darkMode = false;
+    bool m_confidenceSupported = false;
+
+    // Per-tab UI state cache.
+    //
+    // NOTE: Auto-OCR, show-text and snap-to-grid are intentionally NOT cached
+    // here. All three are authoritative on the Document (ocrAutoRecognize,
+    // ocrTextVisible(), ocrSnapToBackground - all persisted to the notebook
+    // JSON), and MainWindow::connectViewportScrollSignals() syncs the buttons
+    // to those values on every viewport switch. Caching them per-tab would
+    // create two competing sources of truth and race with that sync (the
+    // save-old/restore-new pass runs after the doc-based sync, so it would
+    // capture the already-overwritten button state for the outgoing tab).
+    //
+    // Confidence stays here because it is a session-only view preference with
+    // no document field behind it.
+    struct TabState {
+        bool confidenceEnabled = false;
+        bool initialized = false;
+    };
+    QHash<int, TabState> m_tabStates;
+
+    static constexpr int BUTTON_SIZE = 28;
+    static constexpr int ICON_SIZE = 18;
+};
+
+#endif // OCRSUBTOOLBAR_H

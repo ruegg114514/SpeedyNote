@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="512"
+   height="512"
+   viewBox="0 0 512 512"
+   fill="none"
+   version="1.1"
+   id="svg58"
+   sodipodi:docname="mainicon.svg"
+   inkscape:version="1.2.2 (b0a8486541, 2022-12-01)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <sodipodi:namedview
+     id="namedview35"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     showgrid="false"
+     inkscape:zoom="1.5976562"
+     inkscape:cx="257.5648"
+     inkscape:cy="256.00001"
+     inkscape:window-width="1920"
+     inkscape:window-height="1008"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg58" />
+  <title
+     id="title2">SpeedyNote App Icon v3</title>
+  <defs
+     id="defs26">
+    <filter
+       id="doc-shadow"
+       x="-0.026666667"
+       y="-0.022857143"
+       width="1.0533333"
+       height="1.0552381">
+      <feGaussianBlur
+         in="SourceAlpha"
+         stdDeviation="4"
+         result="blur"
+         id="feGaussianBlur4" />
+      <feOffset
+         in="blur"
+         dx="0"
+         dy="4"
+         result="offsetBlur"
+         id="feOffset6" />
+      <feFlood
+         flood-color="#000000"
+         flood-opacity="0.2"
+         result="offsetColor"
+         id="feFlood8" />
+      <feComposite
+         in="offsetColor"
+         in2="offsetBlur"
+         operator="in"
+         result="offsetShadow"
+         id="feComposite10" />
+      <feBlend
+         in="SourceGraphic"
+         in2="offsetShadow"
+         mode="normal"
+         id="feBlend12" />
+    </filter>
+    <filter
+       id="pen-shadow"
+       x="-0.23852495"
+       y="-0.038918919"
+       width="1.5433068"
+       height="1.0994595">
+      <feGaussianBlur
+         in="SourceAlpha"
+         stdDeviation="3"
+         result="blur"
+         id="feGaussianBlur15" />
+      <feOffset
+         in="blur"
+         dx="2"
+         dy="4"
+         result="offsetBlur"
+         id="feOffset17" />
+      <feFlood
+         flood-color="#000000"
+         flood-opacity="0.25"
+         result="offsetColor"
+         id="feFlood19" />
+      <feComposite
+         in="offsetColor"
+         in2="offsetBlur"
+         operator="in"
+         result="offsetShadow"
+         id="feComposite21" />
+      <feBlend
+         in="SourceGraphic"
+         in2="offsetShadow"
+         mode="normal"
+         id="feBlend23" />
+    </filter>
+  </defs>
+  <g
+     filter="url(#doc-shadow)"
+     id="g32">
+    <rect
+       x="76"
+       y="56"
+       width="360"
+       height="420"
+       rx="16"
+       fill="#FFFFFF"
+       id="rect28" />
+    <path
+       d="M 436 56 L 356 56 L 436 136 Z"
+       fill="#E0E0E0"
+       id="path30" />
+  </g>
+  <g
+     fill="#ECEFF1"
+     id="g46"
+     style="opacity:0.69;fill:#cccccc"
+     transform="matrix(1,0,0,1.2260256,0,-26.010325)">
+    <rect
+       x="116"
+       y="140"
+       width="280"
+       height="16"
+       rx="8"
+       id="rect34"
+       style="fill:#cccccc" />
+    <rect
+       x="116"
+       y="180"
+       width="280"
+       height="16"
+       rx="8"
+       id="rect36"
+       style="fill:#cccccc" />
+    <rect
+       x="116"
+       y="220"
+       width="200"
+       height="16"
+       rx="8"
+       id="rect38"
+       style="fill:#cccccc" />
+    <rect
+       x="116"
+       y="260"
+       width="280"
+       height="16"
+       rx="8"
+       id="rect40"
+       style="fill:#cccccc" />
+    <rect
+       x="116"
+       y="300"
+       width="260"
+       height="16"
+       rx="8"
+       id="rect42"
+       style="fill:#cccccc" />
+    <rect
+       x="116"
+       y="340"
+       width="180"
+       height="16"
+       rx="8"
+       id="rect44"
+       style="fill:#cccccc" />
+  </g>
+  <path
+     d="m 358.07597,170.46192 c -93.2628,0 -155.43801,39.94628 -93.2628,79.89256 62.1752,39.94628 62.1752,79.89257 -62.17521,119.83885"
+     stroke="#00bcd4"
+     stroke-width="24"
+     stroke-linecap="round"
+     stroke-linejoin="round"
+     fill="none"
+     id="path48" />
+  <g
+     filter="url(#pen-shadow)"
+     transform="rotate(-45,547.20831,-58.837146)"
+     id="g56">
+    <rect
+       x="-15"
+       y="-180"
+       width="30"
+       height="140"
+       rx="6"
+       fill="#454666"
+       id="rect50" />
+    <path
+       d="M -15.185522,-44.709817 -0.50740588,-4.8305226 14.814478,-44.951229 Z"
+       fill="#373854"
+       id="path52"
+       style="stroke-width:0.999967" />
+    <circle
+       cx="0"
+       cy="0"
+       r="5"
+       fill="#00bcd4"
+       id="circle54" />
+  </g>
+  <text
+     xml:space="preserve"
+     style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:39.3099px;font-family:'Courier New';-inkscape-font-specification:'Courier New';white-space:pre;inline-size:96.2265;display:inline;opacity:0.69;fill:#800000"
+     x="107.65771"
+     y="91.383865"
+     id="text276"
+     transform="matrix(1.6531628,0,0,1.6033913,-67.285044,-21.34072)"><tspan
+       x="107.65771"
+       y="91.383865"
+     id="tspan534">PDF</tspan></text>
+  <metadata
+     id="metadata222">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:title>SpeedyNote App Icon v3</dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+</svg>

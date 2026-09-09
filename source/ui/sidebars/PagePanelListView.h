@@ -1,0 +1,119 @@
+#ifndef PAGEPANELLISTVIEW_H
+#define PAGEPANELLISTVIEW_H
+
+#include <QListView>
+#include <QTimer>
+#include <QPoint>
+#include <QElapsedTimer>
+
+class QDragMoveEvent;
+
+/**
+ * @brief A QListView subclass with manual touch scrolling and long-press drag-and-drop.
+ * 
+ * Implements custom touch handling to avoid conflicts with Qt's native scrolling:
+ * - Touch drag → Manual kinetic scrolling with deceleration
+ * - Touch tap → Emit clicked() signal
+ * - Long-press (400ms) → Initiate drag-and-drop
+ * - Stylus/mouse → Standard QListView behavior
+ */
+class PagePanelListView : public QListView {
+    Q_OBJECT
+
+public:
+    explicit PagePanelListView(QWidget* parent = nullptr);
+    
+    /**
+     * @brief Start a drag operation (public wrapper for protected startDrag).
+     * @param supportedActions The drop actions to support.
+     */
+    void beginDrag(Qt::DropActions supportedActions);
+    
+    /**
+     * @brief Get the last mouse press position (viewport coordinates).
+     * Used to determine if click was within thumbnail region.
+     */
+    QPoint lastPressPosition() const { return m_pressPos; }
+
+    /**
+     * @brief Enable/disable multi-select mode (Plan D2).
+     *
+     * In select mode, drag initiation (mouse startDrag and touch long-press)
+     * emits selectionDragRequested() so PagePanel can build a custom multi-page
+     * cross-document transfer drag, instead of the single-index reorder drag.
+     */
+    void setSelectMode(bool enabled) { m_selectMode = enabled; }
+
+signals:
+    /**
+     * @brief Emitted when a drag should start for the given index.
+     * @param index The model index to drag.
+     * 
+     * Connect this to manually start a QDrag operation.
+     */
+    void dragRequested(const QModelIndex& index);
+
+    /**
+     * @brief Emitted (in select mode) when a multi-page transfer drag should
+     *        start. PagePanel builds and execs the QDrag from the current
+     *        selection.
+     */
+    void selectionDragRequested();
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void startDrag(Qt::DropActions supportedActions) override;
+    
+    // Handle touch end/cancel as fallback cleanup
+    bool viewportEvent(QEvent* event) override;
+
+private slots:
+    void onLongPressTimeout();
+    void onKineticScrollTick();
+
+private:
+    void startKineticScroll(qreal velocity);
+    void stopKineticScroll();
+
+    /**
+     * @brief Whether a press at @p pos landed on the multi-select tick badge
+     *        of @p index. The hit area is padded slightly for pen/touch.
+     */
+    bool pressOnSelectBadge(const QModelIndex& index, const QPoint& pos) const;
+
+    /**
+     * @brief Additively toggle the row of @p index in the selection model.
+     */
+    void toggleRowSelection(const QModelIndex& index);
+    
+    QTimer m_longPressTimer;
+    QPoint m_pressPos;              // Position where press started
+    QModelIndex m_pressedIndex;     // Index that was pressed
+    bool m_longPressTriggered = false;
+    bool m_isTouchInput = false;    // True if current input is touch (not stylus/mouse)
+    bool m_selectMode = false;      // Plan D2: multi-select drag source mode
+    
+    // Manual touch scrolling state
+    int m_touchScrollStartPos = 0;  // Scroll position at touch start
+    bool m_touchScrolling = false;  // True if currently touch-scrolling
+    
+    // Kinetic scrolling state
+    QTimer m_kineticTimer;
+    QElapsedTimer m_velocityTimer;  // For calculating velocity
+    qreal m_kineticVelocity = 0.0;  // Current velocity in pixels/ms
+    qreal m_lastVelocity = 0.0;     // Last calculated velocity (for release)
+    
+    static constexpr int LONG_PRESS_MS = 400;            // Time to trigger long-press
+    static constexpr int LONG_PRESS_MOVE_THRESHOLD = 15; // Max movement in pixels
+    static constexpr int AUTO_SCROLL_MARGIN = 50;        // Pixels from edge to trigger
+    static constexpr int AUTO_SCROLL_MAX_SPEED = 10;     // Max pixels per event
+    static constexpr int KINETIC_TICK_MS = 16;           // ~60 FPS
+    static constexpr qreal KINETIC_DECELERATION = 0.92;  // Velocity multiplier per tick (faster decay)
+    static constexpr qreal KINETIC_MIN_VELOCITY = 0.05;  // Stop below this (pixels/ms)
+    static constexpr qreal KINETIC_MAX_VELOCITY = 3.0;   // Cap velocity (pixels/ms)
+};
+
+#endif // PAGEPANELLISTVIEW_H

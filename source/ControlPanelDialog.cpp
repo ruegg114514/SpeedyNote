@@ -1,0 +1,2263 @@
+#include "ControlPanelDialog.h"
+#include "MainWindow.h"
+#include "core/Page.h"
+#include "core/ShortcutManager.h"
+#include "core/DocumentViewport.h"
+
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QFormLayout>
+#include <QGroupBox>
+#include <QLabel>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QSpacerItem>
+#include <QTableWidget>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
+#include <QHeaderView>
+#include <QPushButton>
+#include <QColorDialog>
+#include <QInputDialog>
+#include <QMessageBox>
+#include <QApplication>
+#include <QMetaObject>
+#include <QIcon>
+#include <QStandardPaths>
+#include <QSettings>
+#include <QTimer>
+#include <QTabletEvent>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QDir>
+#include <QFileInfo>
+#include <QSvgRenderer>
+#include <QPainter>
+#include <QCoreApplication>
+#include <QLocale>
+#include <QRegularExpression>
+#include <QHash>
+#include <QSet>
+#include <QColor>
+#include <algorithm>
+
+// Android/iOS keyboard fix (BUG-A001)
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+#include <QGuiApplication>
+#include <QInputMethod>
+#endif
+
+namespace {
+
+struct LanguageEntry {
+    QString code;         // "en", "es", "fr", "zh", "de", ...
+    QString displayName;  // "English", "Español (Spanish)", "中文 (Chinese Simplified)", ...
+    bool installed;       // false => saved-but-missing, label gets "(not installed)" suffix
+};
+
+// Small override map for cases where QLocale's defaults are unhelpful:
+//  - "en": Qt < 6.7 returns "American English" from nativeLanguageName() (QTBUG-94460),
+//          producing "American English (English)". We want just "English".
+//  - "zh": bare "zh" doesn't disambiguate Simplified vs Traditional.
+//  - "pt": bare "pt" defaults to European Portuguese names, but our translation
+//          targets Brazilian Portuguese.
+QString overrideDisplayName(const QString& code) {
+    static const QHash<QString, QString> overrides = {
+        {QStringLiteral("en"), QStringLiteral("English")},
+        {QStringLiteral("zh"), QStringLiteral("中文 (Chinese Simplified)")},
+        {QStringLiteral("pt"), QStringLiteral("Português (Portuguese, Brazil)")},
+    };
+    return overrides.value(code);
+}
+
+QString buildDisplayName(const QString& code) {
+    const QString override = overrideDisplayName(code);
+    if (!override.isEmpty()) return override;
+
+    const QLocale locale(code);
+    QString native  = locale.nativeLanguageName();
+    const QString english = QLocale::languageToString(locale.language());
+
+    // QLocale returns lowercase native names for some languages (e.g. "español").
+    if (!native.isEmpty()) native[0] = native[0].toUpper();
+
+    // Fall back cascade: native+english > native > english > raw code.
+    if (native.isEmpty() && english.isEmpty()) return code;
+    if (native.isEmpty())                      return english;
+    if (english.isEmpty() || english == native) return native;
+    return QStringLiteral("%1 (%2)").arg(native, english);
+}
+
+QStringList translationSearchPaths() {
+    return {
+        QCoreApplication::applicationDirPath(),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/translations"),
+        QStringLiteral("/usr/share/speedynote/translations"),
+        QStringLiteral("/usr/local/share/speedynote/translations"),
+        QStandardPaths::locate(QStandardPaths::GenericDataLocation,
+                               QStringLiteral("speedynote/translations"),
+                               QStandardPaths::LocateDirectory),
+        QStringLiteral(":/resources/translations"),
+    };
+}
+
+QList<LanguageEntry> discoverAvailableLanguages(const QString& savedOverrideCode) {
+    QSet<QString> codes;
+    QList<LanguageEntry> entries;
+
+    // English is always available — it's the source language, no .qm needed.
+    entries.append({QStringLiteral("en"), buildDisplayName(QStringLiteral("en")), true});
+    codes.insert(QStringLiteral("en"));
+
+    static const QRegularExpression qmRegex(
+        QStringLiteral("^app_([A-Za-z]{2,3}(?:_[A-Za-z]{2,4})?)\\.qm$"));
+
+    for (const QString& path : translationSearchPaths()) {
+        if (path.isEmpty()) continue;
+        QDir dir(path);
+        if (!dir.exists()) continue;
+        const QFileInfoList files = dir.entryInfoList(
+            {QStringLiteral("app_*.qm")}, QDir::Files);
+        for (const QFileInfo& fi : files) {
+            const auto m = qmRegex.match(fi.fileName());
+            if (!m.hasMatch()) continue;
+            QString raw  = m.captured(1);
+            QString code = raw.section('_', 0, 0).toLower();  // "zh_CN" -> "zh"
+            if (codes.contains(code)) continue;
+            codes.insert(code);
+            entries.append({code, buildDisplayName(code), true});
+        }
+    }
+
+    // Sort: English first, rest alphabetical by display name (locale-aware).
+    if (entries.size() > 1) {
+        std::sort(entries.begin() + 1, entries.end(),
+            [](const LanguageEntry& a, const LanguageEntry& b) {
+                return a.displayName.localeAwareCompare(b.displayName) < 0;
+            });
+    }
+
+    // If the saved override points at a language we didn't find, surface it
+    // anyway marked "(not installed)" so the user sees their saved choice.
+    if (!savedOverrideCode.isEmpty() && !codes.contains(savedOverrideCode)) {
+        entries.append({
+            savedOverrideCode,
+            QStringLiteral("%1 (not installed)").arg(buildDisplayName(savedOverrideCode)),
+            false
+        });
+    }
+    return entries;
+}
+
+} // namespace
+
+ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
+    : QDialog(parent), mainWindowRef(mainWindow) {
+
+    setWindowTitle(tr("Settings"));
+    resize(450, 400);
+
+    tabWidget = new QTabWidget(this);
+
+    // === Working Tabs ===
+    createBackgroundTab();  // Background settings (first tab for importance)
+    createToolsTab();       // Stroke tool settings
+    createShortcutsTab();   // Phase 5.1: Keyboard shortcuts tab
+
+    createThemeTab();
+    createLanguageTab();
+#ifdef Q_OS_LINUX
+    createStylusTab();
+#endif
+    createCacheTab();
+    createAboutTab();
+    
+    // === Buttons ===
+    applyButton = new QPushButton(tr("Apply"));
+    okButton = new QPushButton(tr("OK"));
+    cancelButton = new QPushButton(tr("Cancel"));
+
+    connect(applyButton, &QPushButton::clicked, this, &ControlPanelDialog::applyChanges);
+    connect(okButton, &QPushButton::clicked, this, [this]() {
+        applyChanges();
+        accept();
+    });
+    connect(cancelButton, &QPushButton::clicked, this, &ControlPanelDialog::reject);
+
+    // === Layout ===
+    QHBoxLayout *buttonLayout = new QHBoxLayout();
+    buttonLayout->addStretch();
+    buttonLayout->addWidget(applyButton);
+    buttonLayout->addWidget(okButton);
+    buttonLayout->addWidget(cancelButton);
+
+    QVBoxLayout *mainLayout = new QVBoxLayout(this);
+    mainLayout->addWidget(tabWidget);
+    mainLayout->addLayout(buttonLayout);
+    
+    // Load current settings into UI
+    loadSettings();
+}
+
+void ControlPanelDialog::switchToKeyboardShortcutsTab()
+{
+    // Find the "Shortcuts" tab and switch to it
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        if (tabWidget->tabText(i) == tr("Shortcuts")) {
+            tabWidget->setCurrentIndex(i);
+            return;
+        }
+    }
+}
+
+void ControlPanelDialog::done(int result)
+{
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+    // BUG-A001 Fix: Defer dialog close to let Android/iOS keyboard operations complete.
+    // Qt 6.7.x has a bug where closing a dialog with text inputs causes a crash
+    // in QtInputDelegate.resetSoftwareKeyboard() - the async lambda accesses 
+    // QtEditText.m_optionsChanged after the widget is destroyed.
+    // 
+    // Solution: Hide keyboard, clear focus, then defer the actual close by 150ms
+    // to give the Android/iOS UI thread time to complete keyboard operations.
+    
+    // Prevent re-entry if already deferring
+    static bool isDeferring = false;
+    if (isDeferring) {
+        QDialog::done(result);
+        return;
+    }
+    
+    // Clear focus from current widget
+    if (QWidget* focused = QApplication::focusWidget()) {
+        focused->clearFocus();
+    }
+    
+    // Hide keyboard
+    if (QGuiApplication::inputMethod()) {
+        QGuiApplication::inputMethod()->hide();
+        QGuiApplication::inputMethod()->commit();
+    }
+    
+    // Defer the actual close
+    isDeferring = true;
+    int savedResult = result;
+    QTimer::singleShot(150, this, [this, savedResult]() {
+        isDeferring = false;
+        QDialog::done(savedResult);
+    });
+    return;  // Don't call base done() immediately
+#else
+    QDialog::done(result);
+#endif
+}
+
+void ControlPanelDialog::loadSettings()
+{
+    QSettings settings("SpeedyNote", "App");
+    
+    // Load page size setting
+    // Default: US Letter (816 × 1056 px at 96 DPI)
+    qreal defaultWidth = settings.value("page/width", 816).toReal();
+    qreal defaultHeight = settings.value("page/height", 1056).toReal();
+    QSizeF savedSize(defaultWidth, defaultHeight);
+    
+    // Find the matching preset (or default to US Letter if no match)
+    int pageSizeIndex = 5;  // Default: US Letter (index 5)
+    for (int i = 0; i < pageSizeCombo->count(); ++i) {
+        QSizeF presetSize = pageSizeCombo->itemData(i).toSizeF();
+        if (qFuzzyCompare(presetSize.width(), savedSize.width()) &&
+            qFuzzyCompare(presetSize.height(), savedSize.height())) {
+            pageSizeIndex = i;
+            break;
+        }
+    }
+    pageSizeCombo->setCurrentIndex(pageSizeIndex);
+    onPageSizePresetChanged(pageSizeIndex);
+    
+    // Load background settings
+    // Default: Grid (enum value 3)
+    int bgType = settings.value("background/type", static_cast<int>(Page::BackgroundType::Grid)).toInt();
+    int comboIndex = styleCombo->findData(bgType);
+    if (comboIndex >= 0) {
+        styleCombo->setCurrentIndex(comboIndex);
+    }
+    
+    // Dark-mode-aware fallback colours for background and grid
+    bool darkMode = palette().color(QPalette::Window).lightness() < 128;
+    QString defaultBg    = darkMode ? "#2b2b2b" : "#ffffff";
+    QString defaultGrid  = darkMode ? "#404040" : "#c8c8c8";
+    
+    selectedBgColor = QColor(settings.value("background/color", defaultBg).toString());
+    bgColorButton->setStyleSheet(QString("background-color: %1").arg(selectedBgColor.name()));
+    
+    selectedGridColor = QColor(settings.value("background/gridColor", defaultGrid).toString());
+    gridColorButton->setStyleSheet(QString("background-color: %1").arg(selectedGridColor.name()));
+    
+    gridSpacingSpin->setValue(settings.value("background/gridSpacing", 32).toInt());
+    lineSpacingSpin->setValue(settings.value("background/lineSpacing", 32).toInt());
+    
+    // Load theme settings
+    if (mainWindowRef) {
+        useCustomAccentCheckbox->setChecked(mainWindowRef->isUsingCustomAccentColor());
+        selectedAccentColor = mainWindowRef->getCustomAccentColor();
+        accentColorButton->setStyleSheet(QString("background-color: %1").arg(selectedAccentColor.name()));
+        accentColorButton->setEnabled(useCustomAccentCheckbox->isChecked());
+    }
+    
+    // Load PDF dark mode setting (defaults to true)
+    pdfDarkModeCheckbox->setChecked(settings.value("display/pdfDarkMode", true).toBool());
+    skipImageMaskingCheckbox->setChecked(settings.value("display/skipImageMasking", false).toBool());
+    
+    // Load language settings
+    bool useSystemLang = settings.value("useSystemLanguage", true).toBool();
+    QString overrideLang = settings.value("languageOverride", "en").toString();
+    
+    useSystemLanguageCheckbox->setChecked(useSystemLang);
+    languageCombo->setEnabled(!useSystemLang);
+    
+    for (int i = 0; i < languageCombo->count(); ++i) {
+        if (languageCombo->itemData(i).toString() == overrideLang) {
+            languageCombo->setCurrentIndex(i);
+            break;
+        }
+    }
+}
+
+void ControlPanelDialog::applyChanges()
+{
+    if (!mainWindowRef) return;
+    
+    QSettings settings("SpeedyNote", "App");
+    
+    // Apply page size settings to QSettings (for new documents only)
+    QSizeF selectedPageSize = pageSizeCombo->currentData().toSizeF();
+    settings.setValue("page/width", selectedPageSize.width());
+    settings.setValue("page/height", selectedPageSize.height());
+    // Note: Page size is NOT applied to current document - only affects new documents
+    
+    // Apply background settings to QSettings (for new documents)
+    // Use the data value (enum value), not the combo index
+    int bgTypeValue = styleCombo->currentData().toInt();
+    settings.setValue("background/type", bgTypeValue);
+    settings.setValue("background/color", selectedBgColor.name());
+    settings.setValue("background/gridColor", selectedGridColor.name());
+    settings.setValue("background/gridSpacing", gridSpacingSpin->value());
+    settings.setValue("background/lineSpacing", lineSpacingSpin->value());
+    
+    // Apply background settings to current document (if any)
+    mainWindowRef->applyBackgroundSettings(
+        static_cast<Page::BackgroundType>(bgTypeValue),
+        selectedBgColor,
+        selectedGridColor,
+        gridSpacingSpin->value(),
+        lineSpacingSpin->value()
+    );
+    
+    // Apply theme settings
+    mainWindowRef->setUseCustomAccentColor(useCustomAccentCheckbox->isChecked());
+    if (selectedAccentColor.isValid()) {
+        mainWindowRef->setCustomAccentColor(selectedAccentColor);
+    }
+    
+    // Apply PDF dark mode settings
+    bool pdfDarkMode = pdfDarkModeCheckbox->isChecked();
+    settings.setValue("display/pdfDarkMode", pdfDarkMode);
+    mainWindowRef->setPdfDarkModeEnabled(pdfDarkMode);
+
+    bool skipMasking = skipImageMaskingCheckbox->isChecked();
+    settings.setValue("display/skipImageMasking", skipMasking);
+    mainWindowRef->setSkipImageMasking(skipMasking);
+    
+    // Apply tools settings
+    // Note: "minimum stroke width" has moved to per-preset state on each Pen
+    // thickness preset (see PenSubToolbar / ThicknessEditDialog).  The legacy
+    // tools/minStrokeWidth key remains on disk only as a one-shot migration
+    // seed for PenSubToolbar::loadFromSettings.
+    qreal wheelSpeed = wheelScrollSpeedSpin->value();
+    settings.setValue("tools/wheelScrollSpeed", wheelSpeed);
+    DocumentViewport::setWheelScrollSpeed(wheelSpeed);
+
+    if (panOutsidePagesCheck) {
+        bool panOutsidePages = panOutsidePagesCheck->isChecked();
+        settings.setValue("tools/panOutsidePages", panOutsidePages);
+        DocumentViewport::setPanOutsidePagesEnabled(panOutsidePages);
+    }
+
+    if (ocrCjkGridModeCheck)
+        settings.setValue("ocrCjkGridMode", ocrCjkGridModeCheck->isChecked());
+
+    // Apply language settings
+    settings.setValue("useSystemLanguage", useSystemLanguageCheckbox->isChecked());
+    if (!useSystemLanguageCheckbox->isChecked()) {
+        QString selectedLang = languageCombo->currentData().toString();
+        settings.setValue("languageOverride", selectedLang);
+    }
+
+    // Apply OCR language setting
+    if (ocrLanguageCombo)
+        settings.setValue("ocrLanguage", ocrLanguageCombo->currentData().toString());
+}
+
+/*
+void ControlPanelDialog::createBackgroundTab() {
+    backgroundTab = new QWidget(this);
+
+    QLabel *styleLabel = new QLabel(tr("Background Style:"));
+    styleCombo = new QComboBox();
+    styleCombo->addItem(tr("None"), static_cast<int>(BackgroundStyle::None));
+    styleCombo->addItem(tr("Grid"), static_cast<int>(BackgroundStyle::Grid));
+    styleCombo->addItem(tr("Lines"), static_cast<int>(BackgroundStyle::Lines));
+
+    QLabel *colorLabel = new QLabel(tr("Background Color:"));
+    colorButton = new QPushButton();
+    connect(colorButton, &QPushButton::clicked, this, &ControlPanelDialog::chooseColor);
+
+    QLabel *densityLabel = new QLabel(tr("Density:"));
+    densitySpin = new QSpinBox();
+    densitySpin->setRange(10, 200);
+    densitySpin->setSuffix(" px");
+    densitySpin->setSingleStep(5);
+    
+    // PDF inversion checkbox
+    pdfInversionCheckbox = new QCheckBox(tr("Invert PDF Colors (Dark Mode)"), this);
+    QLabel *pdfInversionNote = new QLabel(tr("Inverts PDF colors for better readability in dark mode. Useful for PDFs with light backgrounds."), this);
+    pdfInversionNote->setWordWrap(true);
+    pdfInversionNote->setStyleSheet("color: gray; font-size: 10px;");
+
+    QGridLayout *layout = new QGridLayout(backgroundTab);
+    layout->addWidget(styleLabel, 0, 0);
+    layout->addWidget(styleCombo, 0, 1);
+    layout->addWidget(colorLabel, 1, 0);
+    layout->addWidget(colorButton, 1, 1);
+    layout->addWidget(densityLabel, 2, 0);
+    layout->addWidget(densitySpin, 2, 1);
+    layout->addWidget(pdfInversionCheckbox, 3, 0, 1, 2);
+    layout->addWidget(pdfInversionNote, 4, 0, 1, 2);
+    // layout->setColumnStretch(1, 1); // Stretch the second column
+    layout->setRowStretch(5, 1); // Stretch the last row
+}
+
+void ControlPanelDialog::chooseColor() {
+    QColor chosen = QColorDialog::getColor(selectedColor, this, tr("Select Background Color"));
+    if (chosen.isValid()) {
+        selectedColor = chosen;
+        colorButton->setStyleSheet(QString("background-color: %1").arg(selectedColor.name()));
+    }
+}
+*/
+
+/*
+void ControlPanelDialog::applyChanges() {
+    if (!canvas) return;
+
+    BackgroundStyle style = static_cast<BackgroundStyle>(
+        styleCombo->currentData().toInt()
+    );
+
+    canvas->setBackgroundStyle(style);
+    canvas->setBackgroundColor(selectedColor);
+    canvas->setBackgroundDensity(densitySpin->value());
+    canvas->setPdfInversionEnabled(pdfInversionCheckbox->isChecked());
+    canvas->update();
+    canvas->saveBackgroundMetadata();
+
+    // ✅ Save these settings as defaults for new tabs
+    if (mainWindowRef) {
+        mainWindowRef->saveDefaultBackgroundSettings(style, selectedColor, densitySpin->value());
+    }
+
+    // ✅ Apply button mappings back to MainWindow with internal keys
+    if (mainWindowRef) {
+        for (const QString &buttonKey : holdMappingCombos.keys()) {
+            QString displayString = holdMappingCombos[buttonKey]->currentText();
+            QString internalKey = ButtonMappingHelper::displayToInternalKey(displayString, true);  // true = isDialMode
+            mainWindowRef->setHoldMapping(buttonKey, internalKey);
+        }
+        for (const QString &buttonKey : pressMappingCombos.keys()) {
+            QString displayString = pressMappingCombos[buttonKey]->currentText();
+            QString internalKey = ButtonMappingHelper::displayToInternalKey(displayString, false);  // false = isAction
+            mainWindowRef->setPressMapping(buttonKey, internalKey);
+        }
+
+        // ✅ Save to persistent settings
+        mainWindowRef->saveButtonMappings();
+        
+        // ✅ Apply theme settings
+        mainWindowRef->setUseCustomAccentColor(useCustomAccentCheckbox->isChecked());
+        if (selectedAccentColor.isValid()) {
+            mainWindowRef->setCustomAccentColor(selectedAccentColor);
+        }
+        
+        // ✅ Apply color palette setting
+        mainWindowRef->setUseBrighterPalette(useBrighterPaletteCheckbox->isChecked());
+        
+        // ✅ Apply mouse dial mappings
+        for (const QString &combination : mouseDialMappingCombos.keys()) {
+            QString displayString = mouseDialMappingCombos[combination]->currentText();
+            QString internalKey = ButtonMappingHelper::displayToInternalKey(displayString, true); // true = isDialMode
+            mainWindowRef->setMouseDialMapping(combination, internalKey);
+        }
+        
+        // ✅ Apply language settings
+        QSettings settings("SpeedyNote", "App");
+        settings.setValue("useSystemLanguage", useSystemLanguageCheckbox->isChecked());
+        if (!useSystemLanguageCheckbox->isChecked()) {
+            QString selectedLang = languageCombo->currentData().toString();
+            settings.setValue("languageOverride", selectedLang);
+        }
+    }
+}
+*/
+
+/*
+void ControlPanelDialog::loadFromCanvas() {
+    styleCombo->setCurrentIndex(static_cast<int>(canvas->getBackgroundStyle()));
+    densitySpin->setValue(canvas->getBackgroundDensity());
+    selectedColor = canvas->getBackgroundColor();
+    pdfInversionCheckbox->setChecked(canvas->isPdfInversionEnabled());
+
+    colorButton->setStyleSheet(QString("background-color: %1").arg(selectedColor.name()));
+
+    if (mainWindowRef) {
+        for (const QString &buttonKey : holdMappingCombos.keys()) {
+            QString internalKey = mainWindowRef->getHoldMapping(buttonKey);
+            QString displayString = ButtonMappingHelper::internalKeyToDisplay(internalKey, true);  // true = isDialMode
+            int index = holdMappingCombos[buttonKey]->findText(displayString);
+            if (index >= 0) holdMappingCombos[buttonKey]->setCurrentIndex(index);
+        }
+
+        for (const QString &buttonKey : pressMappingCombos.keys()) {
+            QString internalKey = mainWindowRef->getPressMapping(buttonKey);
+            QString displayString = ButtonMappingHelper::internalKeyToDisplay(internalKey, false);  // false = isAction
+            int index = pressMappingCombos[buttonKey]->findText(displayString);
+            if (index >= 0) pressMappingCombos[buttonKey]->setCurrentIndex(index);
+        }
+        
+        // Load theme settings
+        useCustomAccentCheckbox->setChecked(mainWindowRef->isUsingCustomAccentColor());
+        
+        // Get the stored custom accent color
+        selectedAccentColor = mainWindowRef->getCustomAccentColor();
+        
+        accentColorButton->setStyleSheet(QString("background-color: %1").arg(selectedAccentColor.name()));
+        accentColorButton->setEnabled(useCustomAccentCheckbox->isChecked());
+        
+        // Load color palette setting
+        useBrighterPaletteCheckbox->setChecked(mainWindowRef->isUsingBrighterPalette());
+        
+        // Load mouse dial mappings
+        for (const QString &combination : mouseDialMappingCombos.keys()) {
+            QString internalKey = mainWindowRef->getMouseDialMapping(combination);
+            QString displayString = ButtonMappingHelper::internalKeyToDisplay(internalKey, true); // true = isDialMode
+            int index = mouseDialMappingCombos[combination]->findText(displayString);
+            if (index >= 0) mouseDialMappingCombos[combination]->setCurrentIndex(index);
+        }
+    }
+}
+*/
+/*
+void ControlPanelDialog::createPerformanceTab() {
+    performanceTab = new QWidget();
+    QVBoxLayout *layout = new QVBoxLayout(performanceTab);
+
+    QCheckBox *previewToggle = new QCheckBox(tr("Enable Low-Resolution PDF Previews"));
+    previewToggle->setChecked(mainWindowRef->isLowResPreviewEnabled());
+
+    connect(previewToggle, &QCheckBox::toggled, mainWindowRef, &MainWindow::setLowResPreviewEnabled);
+
+    QLabel *note = new QLabel(tr("Disabling this may improve dial smoothness on low-end devices."));
+    note->setWordWrap(true);
+    note->setStyleSheet("color: gray; font-size: 10px;");
+
+    QLabel *dpiLabel = new QLabel(tr("PDF Rendering DPI:"));
+    QComboBox *dpiSelector = new QComboBox();
+    dpiSelector->addItems({"96", "120", "144", "168", "192"});
+    dpiSelector->setCurrentText(QString::number(mainWindowRef->getPdfDPI()));
+
+    connect(dpiSelector, &QComboBox::currentTextChanged, this, [=](const QString &value) {
+        mainWindowRef->setPdfDPI(value.toInt());
+    });
+
+    QLabel *notePDF = new QLabel(tr("Adjust how the PDF is rendered. Higher DPI means better quality but slower performance. DO NOT CHANGE THIS OPTION WHEN MULTIPLE TABS ARE OPEN. THIS MAY LEAD TO UNDEFINED BEHAVIOR!"));
+    notePDF->setWordWrap(true);
+    notePDF->setStyleSheet("color: gray; font-size: 10px;");
+    
+    // Wayland DPI scale override
+    QLabel *waylandDpiLabel = new QLabel(tr("Wayland DPI Scale Override:"));
+    waylandDpiScaleSpinBox = new QDoubleSpinBox();
+    waylandDpiScaleSpinBox->setRange(0.0, 3.0);  // Start at 0.0 to allow "Auto" as separate option
+    waylandDpiScaleSpinBox->setSingleStep(0.05);
+    waylandDpiScaleSpinBox->setDecimals(2);
+    waylandDpiScaleSpinBox->setSpecialValueText(tr("Auto"));  // 0.0 = Auto
+    
+    QSettings settings;
+    qreal savedScale = settings.value("display/waylandDpiScale", 0.0).toReal();
+    waylandDpiScaleSpinBox->setValue(savedScale);
+    
+    connect(waylandDpiScaleSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [](double value) {
+        QSettings settings;
+        settings.setValue("display/waylandDpiScale", value);
+    });
+    
+    QLabel *noteWaylandDpi = new QLabel(tr("Wayland DPI scale override. Auto = system default, 1.00 = 100%, 1.50 = 150%, 2.00 = 200%. Only affects Wayland. Requires restart."));
+    noteWaylandDpi->setWordWrap(true);
+    noteWaylandDpi->setStyleSheet("color: gray; font-size: 10px;");
+
+    layout->addWidget(previewToggle);
+    layout->addWidget(note);
+    layout->addWidget(dpiLabel);
+    layout->addWidget(dpiSelector);
+    layout->addWidget(notePDF);
+    layout->addWidget(waylandDpiLabel);
+    layout->addWidget(waylandDpiScaleSpinBox);
+    layout->addWidget(noteWaylandDpi);
+
+    layout->addStretch();
+
+    // return performanceTab;
+}
+*/
+/*
+void ControlPanelDialog::createToolbarTab(){
+    toolbarTab = new QWidget(this);
+    QVBoxLayout *toolbarLayout = new QVBoxLayout(toolbarTab);
+
+    // ✅ Checkbox to show/hide benchmark controls
+    QCheckBox *benchmarkVisibilityCheckbox = new QCheckBox(tr("Show Benchmark Controls"), toolbarTab);
+    benchmarkVisibilityCheckbox->setChecked(mainWindowRef->areBenchmarkControlsVisible());
+    toolbarLayout->addWidget(benchmarkVisibilityCheckbox);
+    QLabel *benchmarkNote = new QLabel(tr("This will show/hide the benchmark controls on the toolbar. Press the clock button to start/stop the benchmark."));
+    benchmarkNote->setWordWrap(true);
+    benchmarkNote->setStyleSheet("color: gray; font-size: 10px;");
+    toolbarLayout->addWidget(benchmarkNote);
+
+#ifdef Q_OS_LINUX
+    // Palm rejection settings (Linux only - Windows has built-in palm rejection)
+    toolbarLayout->addSpacing(15);
+    
+    QLabel *palmRejectionSectionLabel = new QLabel(tr("Palm Rejection (Linux Only)"), toolbarTab);
+    palmRejectionSectionLabel->setStyleSheet("font-weight: bold; margin-top: 10px;");
+    toolbarLayout->addWidget(palmRejectionSectionLabel);
+    
+    palmRejectionCheckbox = new QCheckBox(tr("Disable touch gestures when stylus is active"), toolbarTab);
+    palmRejectionCheckbox->setChecked(mainWindowRef->isPalmRejectionEnabled());
+    toolbarLayout->addWidget(palmRejectionCheckbox);
+    
+    QHBoxLayout *palmDelayLayout = new QHBoxLayout();
+    QLabel *palmDelayLabel = new QLabel(tr("Restore delay:"), toolbarTab);
+    palmRejectionDelaySpinBox = new QSpinBox(toolbarTab);
+    palmRejectionDelaySpinBox->setRange(0, 5000);
+    palmRejectionDelaySpinBox->setSingleStep(100);
+    palmRejectionDelaySpinBox->setSuffix(" ms");
+    palmRejectionDelaySpinBox->setValue(mainWindowRef->getPalmRejectionDelay());
+    palmRejectionDelaySpinBox->setEnabled(palmRejectionCheckbox->isChecked());
+    palmDelayLayout->addWidget(palmDelayLabel);
+    palmDelayLayout->addWidget(palmRejectionDelaySpinBox);
+    palmDelayLayout->addStretch();
+    toolbarLayout->addLayout(palmDelayLayout);
+    
+    QLabel *palmRejectionNote = new QLabel(tr("When enabled, touch gestures are temporarily disabled while the stylus is hovering or touching the screen. "
+                                              "After the stylus leaves, touch gestures are restored after the specified delay. "
+                                              "This helps prevent accidental palm touches while writing."), toolbarTab);
+    palmRejectionNote->setWordWrap(true);
+    palmRejectionNote->setStyleSheet("color: gray; font-size: 10px;");
+    toolbarLayout->addWidget(palmRejectionNote);
+    
+    // Connect checkbox to enable/disable delay spinbox
+    connect(palmRejectionCheckbox, &QCheckBox::toggled, palmRejectionDelaySpinBox, &QSpinBox::setEnabled);
+    
+    // Apply settings immediately when changed
+    connect(palmRejectionCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
+        mainWindowRef->setPalmRejectionEnabled(checked);
+    });
+    
+    connect(palmRejectionDelaySpinBox, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        mainWindowRef->setPalmRejectionDelay(value);
+    });
+#endif
+
+    // Stylus Side Button Mapping
+    toolbarLayout->addSpacing(15);
+    
+    QLabel *stylusSectionLabel = new QLabel(tr("Stylus Side Buttons"), toolbarTab);
+    stylusSectionLabel->setStyleSheet("font-weight: bold; margin-top: 10px;");
+    toolbarLayout->addWidget(stylusSectionLabel);
+    
+    // Action options for stylus buttons
+    QStringList stylusActionOptions = {
+        tr("None"),
+        tr("Hold Straight Line"),
+        tr("Hold Lasso"),
+        tr("Hold Eraser"),
+        tr("Hold Text Selection")
+    };
+    
+    // Button A row
+    QHBoxLayout *buttonALayout = new QHBoxLayout();
+    QString buttonAQtName = (mainWindowRef->getStylusButtonAQt() == Qt::MiddleButton) ? tr("Middle") : tr("Right");
+    stylusButtonALabel = new QLabel(tr("Button A (%1):").arg(buttonAQtName), toolbarTab);
+    stylusButtonALabel->setMinimumWidth(100);
+    buttonALayout->addWidget(stylusButtonALabel);
+    
+    stylusButtonACombo = new QComboBox(toolbarTab);
+    stylusButtonACombo->addItems(stylusActionOptions);
+    stylusButtonACombo->setCurrentIndex(static_cast<int>(mainWindowRef->getStylusButtonAAction()));
+    buttonALayout->addWidget(stylusButtonACombo);
+    
+    detectButtonAButton = new QPushButton(tr("Detect"), toolbarTab);
+    detectButtonAButton->setFixedWidth(70);
+    buttonALayout->addWidget(detectButtonAButton);
+    buttonALayout->addStretch();
+    toolbarLayout->addLayout(buttonALayout);
+    
+    // Button B row
+    QHBoxLayout *buttonBLayout = new QHBoxLayout();
+    QString buttonBQtName = (mainWindowRef->getStylusButtonBQt() == Qt::MiddleButton) ? tr("Middle") : tr("Right");
+    stylusButtonBLabel = new QLabel(tr("Button B (%1):").arg(buttonBQtName), toolbarTab);
+    stylusButtonBLabel->setMinimumWidth(100);
+    buttonBLayout->addWidget(stylusButtonBLabel);
+    
+    stylusButtonBCombo = new QComboBox(toolbarTab);
+    stylusButtonBCombo->addItems(stylusActionOptions);
+    stylusButtonBCombo->setCurrentIndex(static_cast<int>(mainWindowRef->getStylusButtonBAction()));
+    buttonBLayout->addWidget(stylusButtonBCombo);
+    
+    detectButtonBButton = new QPushButton(tr("Detect"), toolbarTab);
+    detectButtonBButton->setFixedWidth(70);
+    buttonBLayout->addWidget(detectButtonBButton);
+    buttonBLayout->addStretch();
+    toolbarLayout->addLayout(buttonBLayout);
+    
+    QLabel *stylusNote = new QLabel(tr("Map stylus side buttons to tools. Hold button to enable, release to disable. "
+                                       "Use 'Detect' to identify which physical button is which. "
+                                       "Button mapping may vary by tablet and driver configuration."), toolbarTab);
+    stylusNote->setWordWrap(true);
+    stylusNote->setStyleSheet("color: gray; font-size: 10px;");
+    toolbarLayout->addWidget(stylusNote);
+    
+    // Connect stylus button combos
+    connect(stylusButtonACombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        mainWindowRef->setStylusButtonAAction(static_cast<StylusButtonAction>(index));
+    });
+    
+    connect(stylusButtonBCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        mainWindowRef->setStylusButtonBAction(static_cast<StylusButtonAction>(index));
+    });
+    
+    // Connect detect buttons
+    connect(detectButtonAButton, &QPushButton::clicked, this, [this]() {
+        detectStylusButton(true);
+    });
+    
+    connect(detectButtonBButton, &QPushButton::clicked, this, [this]() {
+        detectStylusButton(false);
+    });
+
+    toolbarLayout->addStretch();
+    toolbarTab->setLayout(toolbarLayout);
+    tabWidget->addTab(toolbarTab, tr("Features"));
+
+
+    // Connect the checkbox
+    connect(benchmarkVisibilityCheckbox, &QCheckBox::toggled, mainWindowRef, &MainWindow::setBenchmarkControlsVisible);
+}
+*/
+/*
+void ControlPanelDialog::createButtonMappingTab() {
+    QWidget *buttonTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(buttonTab);
+
+    QStringList buttonKeys = ButtonMappingHelper::getInternalButtonKeys();
+    QStringList buttonDisplayNames = ButtonMappingHelper::getTranslatedButtons();
+    QStringList dialModes = ButtonMappingHelper::getTranslatedDialModes();
+    QStringList actions = ButtonMappingHelper::getTranslatedActions();
+
+    for (int i = 0; i < buttonKeys.size(); ++i) {
+        const QString &buttonKey = buttonKeys[i];
+        const QString &buttonDisplayName = buttonDisplayNames[i];
+        
+        QHBoxLayout *h = new QHBoxLayout();
+        h->addWidget(new QLabel(buttonDisplayName));  // Use translated button name
+
+        QComboBox *holdCombo = new QComboBox();
+        holdCombo->addItems(dialModes);  // Add translated dial mode names
+        holdMappingCombos[buttonKey] = holdCombo;
+        h->addWidget(new QLabel(tr("Hold:")));
+        h->addWidget(holdCombo);
+
+        QComboBox *pressCombo = new QComboBox();
+        pressCombo->addItems(actions);  // Add translated action names
+        pressMappingCombos[buttonKey] = pressCombo;
+        h->addWidget(new QLabel(tr("Press:")));
+        h->addWidget(pressCombo);
+
+        layout->addLayout(h);
+    }
+
+    layout->addStretch();
+    buttonTab->setLayout(layout);
+    tabWidget->addTab(buttonTab, tr("Button Mapping"));
+}
+*/
+
+/*
+
+void ControlPanelDialog::createKeyboardMappingTab() {
+    keyboardTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(keyboardTab);
+    
+    // Instructions
+    QLabel *instructionLabel = new QLabel(tr("Configure custom keyboard shortcuts for application actions:"), keyboardTab);
+    instructionLabel->setWordWrap(true);
+    layout->addWidget(instructionLabel);
+    
+    // Table to show current mappings
+    keyboardTable = new QTableWidget(0, 2, keyboardTab);
+    keyboardTable->setHorizontalHeaderLabels({tr("Key Sequence"), tr("Action")});
+    keyboardTable->horizontalHeader()->setStretchLastSection(true);
+    keyboardTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    keyboardTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    layout->addWidget(keyboardTable);
+    
+    // Buttons
+    QHBoxLayout *buttonLayout = new QHBoxLayout();
+    addKeyboardMappingButton = new QPushButton(tr("Add Mapping"), keyboardTab);
+    removeKeyboardMappingButton = new QPushButton(tr("Remove Mapping"), keyboardTab);
+    
+    buttonLayout->addWidget(addKeyboardMappingButton);
+    buttonLayout->addWidget(removeKeyboardMappingButton);
+    buttonLayout->addStretch();
+    
+    layout->addLayout(buttonLayout);
+    
+    // Connections
+    connect(addKeyboardMappingButton, &QPushButton::clicked, this, &ControlPanelDialog::addKeyboardMapping);
+    connect(removeKeyboardMappingButton, &QPushButton::clicked, this, &ControlPanelDialog::removeKeyboardMapping);
+    
+    // Load current mappings
+    if (mainWindowRef) {
+        QMap<QString, QString> mappings = mainWindowRef->getKeyboardMappings();
+        keyboardTable->setRowCount(mappings.size());
+        int row = 0;
+        for (auto it = mappings.begin(); it != mappings.end(); ++it) {
+            keyboardTable->setItem(row, 0, new QTableWidgetItem(it.key()));
+            QString displayAction = ButtonMappingHelper::internalKeyToDisplay(it.value(), false);
+            keyboardTable->setItem(row, 1, new QTableWidgetItem(displayAction));
+            row++;
+        }
+    }
+    
+    tabWidget->addTab(keyboardTab, tr("Keyboard Shortcuts"));
+}
+*/
+/*
+void ControlPanelDialog::createMouseDialTab() {
+    mouseDialTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(mouseDialTab);
+    
+    // Instructions
+    QLabel *instructionLabel = new QLabel(tr("Configure mouse button combinations for dial control:"), mouseDialTab);
+    instructionLabel->setWordWrap(true);
+    layout->addWidget(instructionLabel);
+    
+    QLabel *usageLabel = new QLabel(tr("Hold mouse button combination for 0.5+ seconds, then use mouse wheel to control the dial."), mouseDialTab);
+    usageLabel->setWordWrap(true);
+    usageLabel->setStyleSheet("color: gray; font-size: 11px; margin-bottom: 15px;");
+    layout->addWidget(usageLabel);
+    
+    // Available combinations and their mappings
+    QStringList combinations = {
+        tr("Right Button"),
+        tr("Side Button 1"),  
+        tr("Side Button 2"),
+        tr("Right + Side 1"),
+        tr("Right + Side 2"),
+        tr("Side 1 + Side 2")
+    };
+    
+    QStringList internalCombinations = {
+        "Right",
+        "Side1",
+        "Side2", 
+        "Right+Side1",
+        "Right+Side2",
+        "Side1+Side2"
+    };
+    
+    QStringList dialModes = ButtonMappingHelper::getTranslatedDialModes();
+    
+    for (int i = 0; i < combinations.size(); ++i) {
+        const QString &combination = combinations[i];
+        const QString &internalCombination = internalCombinations[i];
+        
+        QHBoxLayout *h = new QHBoxLayout();
+        
+        QLabel *label = new QLabel(combination + ":", mouseDialTab);
+        label->setMinimumWidth(120);
+        h->addWidget(label);
+        
+        QComboBox *combo = new QComboBox(mouseDialTab);
+        combo->addItems(dialModes);
+        mouseDialMappingCombos[internalCombination] = combo;
+        h->addWidget(combo);
+        
+        h->addStretch(); // Push everything to the left
+        layout->addLayout(h);
+    }
+    
+    // Add some spacing
+    layout->addSpacing(20);
+    
+    // Step size information
+    QLabel *stepLabel = new QLabel(tr("Mouse wheel step sizes per dial mode:"), mouseDialTab);
+    stepLabel->setStyleSheet("font-weight: bold;");
+    layout->addWidget(stepLabel);
+    
+    QLabel *stepInfo = new QLabel(
+        tr("• Page Switching: 45° per wheel step (8 pages per rotation)\n"
+           "• Color Presets: 60° per wheel step (6 presets per rotation)\n" 
+           "• Zoom Control: 30° per wheel step (12 steps per rotation)\n"
+           "• Thickness: 20° per wheel step (18 steps per rotation)\n"
+           "• Tool Switching: 120° per wheel step (3 tools per rotation)\n"
+           "• Pan & Scroll: 15° per wheel step (24 steps per rotation)"), mouseDialTab);
+    stepInfo->setWordWrap(true);
+    stepInfo->setStyleSheet("color: gray; font-size: 10px; margin: 5px 0px 15px 15px;");
+    layout->addWidget(stepInfo);
+    
+    layout->addStretch();
+    
+    tabWidget->addTab(mouseDialTab, tr("Mouse Dial Control"));
+}
+*/
+
+void ControlPanelDialog::createBackgroundTab() {
+    backgroundTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(backgroundTab);
+    
+    // Add some spacing at the top
+    layout->addSpacing(10);
+    
+    // Title
+    QLabel *titleLabel = new QLabel(tr("Default Page & Background Settings"), backgroundTab);
+    titleLabel->setStyleSheet("font-size: 16px; font-weight: bold;");
+    layout->addWidget(titleLabel);
+    
+    QLabel *descLabel = new QLabel(tr("These settings apply to newly created documents only. "
+                                      "Background changes will also be applied to the current document."), backgroundTab);
+    descLabel->setWordWrap(true);
+    descLabel->setStyleSheet("color: gray; font-size: 11px; margin-bottom: 15px;");
+    layout->addWidget(descLabel);
+    
+    // ========== PAGE SIZE SECTION ==========
+    QLabel *pageSectionLabel = new QLabel(tr("Default Page Size"), backgroundTab);
+    pageSectionLabel->setStyleSheet("font-weight: bold; margin-top: 5px;");
+    layout->addWidget(pageSectionLabel);
+    
+    // Page Size Preset
+    QHBoxLayout *pageSizeLayout = new QHBoxLayout();
+    QLabel *pageSizeLabel = new QLabel(tr("Paper Size:"), backgroundTab);
+    pageSizeLabel->setMinimumWidth(120);
+    pageSizeLayout->addWidget(pageSizeLabel);
+    
+    pageSizeCombo = new QComboBox(backgroundTab);
+    // ISO/JIS sizes (commonly used internationally)
+    // Format: "Name", QVariant with QSizeF(width, height) at 96 DPI
+    // mm to px at 96 DPI: mm * 96 / 25.4
+    pageSizeCombo->addItem(tr("A3 (297 × 420 mm)"), QSizeF(1123, 1587));
+    pageSizeCombo->addItem(tr("B4 (250 × 353 mm)"), QSizeF(945, 1334));
+    pageSizeCombo->addItem(tr("A4 (210 × 297 mm)"), QSizeF(794, 1123));
+    pageSizeCombo->addItem(tr("B5 (176 × 250 mm)"), QSizeF(665, 945));
+    pageSizeCombo->addItem(tr("A5 (148 × 210 mm)"), QSizeF(559, 794));
+    // US Imperial sizes (commonly used in US)
+    pageSizeCombo->addItem(tr("US Letter (8.5 × 11 in)"), QSizeF(816, 1056));
+    pageSizeCombo->addItem(tr("US Legal (8.5 × 14 in)"), QSizeF(816, 1344));
+    pageSizeCombo->addItem(tr("US Tabloid (11 × 17 in)"), QSizeF(1056, 1632));
+    
+    connect(pageSizeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &ControlPanelDialog::onPageSizePresetChanged);
+    pageSizeLayout->addWidget(pageSizeCombo, 1);
+    layout->addLayout(pageSizeLayout);
+    
+    // Page Size Dimensions (read-only display)
+    QHBoxLayout *pageDimLayout = new QHBoxLayout();
+    QLabel *pageDimLabel = new QLabel(tr("Dimensions:"), backgroundTab);
+    pageDimLabel->setMinimumWidth(120);
+    pageDimLayout->addWidget(pageDimLabel);
+    
+    pageSizeDimLabel = new QLabel(backgroundTab);
+    pageSizeDimLabel->setStyleSheet("color: #666; font-style: italic;");
+    pageDimLayout->addWidget(pageSizeDimLabel);
+    pageDimLayout->addStretch();
+    layout->addLayout(pageDimLayout);
+    
+    layout->addSpacing(15);
+    
+    // ========== BACKGROUND SECTION ==========
+    QLabel *bgSectionLabel = new QLabel(tr("Default Background"), backgroundTab);
+    bgSectionLabel->setStyleSheet("font-weight: bold;");
+    layout->addWidget(bgSectionLabel);
+    
+    // Background Style
+    QHBoxLayout *styleLayout = new QHBoxLayout();
+    QLabel *styleLabel = new QLabel(tr("Background Style:"), backgroundTab);
+    styleLabel->setMinimumWidth(120);
+    styleLayout->addWidget(styleLabel);
+    
+    styleCombo = new QComboBox(backgroundTab);
+    // Values must match Page::BackgroundType enum: None=0, PDF=1, Custom=2, Grid=3, Lines=4
+    styleCombo->addItem(tr("None"), static_cast<int>(Page::BackgroundType::None));     // 0
+    styleCombo->addItem(tr("Grid"), static_cast<int>(Page::BackgroundType::Grid));     // 3
+    styleCombo->addItem(tr("Lines"), static_cast<int>(Page::BackgroundType::Lines));   // 4
+    styleLayout->addWidget(styleCombo, 1);
+    layout->addLayout(styleLayout);
+    
+    layout->addSpacing(10);
+    
+    // Background Color
+    QHBoxLayout *bgColorLayout = new QHBoxLayout();
+    QLabel *bgColorLabel = new QLabel(tr("Background Color:"), backgroundTab);
+    bgColorLabel->setMinimumWidth(120);
+    bgColorLayout->addWidget(bgColorLabel);
+    
+    bgColorButton = new QPushButton(backgroundTab);
+    bgColorButton->setFixedSize(100, 30);
+    bgColorButton->setStyleSheet("background-color: #ffffff");
+    connect(bgColorButton, &QPushButton::clicked, this, &ControlPanelDialog::chooseBackgroundColor);
+    bgColorLayout->addWidget(bgColorButton);
+    bgColorLayout->addStretch();
+    layout->addLayout(bgColorLayout);
+    
+    // Grid/Line Color
+    QHBoxLayout *gridColorLayout = new QHBoxLayout();
+    QLabel *gridColorLabel = new QLabel(tr("Grid/Line Color:"), backgroundTab);
+    gridColorLabel->setMinimumWidth(120);
+    gridColorLayout->addWidget(gridColorLabel);
+    
+    gridColorButton = new QPushButton(backgroundTab);
+    gridColorButton->setFixedSize(100, 30);
+    gridColorButton->setStyleSheet("background-color: #c8c8c8");
+    connect(gridColorButton, &QPushButton::clicked, this, &ControlPanelDialog::chooseGridColor);
+    gridColorLayout->addWidget(gridColorButton);
+    gridColorLayout->addStretch();
+    layout->addLayout(gridColorLayout);
+    
+    layout->addSpacing(10);
+    
+    // Grid Spacing
+    QHBoxLayout *gridSpacingLayout = new QHBoxLayout();
+    QLabel *gridSpacingLabel = new QLabel(tr("Grid Spacing:"), backgroundTab);
+    gridSpacingLabel->setMinimumWidth(120);
+    gridSpacingLayout->addWidget(gridSpacingLabel);
+    
+    gridSpacingSpin = new QSpinBox(backgroundTab);
+    gridSpacingSpin->setRange(8, 128);
+    gridSpacingSpin->setSingleStep(8);
+    gridSpacingSpin->setSuffix(" px");
+    gridSpacingSpin->setValue(32);
+    gridSpacingLayout->addWidget(gridSpacingSpin);
+    gridSpacingLayout->addStretch();
+    layout->addLayout(gridSpacingLayout);
+    
+    // Line Spacing
+    QHBoxLayout *lineSpacingLayout = new QHBoxLayout();
+    QLabel *lineSpacingLabel = new QLabel(tr("Line Spacing:"), backgroundTab);
+    lineSpacingLabel->setMinimumWidth(120);
+    lineSpacingLayout->addWidget(lineSpacingLabel);
+    
+    lineSpacingSpin = new QSpinBox(backgroundTab);
+    lineSpacingSpin->setRange(8, 128);
+    lineSpacingSpin->setSingleStep(8);
+    lineSpacingSpin->setSuffix(" px");
+    lineSpacingSpin->setValue(32);
+    lineSpacingLayout->addWidget(lineSpacingSpin);
+    lineSpacingLayout->addStretch();
+    layout->addLayout(lineSpacingLayout);
+    
+    // Note about 32px default
+    QLabel *noteLabel = new QLabel(tr("Note: 32px spacing is recommended as it divides evenly into "
+                                      "the 1024px tile size used by the edgeless canvas."), backgroundTab);
+    noteLabel->setWordWrap(true);
+    noteLabel->setStyleSheet("color: gray; font-size: 10px; margin-top: 15px;");
+    layout->addWidget(noteLabel);
+    
+    layout->addStretch();
+    
+    // Initialize colors
+    selectedBgColor = QColor("#ffffff");
+    selectedGridColor = QColor("#c8c8c8");
+    
+    // Initialize page size display
+    onPageSizePresetChanged(pageSizeCombo->currentIndex());
+    
+    tabWidget->addTab(backgroundTab, tr("Page"));
+}
+
+// ============================================================================
+// Tools Tab
+// ============================================================================
+
+void ControlPanelDialog::createToolsTab()
+{
+    toolsTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(toolsTab);
+
+    QSettings settings("SpeedyNote", "App");
+
+    // The old global "Minimum stroke width" row has moved to the Pen
+    // thickness-preset editor (each preset owns its own min width now).
+
+    // --- Panning settings group ---
+    QGroupBox *panGroup = new QGroupBox(tr("Panning"), toolsTab);
+    QFormLayout *panLayout = new QFormLayout(panGroup);
+
+    wheelScrollSpeedSpin = new QDoubleSpinBox(panGroup);
+    wheelScrollSpeedSpin->setRange(5.0, 200.0);
+    wheelScrollSpeedSpin->setSingleStep(5.0);
+    wheelScrollSpeedSpin->setDecimals(1);
+    wheelScrollSpeedSpin->setSuffix(tr(" px"));
+    wheelScrollSpeedSpin->setValue(settings.value("tools/wheelScrollSpeed", 40.0).toDouble());
+
+    panLayout->addRow(tr("Mouse wheel scroll speed:"), wheelScrollSpeedSpin);
+
+    QLabel *panHint = new QLabel(
+        tr("Distance the viewport moves per mouse wheel click, in document units. "
+           "Applies to vertical panning (wheel / `+wheel) and horizontal panning (Shift+wheel). "
+           "Does not affect touchpad scrolling."),
+        panGroup);
+    panHint->setWordWrap(true);
+    panHint->setStyleSheet("color: gray; font-size: 11px;");
+    panLayout->addRow(panHint);
+
+    panOutsidePagesCheck = new QCheckBox(
+        tr("Pan the view by dragging the empty space around pages"), panGroup);
+    panOutsidePagesCheck->setChecked(
+        settings.value("tools/panOutsidePages", true).toBool());
+    panLayout->addRow(panOutsidePagesCheck);
+
+    QLabel *offPagePanHint = new QLabel(
+        tr("Lets you move the view with a stylus alone, without holding a key or "
+           "switching to the hand tool. Drawing tools are unaffected because they "
+           "only work on the pages themselves. A tap in the empty space still "
+           "clears the current selection, and a drag that starts on a page always "
+           "continues as drawing. Does not apply to the edgeless canvas."),
+        panGroup);
+    offPagePanHint->setWordWrap(true);
+    offPagePanHint->setStyleSheet("color: gray; font-size: 11px;");
+    panLayout->addRow(offPagePanHint);
+
+    layout->addWidget(panGroup);
+
+    // --- OCR settings group ---
+    QGroupBox *ocrGroup = new QGroupBox(tr("OCR (Handwriting Recognition)"), toolsTab);
+    QVBoxLayout *ocrLayout = new QVBoxLayout(ocrGroup);
+
+    ocrCjkGridModeCheck = new QCheckBox(tr("CJK grid-cell mode (box-by-box character detection)"), ocrGroup);
+    ocrCjkGridModeCheck->setChecked(settings.value("ocrCjkGridMode", false).toBool());
+    ocrLayout->addWidget(ocrCjkGridModeCheck);
+
+    QLabel *ocrHint = new QLabel(
+        tr("When \"Snap OCR to Grid/Lines\" is enabled and the background is a grid, "
+           "this option makes each grid cell detect one CJK character. Adjacent "
+           "characters are merged into sentences. Leave unchecked for line-based "
+           "detection (suitable for most languages). This is the default for "
+           "documents that have not overridden it in Current Document Settings > OCR."),
+        ocrGroup);
+    ocrHint->setWordWrap(true);
+    ocrHint->setStyleSheet("color: gray; font-size: 11px;");
+    ocrLayout->addWidget(ocrHint);
+
+    layout->addWidget(ocrGroup);
+    layout->addStretch();
+
+    tabWidget->addTab(toolsTab, tr("Tools"));
+}
+
+// ============================================================================
+// Phase 5.1: Keyboard Shortcuts Tab
+// ============================================================================
+
+void ControlPanelDialog::createShortcutsTab()
+{
+    shortcutsTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(shortcutsTab);
+    
+    // Add some spacing at the top
+    layout->addSpacing(10);
+    
+    // Title
+    QLabel *titleLabel = new QLabel(tr("Keyboard Shortcuts"), shortcutsTab);
+    titleLabel->setStyleSheet("font-size: 16px; font-weight: bold;");
+    layout->addWidget(titleLabel);
+    
+    QLabel *descLabel = new QLabel(tr("Double-click a shortcut to edit. Changes are saved automatically."), shortcutsTab);
+    descLabel->setWordWrap(true);
+    descLabel->setStyleSheet("color: gray; font-size: 11px; margin-bottom: 10px;");
+    layout->addWidget(descLabel);
+    
+    // Tree widget for shortcuts (organized by category)
+    shortcutsTree = new QTreeWidget(shortcutsTab);
+    shortcutsTree->setHeaderLabels({tr("Action"), tr("Shortcut"), tr("Default")});
+    shortcutsTree->setColumnCount(3);
+    shortcutsTree->setRootIsDecorated(true);
+    shortcutsTree->setAlternatingRowColors(true);
+    shortcutsTree->setSelectionMode(QAbstractItemView::SingleSelection);
+    
+    // Set column widths
+    shortcutsTree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    shortcutsTree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    shortcutsTree->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    shortcutsTree->setMinimumWidth(350);
+    
+    // Connect double-click to edit
+    connect(shortcutsTree, &QTreeWidget::itemDoubleClicked,
+            this, &ControlPanelDialog::onShortcutItemDoubleClicked);
+    
+    layout->addWidget(shortcutsTree, 1);  // stretch factor 1
+    
+    // Button row
+    QHBoxLayout *buttonLayout = new QHBoxLayout();
+    
+    QPushButton *editButton = new QPushButton(tr("Edit"), shortcutsTab);
+    editButton->setToolTip(tr("Edit the selected shortcut"));
+    connect(editButton, &QPushButton::clicked, this, &ControlPanelDialog::onEditShortcut);
+    buttonLayout->addWidget(editButton);
+    
+    QPushButton *resetButton = new QPushButton(tr("Reset"), shortcutsTab);
+    resetButton->setToolTip(tr("Reset the selected shortcut to default"));
+    connect(resetButton, &QPushButton::clicked, this, &ControlPanelDialog::onResetShortcut);
+    buttonLayout->addWidget(resetButton);
+    
+    buttonLayout->addStretch();
+    
+    resetAllShortcutsButton = new QPushButton(tr("Reset All to Defaults"), shortcutsTab);
+    resetAllShortcutsButton->setToolTip(tr("Reset all shortcuts to their default values"));
+    connect(resetAllShortcutsButton, &QPushButton::clicked, 
+            this, &ControlPanelDialog::onResetAllShortcuts);
+    buttonLayout->addWidget(resetAllShortcutsButton);
+    
+    layout->addLayout(buttonLayout);
+    
+    // Open config folder button
+    QHBoxLayout *folderLayout = new QHBoxLayout();
+    folderLayout->addStretch();
+    
+    openConfigFolderButton = new QPushButton(tr("Open Config Folder"), shortcutsTab);
+    openConfigFolderButton->setToolTip(tr("Open the folder containing shortcuts.json"));
+    connect(openConfigFolderButton, &QPushButton::clicked,
+            this, &ControlPanelDialog::onOpenConfigFolder);
+    folderLayout->addWidget(openConfigFolderButton);
+    
+    layout->addLayout(folderLayout);
+    
+    // Populate the tree with shortcuts
+    populateShortcutsTree();
+    
+    tabWidget->addTab(shortcutsTab, tr("Shortcuts"));
+}
+
+void ControlPanelDialog::populateShortcutsTree()
+{
+    shortcutsTree->clear();
+    
+    ShortcutManager* sm = ShortcutManager::instance();
+    QStringList categories = sm->allCategories();
+    
+    // Create category items
+    QMap<QString, QTreeWidgetItem*> categoryItems;
+    
+    for (const QString& category : categories) {
+        QTreeWidgetItem* catItem = new QTreeWidgetItem(shortcutsTree);
+        catItem->setText(0, category);
+        catItem->setFlags(catItem->flags() & ~Qt::ItemIsSelectable);
+        catItem->setExpanded(true);
+        
+        // Style category header
+        QFont boldFont = catItem->font(0);
+        boldFont.setBold(true);
+        catItem->setFont(0, boldFont);
+        
+        categoryItems[category] = catItem;
+    }
+    
+    // Add action items under their categories
+    for (const QString& category : categories) {
+        QStringList actions = sm->actionsInCategory(category);
+        QTreeWidgetItem* catItem = categoryItems[category];
+        
+        for (const QString& actionId : actions) {
+            QTreeWidgetItem* item = new QTreeWidgetItem(catItem);
+            item->setData(0, Qt::UserRole, actionId);  // Store actionId
+            
+            updateShortcutDisplay(item, actionId);
+        }
+    }
+}
+
+void ControlPanelDialog::updateShortcutDisplay(QTreeWidgetItem* item, const QString& actionId)
+{
+    ShortcutManager* sm = ShortcutManager::instance();
+    
+    QString displayName = sm->displayNameForAction(actionId);
+    QString currentShortcut = sm->shortcutForAction(actionId);
+    QString defaultShortcut = sm->defaultShortcutForAction(actionId);
+    bool isOverridden = sm->isUserOverridden(actionId);
+    
+    item->setText(0, displayName);
+    item->setText(1, currentShortcut);
+    item->setText(2, defaultShortcut);
+    
+    // Highlight if overridden
+    if (isOverridden) {
+        item->setForeground(1, QColor("#e67e22"));  // Orange for custom
+        QFont font = item->font(1);
+        font.setBold(true);
+        item->setFont(1, font);
+    } else {
+        item->setForeground(1, QColor("#999999"));  // Default color
+        QFont font = item->font(1);
+        font.setBold(false);
+        item->setFont(1, font);
+    }
+    
+    // Check for conflicts
+    QStringList conflicts = sm->findConflicts(currentShortcut, actionId);
+    if (!conflicts.isEmpty()) {
+        item->setForeground(1, QColor("#e74c3c"));  // Red for conflict
+        QString conflictNames;
+        for (const QString& conflictId : conflicts) {
+            if (!conflictNames.isEmpty()) conflictNames += ", ";
+            conflictNames += sm->displayNameForAction(conflictId);
+        }
+        item->setToolTip(1, tr("Conflict with: %1").arg(conflictNames));
+    } else {
+        item->setToolTip(1, QString());
+    }
+}
+
+void ControlPanelDialog::onShortcutItemDoubleClicked(QTreeWidgetItem* item, int column)
+{
+    Q_UNUSED(column)
+    
+    if (!item) return;
+    
+    QString actionId = item->data(0, Qt::UserRole).toString();
+    if (actionId.isEmpty()) return;  // Category item
+    
+    // Open key capture dialog
+    KeyCaptureDialog dialog(this);
+    dialog.setWindowTitle(tr("Capture Shortcut for: %1").arg(item->text(0)));
+    
+    if (dialog.exec() == QDialog::Accepted) {
+        QString newShortcut = dialog.getCapturedKeySequence();
+        if (!newShortcut.isEmpty()) {
+            ShortcutManager* sm = ShortcutManager::instance();
+            
+            // Check for conflicts
+            QStringList conflicts = sm->findConflicts(newShortcut, actionId);
+            if (!conflicts.isEmpty()) {
+                QString conflictNames;
+                for (const QString& conflictId : conflicts) {
+                    if (!conflictNames.isEmpty()) conflictNames += "\n";
+                    conflictNames += "• " + sm->displayNameForAction(conflictId);
+                }
+                
+                QMessageBox::StandardButton reply = QMessageBox::warning(
+                    this,
+                    tr("Shortcut Conflict"),
+                    tr("The shortcut '%1' is already used by:\n%2\n\nDo you want to use it anyway?")
+                        .arg(newShortcut)
+                        .arg(conflictNames),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::No
+                );
+                
+                if (reply != QMessageBox::Yes) {
+                    return;
+                }
+            }
+            
+            // Set the new shortcut
+            sm->setUserShortcut(actionId, newShortcut);
+            sm->saveUserShortcuts();
+            
+            // Update display
+            updateShortcutDisplay(item, actionId);
+        }
+    }
+}
+
+void ControlPanelDialog::onEditShortcut()
+{
+    QTreeWidgetItem* item = shortcutsTree->currentItem();
+    if (item) {
+        onShortcutItemDoubleClicked(item, 0);
+    } else {
+        QMessageBox::information(this, tr("No Selection"),
+            tr("Please select a shortcut to edit."));
+    }
+}
+
+void ControlPanelDialog::onResetShortcut()
+{
+    QTreeWidgetItem* item = shortcutsTree->currentItem();
+    if (!item) {
+        QMessageBox::information(this, tr("No Selection"),
+            tr("Please select a shortcut to reset."));
+        return;
+    }
+    
+    QString actionId = item->data(0, Qt::UserRole).toString();
+    if (actionId.isEmpty()) return;  // Category item
+    
+    ShortcutManager* sm = ShortcutManager::instance();
+    
+    if (!sm->isUserOverridden(actionId)) {
+        QMessageBox::information(this, tr("Already Default"),
+            tr("This shortcut is already using the default value."));
+        return;
+    }
+    
+    sm->clearUserShortcut(actionId);
+    sm->saveUserShortcuts();
+    
+    // Update display
+    updateShortcutDisplay(item, actionId);
+}
+
+void ControlPanelDialog::onResetAllShortcuts()
+{
+    QMessageBox::StandardButton reply = QMessageBox::question(
+        this,
+        tr("Reset All Shortcuts"),
+        tr("Are you sure you want to reset all shortcuts to their default values?\n\n"
+           "This cannot be undone."),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No
+    );
+    
+    if (reply == QMessageBox::Yes) {
+        ShortcutManager* sm = ShortcutManager::instance();
+        sm->resetAllToDefaults();
+        sm->saveUserShortcuts();
+        
+        // Refresh the entire tree
+        populateShortcutsTree();
+        
+        QMessageBox::information(this, tr("Shortcuts Reset"),
+            tr("All shortcuts have been reset to their default values."));
+    }
+}
+
+void ControlPanelDialog::onOpenConfigFolder()
+{
+    ShortcutManager* sm = ShortcutManager::instance();
+    QString configPath = sm->configFilePath();
+    
+    // Get the directory containing the config file
+    QFileInfo fileInfo(configPath);
+    QString folderPath = fileInfo.absolutePath();
+    
+    // Ensure the directory exists
+    QDir dir(folderPath);
+    if (!dir.exists()) {
+        dir.mkpath(".");
+    }
+    
+    // Open in file manager
+    QDesktopServices::openUrl(QUrl::fromLocalFile(folderPath));
+}
+
+void ControlPanelDialog::onPageSizePresetChanged(int index) {
+    if (index < 0 || !pageSizeCombo || !pageSizeDimLabel) return;
+    
+    QSizeF size = pageSizeCombo->itemData(index).toSizeF();
+    pageSizeDimLabel->setText(tr("%1 × %2 px (at 96 DPI)")
+        .arg(static_cast<int>(size.width()))
+        .arg(static_cast<int>(size.height())));
+}
+
+void ControlPanelDialog::chooseBackgroundColor() {
+    QColor chosen = QColorDialog::getColor(selectedBgColor, this, tr("Select Background Color"));
+    if (chosen.isValid()) {
+        selectedBgColor = chosen;
+        bgColorButton->setStyleSheet(QString("background-color: %1").arg(selectedBgColor.name()));
+    }
+}
+
+void ControlPanelDialog::chooseGridColor() {
+    QColor chosen = QColorDialog::getColor(selectedGridColor, this, tr("Select Grid/Line Color"));
+    if (chosen.isValid()) {
+        selectedGridColor = chosen;
+        gridColorButton->setStyleSheet(QString("background-color: %1").arg(selectedGridColor.name()));
+    }
+}
+
+void ControlPanelDialog::createThemeTab() {
+    themeTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(themeTab);
+    
+    // Custom accent color
+    useCustomAccentCheckbox = new QCheckBox(tr("Use Custom Accent Color"), themeTab);
+    layout->addWidget(useCustomAccentCheckbox);
+    
+    QLabel *accentColorLabel = new QLabel(tr("Accent Color:"), themeTab);
+    accentColorButton = new QPushButton(themeTab);
+    accentColorButton->setFixedSize(100, 30);
+    connect(accentColorButton, &QPushButton::clicked, this, &ControlPanelDialog::chooseAccentColor);
+    
+    QHBoxLayout *accentColorLayout = new QHBoxLayout();
+    accentColorLayout->addWidget(accentColorLabel);
+    accentColorLayout->addWidget(accentColorButton);
+    accentColorLayout->addStretch();
+    layout->addLayout(accentColorLayout);
+    
+    QLabel *accentColorNote = new QLabel(tr("When enabled, use a custom accent color instead of the system accent color for the toolbar, dial, and tab selection."));
+    accentColorNote->setWordWrap(true);
+    accentColorNote->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(accentColorNote);
+    
+    // Enable/disable accent color button based on checkbox
+    connect(useCustomAccentCheckbox, &QCheckBox::toggled, accentColorButton, &QPushButton::setEnabled);
+    connect(useCustomAccentCheckbox, &QCheckBox::toggled, accentColorLabel, &QLabel::setEnabled);
+    
+
+    layout->addSpacing(15);
+    
+    // PDF dark mode (lightness inversion)
+    pdfDarkModeCheckbox = new QCheckBox(tr("Invert PDF Lightness in Dark Mode"), themeTab);
+    layout->addWidget(pdfDarkModeCheckbox);
+
+    QLabel *pdfDarkModeNote = new QLabel(tr("When enabled and dark mode is active, PDF page backgrounds are darkened "
+        "by inverting lightness (HSL). White pages become dark and dark text becomes "
+        "light, while colours keep their hue. Disable this if you prefer the original "
+        "PDF colours."), themeTab);
+    pdfDarkModeNote->setWordWrap(true);
+    pdfDarkModeNote->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(pdfDarkModeNote);
+
+    layout->addSpacing(5);
+
+    // Image region detection bypass (sub-option of PDF dark mode)
+    skipImageMaskingCheckbox = new QCheckBox(tr("Invert entire page including images"), themeTab);
+    layout->addWidget(skipImageMaskingCheckbox);
+
+    QLabel *skipImageMaskingNote = new QLabel(tr("By default, embedded photos and figures are detected and excluded from "
+        "inversion. Enable this to invert every pixel on the page. Useful for PDFs "
+        "that consist mainly of black-and-white diagrams or graphs."), themeTab);
+    skipImageMaskingNote->setWordWrap(true);
+    skipImageMaskingNote->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(skipImageMaskingNote);
+
+    // Only enable the sub-option when PDF dark mode is checked
+    auto updateSkipEnabled = [this]() {
+        bool on = pdfDarkModeCheckbox->isChecked();
+        skipImageMaskingCheckbox->setEnabled(on);
+    };
+    connect(pdfDarkModeCheckbox, &QCheckBox::toggled, this, updateSkipEnabled);
+    updateSkipEnabled();
+
+    // --- Scroll bar placement (Plan SB4) -----------------------------------
+    layout->addSpacing(15);
+
+    QLabel *scrollBarSectionLabel = new QLabel(tr("Scroll Bar"), themeTab);
+    scrollBarSectionLabel->setStyleSheet("font-weight: bold; margin-top: 10px;");
+    layout->addWidget(scrollBarSectionLabel);
+
+    // Page-axis (vertical) bar edge: Left / Right.
+    QHBoxLayout *vEdgeLayout = new QHBoxLayout();
+    QLabel *vEdgeLabel = new QLabel(tr("Page scroll bar side:"), themeTab);
+    QComboBox *vEdgeCombo = new QComboBox(themeTab);
+    vEdgeCombo->addItem(tr("Left"));
+    vEdgeCombo->addItem(tr("Right"));
+    vEdgeLayout->addWidget(vEdgeLabel);
+    vEdgeLayout->addWidget(vEdgeCombo);
+    vEdgeLayout->addStretch();
+    layout->addLayout(vEdgeLayout);
+
+    // Cross-axis (horizontal) bar edge: Top / Bottom.
+    QHBoxLayout *hEdgeLayout = new QHBoxLayout();
+    QLabel *hEdgeLabel = new QLabel(tr("Horizontal scroll bar side:"), themeTab);
+    QComboBox *hEdgeCombo = new QComboBox(themeTab);
+    hEdgeCombo->addItem(tr("Top"));
+    hEdgeCombo->addItem(tr("Bottom"));
+    hEdgeLayout->addWidget(hEdgeLabel);
+    hEdgeLayout->addWidget(hEdgeCombo);
+    hEdgeLayout->addStretch();
+    layout->addLayout(hEdgeLayout);
+
+    QCheckBox *pinScrollBarsCheckbox = new QCheckBox(tr("Keep scroll bars always visible"), themeTab);
+    layout->addWidget(pinScrollBarsCheckbox);
+
+    QLabel *scrollBarNote = new QLabel(tr("Choose which edge each scroll bar docks against (right-side placement can "
+        "help avoid accidental palm input for pen users). When not pinned, bars float in on pen or cursor "
+        "proximity and fade out after a moment."), themeTab);
+    scrollBarNote->setWordWrap(true);
+    scrollBarNote->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(scrollBarNote);
+
+    if (mainWindowRef) {
+        vEdgeCombo->setCurrentIndex(mainWindowRef->scrollBarVerticalOnRight() ? 1 : 0);
+        hEdgeCombo->setCurrentIndex(mainWindowRef->scrollBarHorizontalOnBottom() ? 1 : 0);
+        pinScrollBarsCheckbox->setChecked(mainWindowRef->scrollBarsPinned());
+    }
+
+    // Apply live as the user changes the controls.
+    connect(vEdgeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (mainWindowRef) mainWindowRef->setScrollBarVerticalOnRight(index == 1);
+    });
+    connect(hEdgeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (mainWindowRef) mainWindowRef->setScrollBarHorizontalOnBottom(index == 1);
+    });
+    connect(pinScrollBarsCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
+        if (mainWindowRef) mainWindowRef->setScrollBarsPinned(checked);
+    });
+
+    layout->addStretch();
+    
+    tabWidget->addTab(themeTab, tr("Theme"));
+}
+
+void ControlPanelDialog::chooseAccentColor() {
+    QColor chosen = QColorDialog::getColor(selectedAccentColor, this, tr("Select Accent Color"));
+    if (chosen.isValid()) {
+        selectedAccentColor = chosen;
+        accentColorButton->setStyleSheet(QString("background-color: %1").arg(selectedAccentColor.name()));
+    }
+}
+
+/*
+void ControlPanelDialog::addKeyboardMapping() {
+    // Step 1: Capture key sequence
+    KeyCaptureDialog captureDialog(this);
+    if (captureDialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    
+    QString keySequence = captureDialog.getCapturedKeySequence();
+    if (keySequence.isEmpty()) {
+        return;
+    }
+    
+    // Check if key sequence already exists
+    if (mainWindowRef && mainWindowRef->getKeyboardMappings().contains(keySequence)) {
+        QMessageBox::warning(this, tr("Key Already Mapped"), 
+            tr("The key sequence '%1' is already mapped. Please choose a different key combination.").arg(keySequence));
+        return;
+    }
+    
+    // Step 2: Choose action
+    QStringList actions = ButtonMappingHelper::getTranslatedActions();
+    bool ok;
+    QString selectedAction = QInputDialog::getItem(this, tr("Select Action"), 
+        tr("Choose the action to perform when '%1' is pressed:").arg(keySequence), 
+        actions, 0, false, &ok);
+    
+    if (!ok || selectedAction.isEmpty()) {
+        return;
+    }
+    
+    // Convert display name to internal key
+    QString internalKey = ButtonMappingHelper::displayToInternalKey(selectedAction, false);
+    
+    // Add the mapping
+    if (mainWindowRef) {
+        mainWindowRef->addKeyboardMapping(keySequence, internalKey);
+        
+        // Update table
+        int row = keyboardTable->rowCount();
+        keyboardTable->insertRow(row);
+        keyboardTable->setItem(row, 0, new QTableWidgetItem(keySequence));
+        keyboardTable->setItem(row, 1, new QTableWidgetItem(selectedAction));
+    }
+}
+
+void ControlPanelDialog::removeKeyboardMapping() {
+    int currentRow = keyboardTable->currentRow();
+    if (currentRow < 0) {
+        QMessageBox::information(this, tr("No Selection"), tr("Please select a mapping to remove."));
+        return;
+    }
+    
+    QTableWidgetItem *keyItem = keyboardTable->item(currentRow, 0);
+    if (!keyItem) return;
+    
+    QString keySequence = keyItem->text();
+    
+    // Confirm removal
+    int ret = QMessageBox::question(this, tr("Remove Mapping"), 
+        tr("Are you sure you want to remove the keyboard shortcut '%1'?").arg(keySequence),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    
+    if (ret == QMessageBox::Yes) {
+        // Remove from MainWindow
+        if (mainWindowRef) {
+            mainWindowRef->removeKeyboardMapping(keySequence);
+        }
+        
+        // Remove from table
+        keyboardTable->removeRow(currentRow);
+    }
+}
+*/
+
+void ControlPanelDialog::createAboutTab() {
+    aboutTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(aboutTab);
+    
+    // Add some spacing at the top
+    layout->addSpacing(20);
+    
+    // Application icon — render SVG explicitly via QSvgRenderer so it works
+    // both as a raw executable and inside a .app bundle (QPixmap relies on
+    // the SVG image-format plugin which macdeployqt may not bundle).
+    QLabel *iconLabel = new QLabel(aboutTab);
+    QSvgRenderer svgRenderer(QString(":/resources/icons/mainicon.svg"));
+    if (svgRenderer.isValid()) {
+        const int iconSize = 128;
+        const qreal dpr = iconLabel->devicePixelRatioF();
+        QPixmap iconPixmap(QSize(iconSize, iconSize) * dpr);
+        iconPixmap.setDevicePixelRatio(dpr);
+        iconPixmap.fill(Qt::transparent);
+        QPainter painter(&iconPixmap);
+        svgRenderer.render(&painter, QRectF(0, 0, iconSize, iconSize));
+        painter.end();
+        iconLabel->setPixmap(iconPixmap);
+    } else {
+        // Fallback text if icon can't be loaded
+        iconLabel->setText("📝");
+        iconLabel->setStyleSheet("font-size: 64px;");
+    }
+    iconLabel->setAlignment(Qt::AlignCenter);
+    layout->addWidget(iconLabel);
+    
+    layout->addSpacing(10);
+    
+    // Application name
+    QLabel *appNameLabel = new QLabel(tr("SpeedyNote"), aboutTab);
+    appNameLabel->setAlignment(Qt::AlignCenter);
+    appNameLabel->setStyleSheet("font-size: 24px; font-weight: bold");
+    layout->addWidget(appNameLabel);
+    
+    layout->addSpacing(5);
+    
+    // Version
+    QLabel *versionLabel = new QLabel(tr("Version %1").arg(APP_VERSION), aboutTab);
+    versionLabel->setAlignment(Qt::AlignCenter);
+    versionLabel->setStyleSheet("font-size: 14px; color: #7f8c8d;");
+    layout->addWidget(versionLabel);
+    
+    layout->addSpacing(15);
+    
+    // Description
+    QLabel *descriptionLabel = new QLabel(tr("A fast and intuitive note-taking application with PDF annotation support"), aboutTab);
+    descriptionLabel->setAlignment(Qt::AlignCenter);
+    descriptionLabel->setWordWrap(true);
+    descriptionLabel->setStyleSheet("font-size: 12px; padding: 0 20px;");
+    layout->addWidget(descriptionLabel);
+    
+    layout->addSpacing(20);
+    
+    // Author information
+    QLabel *authorLabel = new QLabel(tr("Developed by GitHub @alpha-liu-01 and various contributors"), aboutTab);
+    authorLabel->setAlignment(Qt::AlignCenter);
+    authorLabel->setStyleSheet("font-size: 12px");
+    layout->addWidget(authorLabel);
+    
+    layout->addSpacing(10);
+    
+    // Copyright
+    QLabel *copyrightLabel = new QLabel(tr("© 2026 SpeedyNote. All rights reserved."), aboutTab);
+    copyrightLabel->setAlignment(Qt::AlignCenter);
+    copyrightLabel->setStyleSheet("font-size: 10px; color: #95a5a6;");
+    layout->addWidget(copyrightLabel);
+    
+    // Add stretch to push everything to the top
+    layout->addStretch();
+    
+    // Built with Qt info
+    QLabel *qtLabel = new QLabel(tr("Built with Qt %1").arg(QT_VERSION_STR), aboutTab);
+    qtLabel->setAlignment(Qt::AlignCenter);
+    qtLabel->setStyleSheet("font-size: 9px; color: #bdc3c7;");
+    layout->addWidget(qtLabel);
+    
+    layout->addSpacing(10);
+    
+    tabWidget->addTab(aboutTab, tr("About"));
+}
+
+void ControlPanelDialog::createCacheTab() {
+    cacheTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(cacheTab);
+
+    // Add some spacing at the top
+    layout->addSpacing(20);
+
+    // Title
+    QLabel *titleLabel = new QLabel(tr("Cache Management"), cacheTab);
+    titleLabel->setAlignment(Qt::AlignCenter);
+    titleLabel->setStyleSheet("font-size: 18px; font-weight: bold;");
+    layout->addWidget(titleLabel);
+
+    layout->addSpacing(10);
+
+    // Description
+    QLabel *descriptionLabel = new QLabel(
+        tr("SpeedyNote uses temporary folders to work with notebook files.\n"
+           "These folders are normally cleaned up when you close a notebook,\n"
+           "but crashes or force-close can leave orphaned files behind."),
+        cacheTab
+    );
+    descriptionLabel->setAlignment(Qt::AlignCenter);
+    descriptionLabel->setWordWrap(true);
+    descriptionLabel->setStyleSheet("font-size: 11px; color: #7f8c8d; padding: 0 20px;");
+    layout->addWidget(descriptionLabel);
+
+    layout->addSpacing(20);
+
+    // Show cache size
+    // Phase P.1: SpnPackageManager removed - cache management will be reimplemented in NotebookLibrary
+    qint64 cacheSize = 0;  // TODO: Implement with NotebookLibrary::getTempDirsTotalSize()
+    QString cacheSizeText = QString::number(cacheSize / 1024.0 / 1024.0, 'f', 2) + " MB";
+    QLabel *cacheSizeLabel = new QLabel(tr("Current cache size: %1").arg(cacheSizeText), cacheTab);
+    cacheSizeLabel->setAlignment(Qt::AlignCenter);
+    cacheSizeLabel->setStyleSheet("font-size: 16px; font-weight: bold;");
+    layout->addWidget(cacheSizeLabel);
+
+    layout->addSpacing(5);
+
+    // Location info
+    QString tempPath = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    QLabel *locationLabel = new QLabel(tr("Location: %1").arg(tempPath), cacheTab);
+    locationLabel->setAlignment(Qt::AlignCenter);
+    locationLabel->setStyleSheet("font-size: 9px; color: #95a5a6; font-style: italic;");
+    locationLabel->setWordWrap(true);
+    layout->addWidget(locationLabel);
+
+    layout->addSpacing(30);
+
+    // Clear cache button
+    QPushButton *clearCacheButton = new QPushButton(tr("Clear Cache Now"), cacheTab);
+    clearCacheButton->setFixedSize(180, 40);
+    clearCacheButton->setStyleSheet("font-size: 13px; font-weight: bold; padding: 8px;");
+
+    connect(clearCacheButton, &QPushButton::clicked, [this, cacheSizeLabel]() {
+        // ✅ DISK CLEANUP: Warn user to close notebooks first
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this,
+            tr("Clear Cache?"),
+            tr("This will delete all temporary cache files.\n\n"
+               "⚠️ WARNING: Make sure all notebooks are closed before clearing cache, "
+               "otherwise you may lose unsaved changes!\n\n"
+               "Continue?"),
+            QMessageBox::Yes | QMessageBox::No
+        );
+
+        if (reply == QMessageBox::Yes) {
+            // Phase P.1: SpnPackageManager removed - cache cleanup will be reimplemented
+            // TODO: Implement with NotebookLibrary::cleanupOrphanedTempDirs()
+            
+            // Update cache size display (currently disabled)
+            qint64 newCacheSize = 0;  // TODO: Implement with NotebookLibrary
+            QString newCacheSizeText = QString::number(newCacheSize / 1024.0 / 1024.0, 'f', 2) + " MB";
+            cacheSizeLabel->setText(tr("Current cache size: %1").arg(newCacheSizeText));
+
+            // Show feedback message
+            QMessageBox::information(this, tr("Cache Cleared"), 
+                tr("Cache cleanup is temporarily disabled during architecture migration."));
+        }
+    });
+
+    QHBoxLayout *buttonLayout = new QHBoxLayout();
+    buttonLayout->addStretch();
+    buttonLayout->addWidget(clearCacheButton);
+    buttonLayout->addStretch();
+    layout->addLayout(buttonLayout);
+
+    layout->addSpacing(20);
+
+    // Warning note at bottom
+    QLabel *warningLabel = new QLabel(
+        tr("⚠️ Only clear cache when all notebooks are closed"),
+        cacheTab
+    );
+    warningLabel->setAlignment(Qt::AlignCenter);
+    warningLabel->setStyleSheet("font-size: 11px; color: #e74c3c; font-weight: bold;");
+    layout->addWidget(warningLabel);
+
+    // Add stretch to push everything to the top
+    layout->addStretch();
+
+    tabWidget->addTab(cacheTab, tr("Cache"));
+}
+
+
+void ControlPanelDialog::createLanguageTab() {
+    languageTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(languageTab);
+    
+    // Add some spacing at the top
+    layout->addSpacing(10);
+    
+    // Title and description
+    QLabel *titleLabel = new QLabel(tr("Language Settings"), languageTab);
+    titleLabel->setStyleSheet("font-size: 16px; font-weight: bold;");
+    layout->addWidget(titleLabel);
+    
+    layout->addSpacing(10);
+    
+    // Use system language checkbox
+    useSystemLanguageCheckbox = new QCheckBox(tr("Use System Language (Auto-detect)"), languageTab);
+    layout->addWidget(useSystemLanguageCheckbox);
+    
+    QLabel *systemNote = new QLabel(tr("When enabled, SpeedyNote will automatically detect and use your system's language setting."), languageTab);
+    systemNote->setWordWrap(true);
+    systemNote->setStyleSheet("color: gray; font-size: 11px; margin-bottom: 15px;");
+    layout->addWidget(systemNote);
+    
+    // Manual language selection
+    QLabel *manualLabel = new QLabel(tr("Manual Language Override:"), languageTab);
+    manualLabel->setStyleSheet("font-weight: bold;");
+    layout->addWidget(manualLabel);
+    
+    // Read saved language settings once — used both for combo population (so
+    // a saved-but-uninstalled language still appears) and for initial state.
+    QSettings settings(QStringLiteral("SpeedyNote"), QStringLiteral("App"));
+    const bool useSystemLang   = settings.value(QStringLiteral("useSystemLanguage"), true).toBool();
+    const QString overrideLang = settings.value(QStringLiteral("languageOverride"),
+                                                QStringLiteral("en")).toString();
+
+    languageCombo = new QComboBox(languageTab);
+    for (const auto& lang : discoverAvailableLanguages(overrideLang)) {
+        languageCombo->addItem(lang.displayName, lang.code);
+        if (!lang.installed) {
+            // Grey out the "not installed" entry but still allow selection so the
+            // user can see their saved choice and can change it.
+            const int idx = languageCombo->count() - 1;
+            languageCombo->setItemData(idx, QColor(Qt::gray), Qt::ForegroundRole);
+        }
+    }
+    useSystemLanguageCheckbox->setChecked(useSystemLang);
+    languageCombo->setEnabled(!useSystemLang);
+    const int savedIdx = languageCombo->findData(overrideLang);
+    if (savedIdx >= 0) languageCombo->setCurrentIndex(savedIdx);
+    layout->addWidget(languageCombo);
+    
+    QLabel *manualNote = new QLabel(tr("Select a specific language to override the system setting. Changes take effect after restarting the application."), languageTab);
+    manualNote->setWordWrap(true);
+    manualNote->setStyleSheet("color: gray; font-size: 11px; margin-bottom: 15px;");
+    layout->addWidget(manualNote);
+    
+    // Current language status
+    QLabel *statusLabel = new QLabel(tr("Current Language Status:"), languageTab);
+    statusLabel->setStyleSheet("font-weight: bold; margin-top: 20px;");
+    layout->addWidget(statusLabel);
+    
+    // Show current language
+    const QString currentLocale = QLocale::system().name();
+    const QString currentLangCode = currentLocale.section('_', 0, 0);
+    QString currentLangName = buildDisplayName(currentLangCode);
+    if (currentLangName == currentLangCode) {
+        currentLangName = tr("Unknown");
+    }
+    
+    QLabel *currentLabel = new QLabel(tr("System Language: %1 (%2)").arg(currentLangName).arg(currentLocale), languageTab);
+    currentLabel->setStyleSheet("margin-left: 10px;");
+    layout->addWidget(currentLabel);
+    
+    // Connect checkbox to enable/disable combo
+    connect(useSystemLanguageCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
+        languageCombo->setEnabled(!checked);
+    });
+
+    // === Handwriting Recognition Language ===
+    layout->addSpacing(20);
+
+    QLabel *ocrTitle = new QLabel(tr("Handwriting Recognition Language"), languageTab);
+    ocrTitle->setStyleSheet("font-size: 14px; font-weight: bold;");
+    layout->addWidget(ocrTitle);
+
+    layout->addSpacing(5);
+
+    QLabel *ocrDesc = new QLabel(
+        tr("Default language for OCR handwriting recognition. Individual documents can override this in the overflow menu."),
+        languageTab);
+    ocrDesc->setWordWrap(true);
+    ocrDesc->setStyleSheet("color: gray; font-size: 11px; margin-bottom: 10px;");
+    layout->addWidget(ocrDesc);
+
+    ocrLanguageCombo = new QComboBox(languageTab);
+    {
+        const bool autoDetect = mainWindowRef ? mainWindowRef->ocrSupportsAutoLanguage() : true;
+        ocrLanguageCombo->addItem(MainWindow::ocrAutoLanguageLabel(autoDetect), QString());
+        ocrLanguageCombo->setItemData(0, MainWindow::ocrAutoLanguageTooltip(autoDetect),
+                                      Qt::ToolTipRole);
+    }
+    if (mainWindowRef) {
+        const QStringList langs = mainWindowRef->ocrAvailableLanguages();
+        const QStringList downloaded = mainWindowRef->ocrDownloadedLanguages();
+        for (const auto& lang : langs) {
+            // Friendly name from the BCP-47 tag, e.g. "Russian (ru-RU)".
+            const QLocale loc(lang);
+            const QString name = QLocale::languageToString(loc.language());
+            QString label = (name.isEmpty() || name == QLatin1String("C"))
+                                ? lang
+                                : tr("%1 (%2)").arg(name, lang);
+            // Flag languages whose recognition model is not present yet (Linux
+            // PaddleOCR fetches it on first use). Guard against an empty
+            // downloaded list (not yet reported) to avoid falsely flagging all.
+            if (!downloaded.isEmpty() && !downloaded.contains(lang))
+                label += tr(" - needs download");
+            ocrLanguageCombo->addItem(label, lang);
+        }
+    }
+    layout->addWidget(ocrLanguageCombo);
+
+    if (mainWindowRef) {
+        QSettings settings("SpeedyNote", "App");
+        QString savedOcrLang = settings.value("ocrLanguage").toString();
+        int ocrIdx = ocrLanguageCombo->findData(savedOcrLang);
+        if (ocrIdx >= 0)
+            ocrLanguageCombo->setCurrentIndex(ocrIdx);
+    }
+
+    // Add stretch to push everything to the top
+    layout->addStretch();
+    
+    tabWidget->addTab(languageTab, tr("Language"));
+}
+
+
+// ===== Stylus Tab (Linux Only) =====
+
+#ifdef Q_OS_LINUX
+void ControlPanelDialog::createStylusTab() {
+    stylusTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(stylusTab);
+    
+    // Palm rejection section
+    QLabel *palmRejectionSectionLabel = new QLabel(tr("Palm Rejection"), stylusTab);
+    palmRejectionSectionLabel->setStyleSheet("font-weight: bold; font-size: 14px;");
+    layout->addWidget(palmRejectionSectionLabel);
+    
+    palmRejectionCheckbox = new QCheckBox(tr("Disable touch gestures when stylus is active"), stylusTab);
+    palmRejectionCheckbox->setChecked(mainWindowRef->isPalmRejectionEnabled());
+    layout->addWidget(palmRejectionCheckbox);
+    
+    // Delay spinbox row
+    QHBoxLayout *palmDelayLayout = new QHBoxLayout();
+    QLabel *palmDelayLabel = new QLabel(tr("Restore delay:"), stylusTab);
+    palmRejectionDelaySpinBox = new QSpinBox(stylusTab);
+    palmRejectionDelaySpinBox->setRange(0, 5000);
+    palmRejectionDelaySpinBox->setSingleStep(100);
+    palmRejectionDelaySpinBox->setSuffix(" ms");
+    palmRejectionDelaySpinBox->setValue(mainWindowRef->getPalmRejectionDelay());
+    palmRejectionDelaySpinBox->setEnabled(palmRejectionCheckbox->isChecked());
+    palmDelayLayout->addWidget(palmDelayLabel);
+    palmDelayLayout->addWidget(palmRejectionDelaySpinBox);
+    palmDelayLayout->addStretch();
+    layout->addLayout(palmDelayLayout);
+    
+    QLabel *palmRejectionNote = new QLabel(
+        tr("When enabled, touch gestures are temporarily disabled while the stylus is "
+           "hovering or touching the screen. After the stylus leaves, touch gestures are "
+           "restored after the specified delay.\n\n"
+           "This helps prevent accidental palm touches while writing. "
+           "Only affects Y-Axis Only and Full touch gesture modes."), stylusTab);
+    palmRejectionNote->setWordWrap(true);
+    palmRejectionNote->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(palmRejectionNote);
+    
+    // Connect checkbox to enable/disable delay spinbox
+    connect(palmRejectionCheckbox, &QCheckBox::toggled, palmRejectionDelaySpinBox, &QSpinBox::setEnabled);
+    
+    // Apply settings immediately when changed
+    connect(palmRejectionCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
+        mainWindowRef->setPalmRejectionEnabled(checked);
+    });
+    
+    connect(palmRejectionDelaySpinBox, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        mainWindowRef->setPalmRejectionDelay(value);
+    });
+    
+    layout->addStretch();
+    tabWidget->addTab(stylusTab, tr("Stylus"));
+}
+#endif
+
+/*
+// ===== Compatibility Tab =====
+
+void ControlPanelDialog::createCompatibilityTab() {
+    compatibilityTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(compatibilityTab);
+    
+    // Add some spacing at the top
+    layout->addSpacing(10);
+    
+    // Title and description
+    QLabel *titleLabel = new QLabel(tr("Compatibility Features"), compatibilityTab);
+    titleLabel->setStyleSheet("font-size: 16px; font-weight: bold;");
+    layout->addWidget(titleLabel);
+    
+    layout->addSpacing(10);
+    
+    // Folder selection section
+    QLabel *folderSectionLabel = new QLabel(tr("Manual Folder Selection"), compatibilityTab);
+    folderSectionLabel->setStyleSheet("font-size: 14px; font-weight: bold;");
+    layout->addWidget(folderSectionLabel);
+    
+    QLabel *folderDescriptionLabel = new QLabel(tr("This feature allows you to manually select a save folder for your notes. "
+                                                  "SpeedyNote uses .snb folder bundles for notebook storage."), compatibilityTab);
+    folderDescriptionLabel->setWordWrap(true);
+    folderDescriptionLabel->setStyleSheet("font-size: 11px; margin-bottom: 10px;");
+    layout->addWidget(folderDescriptionLabel);
+    
+    // Folder selection button
+    selectFolderCompatibilityButton = new QPushButton(tr("Select Save Folder"), compatibilityTab);
+    selectFolderCompatibilityButton->setIcon(QIcon(":/resources/icons/folder.png"));
+    selectFolderCompatibilityButton->setMinimumHeight(40);
+    selectFolderCompatibilityButton->setStyleSheet(
+        "QPushButton {"
+        "    background-color: #3498db;"
+        "    color: white;"
+        "    border: none;"
+        "    padding: 8px 16px;"
+        "    border-radius: 4px;"
+        "    font-weight: bold;"
+        "}"
+        "QPushButton:hover {"
+        "    background-color: #2980b9;"
+        "}"
+        "QPushButton:pressed {"
+        "    background-color: #21618c;"
+        "}"
+    );
+    
+    connect(selectFolderCompatibilityButton, &QPushButton::clicked, this, &ControlPanelDialog::selectFolderCompatibility);
+    layout->addWidget(selectFolderCompatibilityButton);
+    
+    // Warning note
+    QLabel *warningLabel = new QLabel(tr("⚠️ Note: Make sure to select a folder that is empty or an old folder-based notebook. Otherwise, data may be lost."), compatibilityTab);
+    warningLabel->setWordWrap(true);
+    warningLabel->setStyleSheet("color: #e67e22; font-size: 10px; font-weight: bold; margin-top: 10px; "
+                               "background-color: #fef9e7; padding: 8px; border-radius: 4px; border: 1px solid #f39c12;");
+    layout->addWidget(warningLabel);
+    
+    // Add stretch to push everything to the top
+    layout->addStretch();
+    
+    tabWidget->addTab(compatibilityTab, tr("Compatibility"));
+}
+
+void ControlPanelDialog::selectFolderCompatibility() {
+    if (!mainWindowRef) {
+        QMessageBox::warning(this, tr("Error"), tr("MainWindow reference not available."));
+        return;
+    }
+    
+    // Call the existing selectFolder method from MainWindow
+    bool success = mainWindowRef->selectFolder();
+    
+    if (success) {
+        // Show a confirmation message only if successful
+        QMessageBox::information(this, tr("Folder Selection"), 
+            tr("Folder selection completed successfully. You can now start taking notes in the selected folder."));
+    } else {
+        // Show appropriate message for cancellation
+        QMessageBox::information(this, tr("Folder Selection Cancelled"), 
+            tr("Folder selection was cancelled. No changes were made."));
+    }
+}
+
+void ControlPanelDialog::detectStylusButton(bool isButtonA) {
+    // Create a simple dialog that waits for a stylus button press
+    QDialog detectDialog(this);
+    detectDialog.setWindowTitle(isButtonA ? tr("Detect Button A") : tr("Detect Button B"));
+    detectDialog.setFixedSize(350, 200);
+    
+    QVBoxLayout *layout = new QVBoxLayout(&detectDialog);
+    
+    QLabel *instructionLabel = new QLabel(
+        tr("Press and hold a stylus side button on your tablet surface.\n\n"
+           "The button you press will be assigned to '%1'.\n\n"
+           "Press Cancel to abort.")
+            .arg(isButtonA ? tr("Button A") : tr("Button B")), 
+        &detectDialog);
+    instructionLabel->setAlignment(Qt::AlignCenter);
+    instructionLabel->setWordWrap(true);
+    layout->addWidget(instructionLabel);
+    
+    QLabel *statusLabel = new QLabel(tr("Waiting for stylus button press..."), &detectDialog);
+    statusLabel->setAlignment(Qt::AlignCenter);
+    statusLabel->setStyleSheet("font-weight: bold; color: #3498db;");
+    layout->addWidget(statusLabel);
+    
+    QPushButton *cancelButton = new QPushButton(tr("Cancel"), &detectDialog);
+    layout->addWidget(cancelButton);
+    
+    Qt::MouseButton detectedButton = Qt::NoButton;
+    
+    // Install event filter to catch tablet events
+    class TabletEventFilter : public QObject {
+    public:
+        Qt::MouseButton &detectedButton;
+        QDialog *dialog;
+        QLabel *statusLabel;
+        bool isButtonA;
+        
+        TabletEventFilter(Qt::MouseButton &btn, QDialog *dlg, QLabel *lbl, bool btnA) 
+            : detectedButton(btn), dialog(dlg), statusLabel(lbl), isButtonA(btnA) {}
+        
+        bool eventFilter(QObject *obj, QEvent *event) override {
+            if (event->type() == QEvent::TabletPress) {
+                QTabletEvent *tabletEvent = static_cast<QTabletEvent*>(event);
+                Qt::MouseButtons buttons = tabletEvent->buttons();
+                
+                // Check for side button press (not just tip)
+                if (buttons & Qt::MiddleButton) {
+                    detectedButton = Qt::MiddleButton;
+                    statusLabel->setText(QObject::tr("Detected: Middle Button"));
+                    statusLabel->setStyleSheet("font-weight: bold; color: #27ae60;");
+                    QTimer::singleShot(500, dialog, &QDialog::accept);
+                    return true;
+                } else if (buttons & Qt::RightButton) {
+                    detectedButton = Qt::RightButton;
+                    statusLabel->setText(QObject::tr("Detected: Right Button"));
+                    statusLabel->setStyleSheet("font-weight: bold; color: #27ae60;");
+                    QTimer::singleShot(500, dialog, &QDialog::accept);
+                    return true;
+                }
+            }
+            return QObject::eventFilter(obj, event);
+        }
+    };
+    
+    TabletEventFilter *filter = new TabletEventFilter(detectedButton, &detectDialog, statusLabel, isButtonA);
+    detectDialog.installEventFilter(filter);
+    
+    connect(cancelButton, &QPushButton::clicked, &detectDialog, &QDialog::reject);
+    
+    int result = detectDialog.exec();
+    
+    delete filter;
+    
+    if (result == QDialog::Accepted && detectedButton != Qt::NoButton) {
+        // Update the appropriate button mapping
+        if (isButtonA) {
+            mainWindowRef->setStylusButtonAQt(detectedButton);
+            QString buttonName = (detectedButton == Qt::MiddleButton) ? tr("Middle") : tr("Right");
+            stylusButtonALabel->setText(tr("Button A (%1):").arg(buttonName));
+        } else {
+            mainWindowRef->setStylusButtonBQt(detectedButton);
+            QString buttonName = (detectedButton == Qt::MiddleButton) ? tr("Middle") : tr("Right");
+            stylusButtonBLabel->setText(tr("Button B (%1):").arg(buttonName));
+        }
+        
+        QMessageBox::information(this, tr("Button Detected"), 
+            tr("Stylus button successfully detected and assigned to %1.")
+                .arg(isButtonA ? tr("Button A") : tr("Button B")));
+    }
+}
+
+*/

@@ -1,0 +1,174 @@
+#include "ExpandableToolButton.h"
+
+#include <QHBoxLayout>
+#include <QPainter>
+#include <QPainterPath>
+#include <QTimer>
+#include <QVariant>
+
+ExpandableToolButton::ExpandableToolButton(QWidget* parent)
+    : QWidget(parent)
+{
+    m_mainLayout = new QHBoxLayout(this);
+    m_mainLayout->setContentsMargins(0, 0, 0, 0);
+    m_mainLayout->setSpacing(CONTENT_SPACING);
+
+    m_toolButton = new ToolButton(this);
+    m_toolButton->setProperty("inExpandable", QVariant(true));
+    m_mainLayout->addWidget(m_toolButton);
+
+    setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    setFixedHeight(36);
+
+    m_collapseTimer = new QTimer(this);
+    m_collapseTimer->setSingleShot(true);
+    connect(m_collapseTimer, &QTimer::timeout, this, [this]() {
+        if (m_hoverExpand)
+            setExpanded(false);
+    });
+
+    m_expandTimer = new QTimer(this);
+    m_expandTimer->setSingleShot(true);
+    connect(m_expandTimer, &QTimer::timeout, this, [this]() {
+        if (m_hoverExpand)
+            setExpanded(true);
+    });
+
+    connect(m_toolButton, &ToolButton::clicked, this, [this]() {
+        if (m_hoverExpand) {
+            m_expandTimer->stop();
+            setExpanded(!m_expanded);
+        }
+    });
+}
+
+void ExpandableToolButton::setContentWidget(QWidget* widget)
+{
+    if (m_contentWidget && m_contentWidget != widget) {
+        m_mainLayout->removeWidget(m_contentWidget);
+        delete m_contentWidget;
+    }
+
+    m_contentWidget = widget;
+
+    if (m_contentWidget) {
+        m_contentWidget->setParent(this);
+        m_mainLayout->addWidget(m_contentWidget);
+        m_contentWidget->setVisible(m_expanded);
+    }
+}
+
+void ExpandableToolButton::setExpanded(bool expanded)
+{
+    if (m_expanded == expanded)
+        return;
+
+    m_expanded = expanded;
+    updateContentVisibility();
+    updateGeometry();
+    emit expandedChanged(expanded);
+}
+
+void ExpandableToolButton::setThemedIcon(const QString& baseName)
+{
+    m_toolButton->setThemedIcon(baseName);
+}
+
+void ExpandableToolButton::setDarkMode(bool darkMode)
+{
+    m_darkMode = darkMode;
+    m_toolButton->setDarkMode(darkMode);
+    update();
+}
+
+QSize ExpandableToolButton::sizeHint() const
+{
+    int w = 36;
+    // Deliberately not m_contentWidget->isVisible(): while this button sits on
+    // the toolbar's off-screen page every ancestor is hidden, and reporting an
+    // expanded button as collapsed would make the width that drives paging
+    // oscillate. m_expanded already tracks the state on its own.
+    if (m_expanded && m_contentWidget) {
+        w += CONTENT_SPACING + m_contentWidget->sizeHint().width();
+    }
+    return QSize(w, 36);
+}
+
+QSize ExpandableToolButton::minimumSizeHint() const
+{
+    return sizeHint();
+}
+
+void ExpandableToolButton::paintEvent(QPaintEvent* event)
+{
+    Q_UNUSED(event);
+
+    if (!m_expanded)
+        return;
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    QRectF bgRect = QRectF(rect()).adjusted(1, 2, -1, -2);
+    QPainterPath path;
+    path.addRoundedRect(bgRect, BORDER_RADIUS, BORDER_RADIUS);
+
+    // Draw shadow / glow (two passes for softness)
+    for (int i = 2; i >= 1; --i) {
+        QPainterPath shadowPath;
+        QRectF shadowRect = bgRect.adjusted(-i, i, i, i);
+        shadowPath.addRoundedRect(shadowRect, BORDER_RADIUS + i, BORDER_RADIUS + i);
+        painter.setPen(Qt::NoPen);
+        if (m_darkMode) {
+            painter.setBrush(QColor(255, 255, 255, 15 + i * 5));
+        } else {
+            painter.setBrush(QColor(0, 0, 0, 15 + i * 5));
+        }
+        painter.drawPath(shadowPath);
+    }
+
+    // Draw background with subtle border
+    if (m_darkMode) {
+        painter.setPen(QPen(QColor(255, 255, 255, 30), 0.5));
+        painter.setBrush(QColor(0, 0, 0));
+    } else {
+        painter.setPen(QPen(QColor(0, 0, 0, 25), 0.5));
+        painter.setBrush(QColor(255, 255, 255));
+    }
+    painter.drawPath(path);
+}
+
+void ExpandableToolButton::setHoverExpand(bool enabled)
+{
+    m_hoverExpand = enabled;
+    setAttribute(Qt::WA_Hover, enabled);
+}
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+void ExpandableToolButton::enterEvent(QEnterEvent* event)
+#else
+void ExpandableToolButton::enterEvent(QEvent* event)
+#endif
+{
+    if (m_hoverExpand) {
+        m_collapseTimer->stop();
+        m_expandTimer->start(EXPAND_DELAY_MS);
+    }
+    QWidget::enterEvent(event);
+}
+
+void ExpandableToolButton::leaveEvent(QEvent* event)
+{
+    if (m_hoverExpand) {
+        m_expandTimer->stop();
+        m_collapseTimer->start(COLLAPSE_DELAY_MS);
+    }
+    QWidget::leaveEvent(event);
+}
+
+void ExpandableToolButton::updateContentVisibility()
+{
+    if (m_contentWidget) {
+        m_contentWidget->setVisible(m_expanded);
+    }
+}

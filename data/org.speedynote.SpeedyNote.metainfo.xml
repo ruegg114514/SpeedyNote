@@ -1,0 +1,495 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<component type="desktop-application">
+  <id>org.speedynote.SpeedyNote</id>
+
+  <name>SpeedyNote</name>
+  <summary>Fast stylus note-taking app</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+
+  <developer id="org.speedynote">
+    <name>SpeedyNote Team</name>
+  </developer>
+
+  <description>
+    <p>
+      SpeedyNote is a fast, open-source note-taking application designed for
+      stylus users who need iPad-quality annotation on budget hardware. Built
+      with native C++ and Qt, it delivers 360Hz stylus input on hardware as
+      modest as an Intel Celeron N4000 at 1.1GHz — with no Electron bloat.
+    </p>
+    <p>
+      Annotate PDFs with pressure-sensitive inking tools including pen, marker,
+      and highlighter, all rendered as vector strokes that zoom infinitely
+      without pixelation. Organize your work with multi-layer editing, paged
+      notebooks, or infinite edgeless canvases with lazy-loading tiles.
+    </p>
+    <p>Key features include:</p>
+    <ul>
+      <li>Instant PDF loading with clickable internal links and outline navigation</li>
+      <li>Multi-layer editing with add, delete, reorder, and merge operations</li>
+      <li>Touch gestures: two-finger pan, pinch-to-zoom, and palm rejection</li>
+      <li>Cross-platform note sharing via .snbx notebook packages</li>
+      <li>Powerful command-line interface for batch PDF export and notebook management</li>
+      <li>Multi-tab editing to work on multiple documents simultaneously</li>
+      <li>Auto-save so you never lose work</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">org.speedynote.SpeedyNote.desktop</launchable>
+
+  <screenshots>
+    <screenshot type="default">
+      <image>https://i.imgur.com/mTpp0xk.png</image>
+      <caption>SpeedyNote pressure-sensitive stylus tools</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://i.imgur.com/dzSVHki.png</image>
+      <caption>SpeedyNote PDF Annotations</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://i.imgur.com/V2D8rPl.png</image>
+      <caption>SpeedyNote CLI support</caption>
+    </screenshot>
+  </screenshots>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#9a9bba</color>
+    <color type="primary" scheme_preference="dark">#454666</color>
+  </branding>
+
+  <url type="homepage">https://www.speedynote.org</url>
+  <url type="bugtracker">https://github.com/alpha-liu-01/SpeedyNote/issues</url>
+  <url type="vcs-browser">https://github.com/alpha-liu-01/SpeedyNote</url>
+  <url type="donation">https://buymeacoffee.com/alphaliu01</url>
+
+  <provides>
+    <binary>speedynote</binary>
+  </provides>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+
+  <content_rating type="oars-1.1"/>
+
+
+  <releases type="embedded">
+    <release version="1.6.3" date="2026-09-03">
+      <description>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that the add page button below the last page could cause undefined behavior when tapped by a finger, and not respond to stylus input at all.</li>
+          <li>Fixed the problem that the missing pdf banner could not respond to stylus input, and physically shift during a viewport scroll.</li>
+          <li>Fixed the problem that text annotations could be moved with the ObjectSelect tool.</li>
+          <li>Fixed the problem that the PDF exporting tab would still show up right after an edgeless document was exported before saving, causing an invalid pdf range error.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.6.2" date="2026-09-02">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Added OCR options into the current document settings override panel.</li>
+          <li>Added a confidence marker option to the OCR text overlay.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that the number of matches did not display correctly in edgeless mode.</li>
+          <li>Fixed the problem that the colored markers on the scroll bar was not updated when a URL link or a markdown note was added to one of the slots.</li>
+          <li>Fixed the problem that the scroll bars still hide themselves when the cursor is floating over them.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.6.1" date="2026-09-01">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Added a new right click menu for LinkObjects for copying text and deleting the LinkObject.</li>
+          <li>Extra add page button positioned below the last page in paged mode.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Corrected the behavior of the copy button on the object select action bar so that it copies the text of the annotation, instead of the linkobject itself.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.6.0" date="2026-08-31">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>New LinkObject/Highlighter UX with region style selection, color override, and region selection.</li>
+          <li>New position link object feature to link to a specific position in a document.</li>
+          <li>Region outside of pages in paged mode now acts as the pan tool when any tool is selected.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Repositioned the LinkObjectBar to be more accessible and intuitive.</li>
+          <li>Repositioned the search button and the search bar for easier access.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.5.3" date="2026-08-28">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Trackpad axis autolock feature to prevent accidental horizontal scrolling Mac touchpads.</li>
+          <li>New performance overlay for the viewport to show the frame rate and memory usage. Press F10 to toggle.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Vastly improved long stroke rendering performance.</li>
+          <li>Adjusted stylesheet of the text box format bar for better visibility and accessibility.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.5.2" date="2026-08-21">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Completely redesigned text box feature with WYSIWYG editing, markdown support, and OCR conversion.</li>
+          <li>New multi-source PDF relinking/management feature to handle multiple PDFs in a single document.</li>   
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Vastly improved picture inserting performance.</li>
+          <li>Made each scroll bar hide and show ondemand.</li>
+          <li>Combined the export to PDF and .snbx features into a single export dialog.</li>
+          <li>3 Separate buttons for text box, link object and image object insertion.</li>
+          <li>Fixed the problem that a starred document in the launcher lost its star after a name change.</li>
+          <li>Updated the Object insertion UX to be more consistent and intuitive (right click to create and left click to select, with an alternate mapping toggle) </li>
+          <li>Automatically resize the inserted images to fit within a page / tile on insertion.</li>
+          <li>Made the page wheel picker support wheel input.</li>
+          <li>Fixed the problem that the onnxruntime model download script always downloaded the amd64 version of the models on ARM64 systems.</li>
+          <li>Removed obsolete SDL2 and DocumentConverter code from the codebase.</li>
+          <li>Fixed the problem that InsertedObjects could be moved outside a page and could never be selected again.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.5.1" date="2026-07-18">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Page wheel picker is now positioned right next to the handle on the scroll bar to be more accessible.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Vastly improved the scrolling performance of the viewport with non-blocking PDF rendering during scrolls.</li>
+          <li>Made the scroll bars hidden in edgeless mode.</li>
+          <li>Fixed the problem that the viewport scroll bar handle was not updated when the user clicks on a color marker of a LinkObject.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.5.0" date="2026-07-16">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Multi-PDF support: import pages from multiple PDFs into a single document, navigate between them with outline navigation, and export mixed-source PDFs with combined outlines.</li>
+          <li>New per-document settings override panel.</li>
+          <li>New search markers feature for highlighting search results on the viewport.</li>
+          <li>New per-viewport scroll bar with document map and search/LinkObject markers for better navigation and highlighting of search results.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the search next behavior so that it scrolls the viewport to the next search result and ensures the keyword is in the viewport.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.4.9" date="2026-07-07">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Added a per-document settings override panel.</li>
+          <li>Added color and thickness preset cycle keyboard shortcuts.</li>
+          <li>New auto-switch tool for object-mode and highlighter shortcuts.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the page eviction/preload thrashing issue when the user edited pages in a document with pictures inserted.</li>
+          <li>Fixed the problem that images could sometimes fail to be copied to the .snb folder.</li>
+          <li>Fixed the problem that undo/redo features did not work well with multiple stroke layers.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.4.8" date="2026-06-04">
+      <description>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that not both pages were OCR'd when the user wrote on both before a scan.</li>
+          <li>Fixed the problem that the OCR scanning button on the subtoolbar only scanned one page.</li>
+          <li>Fixed the problem that the font size on the OCR text overlay could be too big to fix in on the overlay.</li>
+          <li>Disabled grid snapping unless CJK grid snapping is enabled to increase accuracy..</li>
+          <li>Fixed the problem that all characters of a word could stack together on the OCR text overlay when line snapping was not enabled on the Mac version.</li>
+          <li>Fixed the problem that erasing didn't trigger an OCR text update.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.4.7" date="2026-06-02">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Handwriting OCR on Linux: recognize handwritten notes locally and on-device using PaddleOCR, with support for Latin scripts, Chinese, Japanese, and Korean.</li>
+          <li>Added a 2-column option for the page panel on the left sidebar.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that pages with very high vertical resolution were not rendered.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.4.6" date="2026-05-18">
+      <description>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Increased the precision of the PDF text extraction so that single characters can be selected and copied.</li>
+          <li>Fixed the problem that the save document dialog was displayed when no changes were made to the document.</li>
+          <li>Fixed the problem that the Qt standard button translations were not applied.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.4.5" date="2026-05-11">
+      <description>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that the stroke could be pixelated at high zoom levels.</li>
+          <li>Fixed the problem that selected pen, marker and eraser presets were not persistently saved.</li>
+          <li>Fixed the problem that German and Portuguese translation files were not included in the release package.</li>
+        </ul>
+      </description>
+    </release>
+  <release version="1.4.4" date="2026-05-04">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>New French, Spanish, German and Portuguese translations.</li>
+          <li>Color override option for the lasso tool.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that closing one panel of the viewport split resulted in the pane being blank instead of merging with the other pane.</li>
+          <li>Fixed the problem that a lot of file pickers were opened (resulting a crash) when inserting an image with a stylus on ChromeOS Crostini.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.4.3" date="2026-04-30">
+      <description>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that deleting a markdown note of a LinkObject resulted in a "missing note" placeholder on the right sidebar.</li>
+          <li>Enabled the cached OCR text boxes on unsupported systems.</li>
+          <li>Updated the tab bar sizing and auto-hide behavior.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.4.2" date="2026-04-22">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Persistent by-page and by-LinkObject markdown note outline on the right sidebar, enabling viewing and navigating to all markdown notes without loading all the pages or tiles.</li>
+          <li>Adjustable right sidebar width.</li>
+          <li>Per-thickness-preset minimum stroke width for the pen tool.</li>
+          <li>New highlighter styles (Cover, Underline, Dotted underline) for the highlighter tool.</li>
+          <li>New keyboard shortcuts for the highlighter tool and the OCR features.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.4.1" date="2026-04-13">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Customizable text color of the on-canvas text box.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that auto OCR feature was not responsive.</li>
+          <li>Fixed the problem that the scan all button doesn't scan the pages that are not currently loaded.</li>
+          <li>Fixed the problem that the text box visibility was not updated when the user scrolls the viewport.</li>
+          <li>Corrected the affinity of the OCR text boxes.</li>
+          <li>Fixed a positioning issue when a text box is initially created across multiple tiles in edgeless mode.</li>
+          <li>Fixed the problem that the text editor might not show up properly when the user double clicks on a text box.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.4.0" date="2026-04-11">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>New on-canvas text box feature that supports markdown rich text editing. Ctrl+F shortcut to search for text in the text box.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that the image assets might be deleted randomly in edgeless mode.</li>
+          <li>Fixed another thumbnail renderer memory leak.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.3.5" date="2026-03-26">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Customizable mouse wheel sensitivity for the viewport scrolling.</li>
+          <li>New lasso eraser tool for erasing strokes with a lasso selection.</li>
+          <li>Adjustable left sidebar width.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that the outline panel showed non-displayable characters.</li>
+          <li>Fixed a thumbnail renderer memory leak.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.3.4" date="2026-03-26">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>New hand tool for panning the viewport around without using the mouse wheel or touchscreen.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that copying and pasting strokes or inserted objects from the left pane to the right pane did not work.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.3.3" date="2026-03-22">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Adjustable minimum stroke width for the pen tool.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the problem that the caps of exported marker strokes had incorrect opacity.</li>
+          <li>Modified the iPadOS version build script to support building on ARM64 Macs.</li>
+          <li>Fixed the problem that the registry was not cleaned up after uninstalling the app on Windows.</li>
+          <li>Fixed a keyboard shortcut conflict.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.3.2" date="2026-03-19">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Viewport split support in mainwindow for multi-document editing.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.3.1" date="2026-03-14">
+      <description>
+        <p>New features:</p>
+        <ul>
+          <li>New PDF dark mode rendering option with image region detection bypass.</li>
+          <li>PDF dark mode rendering and stroke darkening options for PDF export.</li>
+          <li>Extended drag-and-drop support for .PDF and .snb bundles.</li>
+          <li>New session restore feature for restoring previous sessions.</li>
+          <li>New inserted image aspect ratio lock option.</li>
+          <li>Detailed translation guide for contributing translations.</li>
+        </ul>
+        <p>Bug fixes and improvements:</p>
+        <ul>
+          <li>Fixed the subpixel positioning mismatch between the stroke preview and the actual stroke.</li>
+          <li>Fixed the subpixel rendering issues on inserted images.</li>
+          <li>Fixed the problem that the markdown note entries were not copyable or displayed and sized correctly on the sidebar.</li>
+          <li>Fixed the inconsistencies when relinking a PDF document to one that already has a PDF loaded.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.3.0" date="2026-02-28">
+      <description>
+        <p>Bug fixes and improvements:</p>
+        <ul>
+          <li>Added a lock option to the page panel action bar.</li>
+          <li>Integrated the subtoolbars into the tool buttons.</li>
+          <li>Fixed the problem that a lasso-selected area could not be moved from one page to another.</li>
+          <li>Changed the undo stack of paged mode to a global stack.</li>
+          <li>Improved the frame rate of the outline panel.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.2.6" date="2026-02-24">
+      <description>
+        <p>Bug fixes and improvements:</p>
+        <ul>
+          <li>Fixed the problem that a selected inserted object stayed selected after switching to another tool.</li>
+          <li>Fixed the high RAM usage in high zoom levels.</li>
+          <li>Adjusted the default color palette for a nicer appearance and higher contrast.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.2.5" date="2026-02-20">
+      <description>
+        <p>Bug fixes and improvements:</p>
+        <ul>
+          <li>Fixed the problem that the size of the first page of a notebook did not match the settings.</li>
+          <li>Fixed the file dialogs so that they preserve the last used directory.</li>
+          <li>Fixed the problem that switching between the mainwindow and the launcher made the launcher window disappear.</li>
+          <li>Fixed the problem that the launcher window shifted down every time the user switched between the mainwindow and the launcher.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.2.4" date="2026-02-17">
+      <description>
+        <p>Bug fixes and improvements:</p>
+        <ul>
+          <li>Fixed the problem that lasso tool didn't clear the originally selected strokes.</li>
+          <li>Fixed some stylesheet issues.</li>
+          <li>Updated some icons.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.2.3" date="2026-02-15">
+      <description>
+        <p>New features:</p>
+        <ul>
+          <li>New palm rejection feature.</li>
+        </ul>
+        <p>Bug fixes and improvements:</p>
+        <ul>
+          <li>Fixed the problem that the strokes became stepped or could not be generated at all at very high zoom levels.</li>
+          <li>Fixed the eraser performance issues at high zoom levels.</li>
+          <li>Fixed the problem that the edgeless canvases could not show a thumbnail on the launcher.</li>
+          <li>Fixed the problem that the clipboard action bar was misaligned after folding the left sidebar in some cases.</li>
+          <li>Replaced the text icons on the object insertion subtoolbar description input popup with actual icons for UI consistency.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.2.2" date="2026-02-10">
+      <description>
+        <p>Bug fixes and improvements:</p>
+        <ul>
+          <li>New batch delete feature in the launcher</li>
+          <li>Improved the viewport scrolling performance on low-end devices</li>
+          <li>Optimized the stroke creation delay on low-end devices</li>
+          <li>Changed to a new .SVG icon on all platforms</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.2.1" date="2026-01-31">
+      <description>
+        <p>Bug fixes and improvements:</p>
+        <ul>
+          <li>Fixed tab switching causing jump to last page</li>
+          <li>Fixed PDF internal links broken on some versions</li>
+          <li>Fixed PDF text search highlight misalignment with inserted pages</li>
+          <li>Fixed starred view staying empty on first use</li>
+          <li>Migrated exclusively to MuPDF for all PDF operations, resolving library conflicts with Poppler</li>
+          <li>Fixed minor UI misalignments</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.2.0" date="2026-01-31">
+      <description>
+        <p>Major update with PDF text search, batch export to PDF and .snbx, command-line interface, and system notifications.</p>
+      </description>
+    </release>
+    <release version="1.1.6" date="2026-01-27">
+      <description>
+        <p>Bug fixes and stability improvements.</p>
+      </description>
+    </release>
+  </releases>
+
+</component>

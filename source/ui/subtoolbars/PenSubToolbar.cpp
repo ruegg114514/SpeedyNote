@@ -1,0 +1,439 @@
+#include "PenSubToolbar.h"
+#include "../widgets/ColorPresetButton.h"
+#include "../widgets/ThicknessPresetButton.h"
+
+#include <QPalette>
+#include <QSettings>
+#include <QColorDialog>
+
+// Static member definitions
+const QColor PenSubToolbar::DEFAULT_COLORS[NUM_PRESETS] = {
+    QColor(0xFF, 0x00, 0x00),  // Red
+    QColor(0x00, 0x00, 0xFF),  // Blue
+    QColor(0x00, 0x00, 0x00)   // Black
+};
+
+const QColor PenSubToolbar::DEFAULT_COLORS_DARK[NUM_PRESETS] = {
+    QColor(0xFF, 0x77, 0x55),  // Warm orange-red
+    QColor(0x66, 0xCC, 0xFF),  // Light blue
+    QColor(0xFF, 0xFF, 0xFF)   // White
+};
+
+const QString PenSubToolbar::SETTINGS_GROUP = "pen";
+const QString PenSubToolbar::KEY_COLOR_PREFIX = "color";
+const QString PenSubToolbar::KEY_THICKNESS_PREFIX = "thickness";
+const QString PenSubToolbar::KEY_MIN_WIDTH_PREFIX = "minWidth";
+const QString PenSubToolbar::KEY_SELECTED_COLOR = "selectedColor";
+const QString PenSubToolbar::KEY_SELECTED_THICKNESS = "selectedThickness";
+const QString PenSubToolbar::KEY_LEGACY_MIN_STROKE_WIDTH = "tools/minStrokeWidth";
+
+PenSubToolbar::PenSubToolbar(QWidget* parent)
+    : SubToolbar(parent)
+{
+    createWidgets();
+    setupConnections();
+    loadFromSettings();
+}
+
+void PenSubToolbar::createWidgets()
+{
+    // Create color preset buttons
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        m_colorButtons[i] = new ColorPresetButton(this);
+        m_colorButtons[i]->setColor(DEFAULT_COLORS[i]);
+        m_colorButtons[i]->setToolTip(tr("Color preset %1 (click to select, click again to edit)").arg(i + 1));
+        addWidget(m_colorButtons[i]);
+    }
+    
+    // Add separator between color and thickness
+    addSeparator();
+    
+    // Create thickness preset buttons
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        m_thicknessButtons[i] = new ThicknessPresetButton(this);
+        m_thicknessButtons[i]->setThickness(DEFAULT_THICKNESSES[i]);
+        m_thicknessButtons[i]->setToolTip(tr("Thickness preset %1 (click to select, click again to edit)").arg(i + 1));
+        addWidget(m_thicknessButtons[i]);
+    }
+    
+    // Update thickness preview colors to match selected color
+    updateThicknessPreviewColors();
+}
+
+void PenSubToolbar::setupConnections()
+{
+    // Color button connections
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        connect(m_colorButtons[i], &ColorPresetButton::clicked, this, [this, i]() {
+            onColorPresetClicked(i);
+        });
+        connect(m_colorButtons[i], &ColorPresetButton::editRequested, this, [this, i]() {
+            onColorEditRequested(i);
+        });
+    }
+    
+    // Thickness button connections
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        connect(m_thicknessButtons[i], &ThicknessPresetButton::clicked, this, [this, i]() {
+            onThicknessPresetClicked(i);
+        });
+        connect(m_thicknessButtons[i], &ThicknessPresetButton::editRequested, this, [this, i]() {
+            onThicknessEditRequested(i);
+        });
+    }
+}
+
+void PenSubToolbar::loadFromSettings()
+{
+    QSettings settings;
+    settings.beginGroup(SETTINGS_GROUP);
+    
+    // Choose defaults based on dark mode
+    bool darkMode = palette().color(QPalette::Window).lightness() < 128;
+    const QColor* defaults = darkMode ? DEFAULT_COLORS_DARK : DEFAULT_COLORS;
+    
+    // Load colors (use mode-appropriate defaults only when no user override)
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        QString key = KEY_COLOR_PREFIX + QString::number(i + 1);
+        if (settings.contains(key)) {
+            m_colorButtons[i]->setColor(settings.value(key).value<QColor>());
+        } else {
+            m_colorButtons[i]->setColor(defaults[i]);
+        }
+    }
+    
+    // Load thicknesses
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        QString key = KEY_THICKNESS_PREFIX + QString::number(i + 1);
+        qreal thickness = settings.value(key, DEFAULT_THICKNESSES[i]).toReal();
+        m_thicknessButtons[i]->setThickness(thickness);
+    }
+
+    // Load per-preset min widths. First-run migration: if no pen/minWidthN
+    // keys exist, inherit the legacy global `tools/minStrokeWidth` value
+    // (end users who tuned the old Control Panel setting don't lose their
+    // preference).  We probe the key at the root QSettings level because it
+    // lives outside the "pen" group.
+    {
+        settings.endGroup();  // exit "pen" group briefly
+        const qreal legacyMinWidth = settings.contains(KEY_LEGACY_MIN_STROKE_WIDTH)
+            ? settings.value(KEY_LEGACY_MIN_STROKE_WIDTH).toReal()
+            : DEFAULT_MIN_WIDTH;
+        settings.beginGroup(SETTINGS_GROUP);
+
+        for (int i = 0; i < NUM_PRESETS; ++i) {
+            const QString key = KEY_MIN_WIDTH_PREFIX + QString::number(i + 1);
+            const qreal raw = settings.value(key, legacyMinWidth).toReal();
+            const qreal preset = m_thicknessButtons[i]->thickness();
+            // Clamp into [0, thickness] so a previously-configured value
+            // can't exceed a subsequently-reduced preset thickness.
+            m_minWidths[i] = qBound(0.0, raw, preset);
+        }
+    }
+
+    // Load selections (in dark mode, default to index 2 = white instead of black)
+    int defaultColorIdx = darkMode ? 2 : 2;
+    m_selectedColorIndex = settings.value(KEY_SELECTED_COLOR, defaultColorIdx).toInt();
+    m_selectedThicknessIndex = settings.value(KEY_SELECTED_THICKNESS, 0).toInt();
+    
+    settings.endGroup();
+    
+    // Apply selections
+    selectColorPreset(m_selectedColorIndex);
+    selectThicknessPreset(m_selectedThicknessIndex);
+}
+
+void PenSubToolbar::saveToSettings()
+{
+    QSettings settings;
+    settings.beginGroup(SETTINGS_GROUP);
+    
+    // Save colors
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        QString key = KEY_COLOR_PREFIX + QString::number(i + 1);
+        settings.setValue(key, m_colorButtons[i]->color());
+    }
+    
+    // Save thicknesses
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        QString key = KEY_THICKNESS_PREFIX + QString::number(i + 1);
+        settings.setValue(key, m_thicknessButtons[i]->thickness());
+    }
+
+    // Save per-preset min widths
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        QString key = KEY_MIN_WIDTH_PREFIX + QString::number(i + 1);
+        settings.setValue(key, m_minWidths[i]);
+    }
+
+    // Save selections
+    settings.setValue(KEY_SELECTED_COLOR, m_selectedColorIndex);
+    settings.setValue(KEY_SELECTED_THICKNESS, m_selectedThicknessIndex);
+    
+    settings.endGroup();
+}
+
+void PenSubToolbar::saveSelectionToSettings()
+{
+    // Write ONLY the two index keys under the pen group. Cheap enough to
+    // call on every preset click; avoids the heavier saveToSettings() path
+    // (which re-writes every color, thickness, and per-preset min width).
+    QSettings settings;
+    settings.beginGroup(SETTINGS_GROUP);
+    settings.setValue(KEY_SELECTED_COLOR, m_selectedColorIndex);
+    settings.setValue(KEY_SELECTED_THICKNESS, m_selectedThicknessIndex);
+    settings.endGroup();
+}
+
+void PenSubToolbar::refreshFromSettings()
+{
+    loadFromSettings();
+}
+
+void PenSubToolbar::emitCurrentValues()
+{
+    // Emit the currently selected preset values to sync with viewport
+    if (m_selectedColorIndex >= 0 && m_selectedColorIndex < NUM_PRESETS) {
+        emit penColorChanged(m_colorButtons[m_selectedColorIndex]->color());
+    }
+    if (m_selectedThicknessIndex >= 0 && m_selectedThicknessIndex < NUM_PRESETS) {
+        emit penThicknessChanged(m_thicknessButtons[m_selectedThicknessIndex]->thickness());
+        emit penMinStrokeWidthChanged(m_minWidths[m_selectedThicknessIndex]);
+    }
+}
+
+QColor PenSubToolbar::currentColor() const
+{
+    if (m_selectedColorIndex >= 0 && m_selectedColorIndex < NUM_PRESETS && m_colorButtons[m_selectedColorIndex]) {
+        return m_colorButtons[m_selectedColorIndex]->color();
+    }
+    return DEFAULT_COLORS[0];  // Fallback to first default
+}
+
+qreal PenSubToolbar::currentThickness() const
+{
+    if (m_selectedThicknessIndex >= 0 && m_selectedThicknessIndex < NUM_PRESETS && m_thicknessButtons[m_selectedThicknessIndex]) {
+        return m_thicknessButtons[m_selectedThicknessIndex]->thickness();
+    }
+    return DEFAULT_THICKNESSES[0];  // Fallback to first default
+}
+
+qreal PenSubToolbar::currentMinStrokeWidth() const
+{
+    if (m_selectedThicknessIndex >= 0 && m_selectedThicknessIndex < NUM_PRESETS) {
+        return m_minWidths[m_selectedThicknessIndex];
+    }
+    return DEFAULT_MIN_WIDTH;
+}
+
+void PenSubToolbar::restoreTabState(int tabIndex)
+{
+    if (!m_tabStates.contains(tabIndex) || !m_tabStates[tabIndex].initialized) {
+        // No saved state for this tab - use current (global) values
+        return;
+    }
+    
+    const TabState& state = m_tabStates[tabIndex];
+    
+    // Restore colors
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        m_colorButtons[i]->setColor(state.colors[i]);
+    }
+    
+    // Restore thicknesses
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        m_thicknessButtons[i]->setThickness(state.thicknesses[i]);
+    }
+
+    // Restore per-preset min widths
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        m_minWidths[i] = qBound(0.0, state.minWidths[i], state.thicknesses[i]);
+    }
+
+    // Restore selections
+    selectColorPreset(state.selectedColorIndex);
+    selectThicknessPreset(state.selectedThicknessIndex);
+}
+
+void PenSubToolbar::saveTabState(int tabIndex)
+{
+    TabState& state = m_tabStates[tabIndex];
+    
+    // Save colors
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        state.colors[i] = m_colorButtons[i]->color();
+    }
+    
+    // Save thicknesses
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        state.thicknesses[i] = m_thicknessButtons[i]->thickness();
+    }
+
+    // Save per-preset min widths
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        state.minWidths[i] = m_minWidths[i];
+    }
+
+    // Save selections
+    state.selectedColorIndex = m_selectedColorIndex;
+    state.selectedThicknessIndex = m_selectedThicknessIndex;
+    state.initialized = true;
+}
+
+void PenSubToolbar::clearTabState(int tabIndex)
+{
+    m_tabStates.remove(tabIndex);
+}
+
+void PenSubToolbar::cycleColor()
+{
+    int start = qMax(0, m_selectedColorIndex);
+    onColorPresetClicked((start + 1) % NUM_PRESETS);
+}
+
+void PenSubToolbar::cycleThickness()
+{
+    int start = qMax(0, m_selectedThicknessIndex);
+    onThicknessPresetClicked((start + 1) % NUM_PRESETS);
+}
+
+void PenSubToolbar::onColorPresetClicked(int index)
+{
+    if (index < 0 || index >= NUM_PRESETS) return;
+
+    // Always apply the color when clicked - the preset might show as "selected"
+    // but the actual current color could be different (changed via other means)
+    const bool indexChanged = (m_selectedColorIndex != index);
+    selectColorPreset(index);
+
+    // Emit color change
+    emit penColorChanged(m_colorButtons[index]->color());
+
+    // Persist new active slot so it survives a restart. Guarded on
+    // indexChanged so spam-clicking the same preset does not write QSettings.
+    if (indexChanged) saveSelectionToSettings();
+}
+
+void PenSubToolbar::onColorEditRequested(int index)
+{
+    if (index < 0 || index >= NUM_PRESETS) return;
+    
+    // Open color dialog
+    QColor currentColor = m_colorButtons[index]->color();
+    QColor newColor = QColorDialog::getColor(currentColor, this, tr("Select Pen Color"));
+    
+    if (newColor.isValid() && newColor != currentColor) {
+        m_colorButtons[index]->setColor(newColor);
+        saveToSettings();  // Persist change
+        
+        // If this is the selected preset, emit change
+        if (m_selectedColorIndex == index) {
+            emit penColorChanged(newColor);
+        }
+        
+        // Update thickness preview colors
+        updateThicknessPreviewColors();
+    }
+}
+
+void PenSubToolbar::onThicknessPresetClicked(int index)
+{
+    if (index < 0 || index >= NUM_PRESETS) return;
+
+    // Always apply the thickness when clicked
+    const bool indexChanged = (m_selectedThicknessIndex != index);
+    selectThicknessPreset(index);
+
+    // Emit thickness change (paired with the preset's min width so the
+    // viewport's pressure floor matches the newly-selected preset).
+    emit penThicknessChanged(m_thicknessButtons[index]->thickness());
+    emit penMinStrokeWidthChanged(m_minWidths[index]);
+
+    // Persist new active slot so it survives a restart. Guarded on
+    // indexChanged so spam-clicking the same preset does not write QSettings.
+    if (indexChanged) saveSelectionToSettings();
+}
+
+void PenSubToolbar::onThicknessEditRequested(int index)
+{
+    if (index < 0 || index >= NUM_PRESETS) return;
+
+    const qreal oldThickness = m_thicknessButtons[index]->thickness();
+    const qreal oldMinWidth = m_minWidths[index];
+
+    ThicknessEditDialog dialog(oldThickness, 0.5, 50.0, oldMinWidth, this);
+    dialog.setWindowTitle(tr("Edit Pen Thickness"));
+
+    if (dialog.exec() == QDialog::Accepted) {
+        const qreal newThickness = dialog.thickness();
+        // Dialog clamps min-width to [0, thickness], but be defensive in
+        // case the spinbox range logic ever drifts.
+        const qreal dialogMinWidth = dialog.minWidth();
+        const qreal newMinWidth = (dialogMinWidth < 0.0)
+            ? oldMinWidth
+            : qBound(0.0, dialogMinWidth, newThickness);
+
+        const bool thicknessChanged = !qFuzzyCompare(oldThickness, newThickness);
+        const bool minWidthChanged = !qFuzzyCompare(oldMinWidth, newMinWidth);
+
+        if (thicknessChanged) {
+            m_thicknessButtons[index]->setThickness(newThickness);
+        }
+        m_minWidths[index] = newMinWidth;
+
+        if (thicknessChanged || minWidthChanged) {
+            saveToSettings();
+        }
+
+        // Only fire signals when the edited preset is the active one.
+        if (m_selectedThicknessIndex == index) {
+            if (thicknessChanged) {
+                emit penThicknessChanged(newThickness);
+            }
+            if (minWidthChanged) {
+                emit penMinStrokeWidthChanged(newMinWidth);
+            }
+        }
+    }
+}
+
+void PenSubToolbar::selectColorPreset(int index)
+{
+    // Allow index = -1 for "no selection"
+    if (index < -1 || index >= NUM_PRESETS) return;
+    
+    // Update selection state
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        m_colorButtons[i]->setSelected(i == index);
+    }
+    
+    m_selectedColorIndex = index;
+    
+    // Update thickness preview colors to match selected color (if any)
+    updateThicknessPreviewColors();
+}
+
+void PenSubToolbar::selectThicknessPreset(int index)
+{
+    // Allow index = -1 for "no selection"
+    if (index < -1 || index >= NUM_PRESETS) return;
+    
+    // Update selection state
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        m_thicknessButtons[i]->setSelected(i == index);
+    }
+    
+    m_selectedThicknessIndex = index;
+}
+
+void PenSubToolbar::updateThicknessPreviewColors()
+{
+    // Set thickness preview line color to match selected pen color
+    // If no color is selected (index = -1), use the first preset's color as fallback
+    int colorIndex = (m_selectedColorIndex >= 0) ? m_selectedColorIndex : 0;
+    QColor previewColor = m_colorButtons[colorIndex]->color();
+    for (int i = 0; i < NUM_PRESETS; ++i) {
+        m_thicknessButtons[i]->setLineColor(previewColor);
+    }
+}
+

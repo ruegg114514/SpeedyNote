@@ -1,0 +1,101 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+*.rpm
+*.deb
+*.pkg.tar.zst
+*.apk
+*.dmg
+*.aab
+*.flatpak
+
+# Compressed files
+*.7z
+*.dmg
+
+# DMG packaging temporary files
+dmg_temp/
+
+# Editor
+.vs/
+.idea/
+.cursor/
+.vscode/
+.DS_Store
+
+out/
+build/
+build-debug/
+linux/ocr-models/
+linux/onnxruntime-build/
+dllpack/
+poppler-24.08.0/
+share/
+old/
+docs/private/
+32-bitdll/
+qt6/
+qt5/
+misc/
+android/test-app/
+android/mupdf-build/
+android/build-app/
+SpeedyNote-Android-android-conan/
+private_scripts/
+plans.txt
+/android/signing/
+*.keystore
+*.jks
+*.b64
+packaging/
+.flatpak-builder/
+build-dir/
+repo/
+ios/mupdf-src/
+ios/mupdf-build/
+ios/mupdf-build-sim/
+ios/test-ios-qt/
+ios/build-device/
+ios/build-sim/
+ios/dist/
+ios/Assets.xcassets/
+ios/mlkit-build/
+macos/mupdf-src/
+macos/mupdf-build/
+.aur-work/
+win32/
+scripts/
+/test-fixtures/
+
+app_icon.rc
+packaging.iss
+android/app-resources/AndroidManifest.xml
