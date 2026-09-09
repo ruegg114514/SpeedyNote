@@ -6891,16 +6891,32 @@ void DocumentViewport::startStroke(const PointerEvent& pe)
     m_isDrawing = true;
     m_activeDrawingPage = pe.pageHit.pageIndex;
 
-    // Live-ink first-frame guarantee. Building a whole-page (Capped) or
-    // viewport-clipped (Focus) cache synchronously here blocks the UI thread
-    // on pages whose caches were evicted (far from where the side-notes column
-    // was opened), which is the "first stroke is blank, then it appears" stall.
-    // Strategy - never let the first frame touch a cold cache:
-    //  - Focus tier (high zoom, the writing tier): if the page's viewport-
-    //    clipped cache is not yet warm, force the Direct tier for the whole
-    //    stroke (bbox-cull only, no rebuild) and rebuild the Focus cache once
-    //    on pen-up. The hover preload normally keeps it warm; this is the
-    //    fallback for strokes that start without a preceding hover event.
+    // A stroke can only start while the viewport is stationary, so a focus
+    // cache suspension left over from a just-finished pan/zoom no longer
+    // applies. setPanOffset()/setZoomLevel() set m_focusCacheSuspended and arm
+    // the 150 ms rebuild timer; clearing both here makes the tier check below
+    // take the Focus path and warm the page's viewport-clipped cache
+    // synchronously. Otherwise a stroke that begins within that window on a
+    // cold, content-dense page (e.g. one far from where the side-notes column
+    // was opened) lands on the Direct tier, which re-vectorises every committed
+    // stroke on every pen-move frame and delays the first stroke's ink until
+    // the rebuild timer finally fires.
+    if (m_focusCacheSuspended) {
+        m_focusCacheSuspended = false;
+        if (m_focusRebuildTimer) {
+            m_focusRebuildTimer->stop();
+        }
+    }
+
+    // Live-ink first-frame guarantee: never let the first frame touch a cold
+    // cache. Building the whole-page (Capped) or viewport-clipped (Focus)
+    // cache synchronously here blocks the UI thread once on pages whose caches
+    // were evicted (far from where the side-notes column was opened) - the
+    // "first stroke is blank, then it appears" stall - but the cost is bounded:
+    //  - Focus tier (high zoom, the writing tier): warm the viewport-clipped
+    //    focus cache now (below). The hover preload normally keeps it warm;
+    //    this is the fallback for strokes that begin without a preceding
+    //    warm-up.
     //  - Capped tier (moderate zoom / off-screen context): warm the whole-page
     //    cache on demand; cost is bounded and typically already preloaded.
     if (!m_document->isEdgeless()) {
