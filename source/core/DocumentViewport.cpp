@@ -21302,7 +21302,13 @@ void DocumentViewport::loadSideNotes()
     if (m_sideNotesWidths.isEmpty()) {
         const double legacyWidth = root.value("notesWidth").toDouble(200.0);
         if (legacyWidth > 0.0) {
-            for (auto it = root.value("pages").toObject().begin(); it != root.value("pages").toObject().end(); ++it) {
+            // IMPORTANT: hang the iterated object in a named local. Iterating
+            // over a temporary QJsonObject (root.value("pages").toObject())
+            // leaves the iterator dangling after the full expression, so the
+            // later it.key().toInt() dereferences freed memory and crashed on
+            // open for old-format notebooks that enter this migration branch.
+            const QJsonObject legacyPages = root.value("pages").toObject();
+            for (auto it = legacyPages.begin(); it != legacyPages.end(); ++it) {
                 const int pageIndex = it.key().toInt();
                 if (pageInRange(pageIndex)) {
                     m_sideNotesWidths[pageIndex] = legacyWidth;
