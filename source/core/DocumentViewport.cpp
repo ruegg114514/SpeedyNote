@@ -4798,9 +4798,18 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
         // touchdown that lands before the deferred build runs.
         PageHit hoverPage = viewportToPage(newPos);
         if (hoverPage.valid()) {
-            m_strokePreloadPage = hoverPage.pageIndex;
-            if (m_strokePreloadTimer) {
-                m_strokePreloadTimer->start(0);
+            // Only (re)arm the preload when the hovered page CHANGES. A pen in
+            // continuous motion streams TabletMove events; restarting the 0ms
+            // single-shot timer on every one of them keeps pushing its
+            // deadline back, so the preload would starve and never fire before
+            // pen-down - leaving far pages cold at stroke start (the
+            // "first stroke appears late" stall on stylus only; the mouse
+            // never relied on this path).
+            if (hoverPage.pageIndex != m_strokePreloadPage) {
+                m_strokePreloadPage = hoverPage.pageIndex;
+                if (m_strokePreloadTimer) {
+                    m_strokePreloadTimer->start(0);
+                }
             }
         }
         
@@ -6498,9 +6507,11 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
             const qreal notesW = sideNotesWidthFor(i);
             if (notesW <= 0) continue;
             QPointF pos = pagePosition(i);
-            Page* page = m_document->page(i);
-            if (!page) continue;
-            QSizeF psz = page->size;
+            // Use metadata-only size lookup: page(i) would synchronously
+            // lazy-load the page from disk at pen-down, stalling the first
+            // stroke. The hit-test only needs geometry; the winning branch
+            // below loads the page it actually edits.
+            QSizeF psz = m_document->pageSizeAt(i);
             if (psz.isEmpty()) continue;
             QRectF notesRect(pos.x() + psz.width(), pos.y(), notesW, psz.height());
             if (notesRect.contains(docPt)) {
@@ -7045,6 +7056,23 @@ void DocumentViewport::startStroke(const PointerEvent& pe)
     //    fallback for strokes that start without a preceding hover event.
     //  - Capped tier (moderate zoom / off-screen context): warm the whole-page
     //    cache on demand; cost is bounded and typically already preloaded.
+    // A stroke starting means any pan/zoom gesture is over. If the focus
+    // cache is still suspended (pen-down within the 150ms settle window after
+    // the last pan/scroll), chooseRenderTier() would return Direct and the
+    // warm-up below would be skipped entirely - forcing the whole stroke onto
+    // the per-frame Direct re-rasterise path, which on a content-dense cold
+    // page is exactly the "first stroke appears late" stall. Lift the
+    // suspension so the Focus tier warm below actually runs. Stylus users hit
+    // this far more often than mouse users because the pen is already at the
+    // target when the view stops moving, so pen-down routinely lands inside
+    // the window.
+    if (m_focusCacheSuspended) {
+        m_focusCacheSuspended = false;
+        if (m_focusRebuildTimer) {
+            m_focusRebuildTimer->stop();
+        }
+    }
+
     if (!m_document->isEdgeless()) {
         Page* cachePage = m_document->page(m_activeDrawingPage);
         if (cachePage) {
