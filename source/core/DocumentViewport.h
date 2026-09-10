@@ -3105,6 +3105,18 @@ private:
     QTimer* m_stylusWritingTimer = nullptr;
     static constexpr int STYLUS_WRITING_SETTLE_MS = 250;
 
+    /// True while the stylus is inside the digitizer's proximity range
+    /// (hovering or touching). Driven by TabletEnterProximity / any tablet
+    /// event, cleared by TabletLeaveProximity or hover timeout. Touch input
+    /// arriving in this state is a resting palm, not a gesture - the pen is
+    /// about to write, so the touch must not pan/zoom the canvas.
+    bool m_stylusInProximity = false;
+    /// Latched rejection for the CURRENT touch sequence: once a sequence has
+    /// been identified as palm (e.g. it was already panning when the pen
+    /// entered proximity), it stays rejected until every finger lifts,
+    /// even if the stylus leaves range mid-sequence.
+    bool m_touchSequenceRejected = false;
+
     // ===== Pan Tool State =====
     bool m_isPanToolDragging = false;
     QPointF m_panToolLastPos;

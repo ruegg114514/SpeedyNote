@@ -122,6 +122,12 @@ TouchGestureHandler::TouchGestureHandler(DocumentViewport* viewport, QObject* pa
     m_inertiaTimer = new QTimer(this);
     m_inertiaTimer->setTimerType(Qt::PreciseTimer);
     connect(m_inertiaTimer, &QTimer::timeout, this, &TouchGestureHandler::onInertiaFrame);
+
+    // Grace-period timer for deferred gesture activation (palm rejection).
+    m_activationTimer = new QTimer(this);
+    m_activationTimer->setSingleShot(true);
+    m_activationTimer->setInterval(ACTIVATION_GRACE_MS);
+    connect(m_activationTimer, &QTimer::timeout, this, &TouchGestureHandler::activatePendingGesture);
 }
 
 TouchGestureHandler::~TouchGestureHandler()
@@ -152,6 +158,12 @@ void TouchGestureHandler::reset()
     // Clear gesture state (don't call endTouchPan/endTouchPinch as viewport may be in invalid state)
     m_panActive = false;
     m_pinchActive = false;
+
+    // Drop any pending deferred activation
+    m_activationPending = false;
+    if (m_activationTimer) {
+        m_activationTimer->stop();
+    }
     
     // Clear position-based state (prevents stale values after resume)
     m_lastPos = QPointF();
@@ -210,7 +222,13 @@ void TouchGestureHandler::setMode(TouchGestureMode mode)
     m_initialDistance = 0;
     m_zoomActivated = false;
     m_smoothedScale = 1.0;
-    
+
+    // Drop any pending deferred activation
+    m_activationPending = false;
+    if (m_activationTimer) {
+        m_activationTimer->stop();
+    }
+
     m_mode = mode;
 }
 
@@ -247,7 +265,10 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
         // active gesture and native reports 2+ fingers, this TouchBegin is
         // a second finger joining, not a brand-new gesture. Skip the reset
         // and transition directly to a 2-finger gesture using native positions.
-        if (m_panActive || m_pinchActive) {
+        // Note: m_activationPending counts as "active" here - with deferred
+        // activation the first finger sits in the grace window when the
+        // second one lands, and the reset would forget it.
+        if (m_panActive || m_pinchActive || m_activationPending) {
             int nativeCount = getNativeTouchCount();
             qint64 timeSinceNative = getTimeSinceLastNativeTouch();
             if (nativeCount >= 2 && timeSinceNative >= 0 && timeSinceNative < 100) {
@@ -428,68 +449,72 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
                  << "trackedIds:" << m_trackedTouchIds.size()
                  << "activeTouchPoints:" << m_activeTouchPoints;
 #endif
-        if (activePoints.size() == 1) {
-            // TG.2.1: Single finger touch - start pan
-            const auto& point = *activePoints.first();
-            m_lastPos = SN_TP_POS(point);
-            m_panActive = true;
-            m_pinchActive = false;  // Ensure clean state
-            
-            // Start velocity tracking
-            m_velocitySamples.clear();
-            m_velocityTimer.start();
-            
-            // Begin deferred pan gesture (captures frame for smooth scrolling)
-            m_viewport->beginPanGesture();
-            
-            event->accept();
-            return true;
-        } else if (activePoints.size() == 2) {
-            // TG.4: Two fingers touch simultaneously - start pinch directly
-            // This is common on Android where both fingers can arrive in same event
-            const auto& p1 = *activePoints[0];
-            const auto& p2 = *activePoints[1];
-            
-            QPointF pos1 = SN_TP_POS(p1);
-            QPointF pos2 = SN_TP_POS(p2);
-            QPointF centroid = (pos1 + pos2) / 2.0;
-            qreal distance = QLineF(pos1, pos2).length();
-            
-            if (distance < 1.0) {
-                distance = 1.0;
-            }
-            
-            m_panActive = false;  // Ensure clean state
-            m_pinchActive = true;
-            m_pinchStartDistance = distance;
-            m_initialDistance = distance;   // For zoom threshold calculation
-            m_zoomActivated = false;        // Zoom starts inactive (dead zone)
-            m_smoothedScale = 1.0;          // Reset smoothed scale
-            
-            m_viewport->beginZoomGesture(centroid);
-            
-            event->accept();
-            return true;
-        } else if (activePoints.size() >= 3) {
-            // TG.5: 3+ finger touch - start tap timer and suspend other gestures
+        // Start velocity tracking for a potential pan
+        m_velocitySamples.clear();
+        m_velocityTimer.start();
+
+        if (activePoints.size() >= 3) {
+            // TG.5: 3+ finger touch - start tap timer and suspend other gestures.
+            // A 3-finger landing is deliberate enough to skip the grace period.
             m_threeFingerTimer.start();
             m_threeFingerTimerActive = true;
-            
+            m_activationPending = false;
+            if (m_activationTimer) {
+                m_activationTimer->stop();
+            }
+
             // Suspend any active gesture (will resume if fingers reduce)
             if (m_panActive) {
                 endTouchPan(false);
             }
             if (m_pinchActive) {
                 endTouchPinch();
+            }
+
+            event->accept();
+            return true;
         }
-        
+
+        // Palm grace period: defer pan/pinch activation. A palm landing on the
+        // glass looks exactly like a 1-2 finger touch at this point; only after
+        // ACTIVATION_GRACE_MS without a stylus veto do we treat it as a gesture.
+        if (!activePoints.isEmpty()) {
+            m_lastPos = SN_TP_POS(*activePoints.first());
+            m_activationPending = true;
+            if (m_activationTimer) {
+                m_activationTimer->start();
+            }
+        }
+
         event->accept();
         return true;
-    }
     }
     
     // ===== TouchUpdate =====
     if (event->type() == QEvent::TouchUpdate) {
+        // Grace period still running: keep buffering positions (the ID tracking
+        // above already recorded them) but do not let any transition logic
+        // activate a gesture yet. If the stylus vetoes this touch, nothing
+        // will ever have moved the canvas.
+        if (m_activationPending) {
+            if (m_activeTouchPoints >= 3) {
+                // A deliberate 3-finger gesture can break out of the grace period
+                m_activationPending = false;
+                if (m_activationTimer) {
+                    m_activationTimer->stop();
+                }
+                m_threeFingerTimer.start();
+                m_threeFingerTimerActive = true;
+                event->accept();
+                return true;
+            }
+            if (!activePoints.isEmpty()) {
+                m_lastPos = SN_TP_POS(*activePoints.first());
+            }
+            event->accept();
+            return true;
+        }
+
         // ===== Handle 3+ finger gestures =====
         if (m_activeTouchPoints >= 3) {
             // TG.5: Track when we reach 3 fingers (may be added one-by-one)
@@ -789,6 +814,14 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
         }
 #endif
                 
+        // A touch that lifted inside the grace window never activated - drop it.
+        if (m_activationPending) {
+            m_activationPending = false;
+            if (m_activationTimer) {
+                m_activationTimer->stop();
+            }
+        }
+
         // TG.2.3: End pan gesture
         if (m_panActive) {
             // Start inertia only on normal end (not cancel)
@@ -829,6 +862,96 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
     // Fallback - accept but don't claim handling
     event->accept();
     return true;
+}
+
+// ===== Deferred Activation / Cancellation =====
+
+void TouchGestureHandler::activatePendingGesture()
+{
+    if (!m_activationPending) {
+        return;
+    }
+    m_activationPending = false;
+
+    if (m_mode == TouchGestureMode::Disabled) {
+        return;
+    }
+
+    // Finger count and positions come from the ID tracking maintained by
+    // handleTouchEvent; the grace window only delayed the ACTIVATION, not
+    // the bookkeeping.
+    if (m_activeTouchPoints >= 3) {
+        m_threeFingerTimer.start();
+        m_threeFingerTimerActive = true;
+        return;
+    }
+
+    if (m_activeTouchPoints == 2 && m_lastTouchPositions.size() >= 2) {
+        // Activate pinch with the current finger positions
+        auto it = m_lastTouchPositions.constBegin();
+        QPointF pos1 = it.value();
+        ++it;
+        QPointF pos2 = it.value();
+        QPointF centroid = (pos1 + pos2) / 2.0;
+        qreal distance = QLineF(pos1, pos2).length();
+        if (distance < 1.0) {
+            distance = 1.0;
+        }
+
+        m_panActive = false;
+        m_pinchActive = true;
+        m_pinchStartDistance = distance;
+        m_initialDistance = distance;   // For zoom threshold calculation
+        m_zoomActivated = false;        // Zoom starts inactive (dead zone)
+        m_smoothedScale = 1.0;          // Reset smoothed scale
+
+        m_viewport->beginZoomGesture(centroid);
+        return;
+    }
+
+    if (m_activeTouchPoints == 1 && !m_lastTouchPositions.isEmpty()) {
+        // Activate single-finger pan from the buffered position
+        m_lastPos = m_lastTouchPositions.constBegin().value();
+        m_panActive = true;
+        m_pinchActive = false;
+
+        m_velocitySamples.clear();
+        m_velocityTimer.start();
+
+        // Begin deferred pan gesture (captures frame for smooth scrolling)
+        m_viewport->beginPanGesture();
+        return;
+    }
+
+    // 0 fingers: the touch lifted inside the grace window - nothing to do.
+}
+
+void TouchGestureHandler::cancelActiveGesture()
+{
+    // Drop a pending activation and tear down any running gesture WITHOUT
+    // inertia. Called by the viewport when the stylus enters proximity or
+    // presses while a touch gesture is in flight: that touch was a palm,
+    // so its pan/zoom must not continue.
+    if (m_activationPending) {
+        m_activationPending = false;
+        if (m_activationTimer) {
+            m_activationTimer->stop();
+        }
+    }
+
+    if (m_panActive) {
+        endTouchPan(false);  // No inertia for a rejected palm
+    }
+    if (m_pinchActive) {
+        endTouchPinch();
+    }
+    if (m_inertiaTimer && m_inertiaTimer->isActive()) {
+        m_inertiaTimer->stop();
+        m_viewport->endPanGesture();
+        m_velocitySamples.clear();
+    }
+
+    m_threeFingerTimerActive = false;
 }
 
 // ===== Gesture End Helpers =====
@@ -922,6 +1045,14 @@ void TouchGestureHandler::onInertiaFrame()
 bool TouchGestureHandler::handleTwoFingerGestureNative(QTouchEvent* event,
                                                         QPointF pos1, QPointF pos2)
 {
+    // This native path takes over the gesture - drop any deferred activation.
+    if (m_activationPending) {
+        m_activationPending = false;
+        if (m_activationTimer) {
+            m_activationTimer->stop();
+        }
+    }
+
     QPointF centroid = (pos1 + pos2) / 2.0;
     qreal distance = QLineF(pos1, pos2).length();
     if (distance < 1.0) distance = 1.0;

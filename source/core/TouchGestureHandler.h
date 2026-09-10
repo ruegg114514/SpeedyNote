@@ -85,11 +85,27 @@ public:
     
     /**
      * @brief Check if a touch gesture is currently active.
-     * Includes active pan, pinch, or inertia animation.
+     * Includes pending activation, active pan, pinch, or inertia animation.
      */
-    bool isActive() const { return m_panActive || m_pinchActive || (m_inertiaTimer && m_inertiaTimer->isActive()); }
+    bool isActive() const { return m_activationPending || m_panActive || m_pinchActive || (m_inertiaTimer && m_inertiaTimer->isActive()); }
+
+    /**
+     * @brief Cancel any pending or in-flight gesture immediately, without inertia.
+     *
+     * Called by the viewport when the stylus enters proximity or presses while
+     * a touch gesture is running: that gesture was a palm all along, so it is
+     * torn down instead of finalized. Position tracking is left intact; only
+     * gesture state is cleared.
+     */
+    void cancelActiveGesture();
 
 private slots:
+    /**
+     * @brief Activate the deferred gesture after the grace period expires.
+     * Decides pan vs pinch from the currently tracked finger count.
+     */
+    void activatePendingGesture();
+
     /**
      * @brief Handle inertia animation frame.
      * Called by m_inertiaTimer to apply friction and update pan position.
@@ -103,6 +119,17 @@ private:
     // ===== Mode =====
     TouchGestureMode m_mode = TouchGestureMode::Disabled;
     
+    // ===== Deferred Gesture Activation (palm grace period) =====
+    // A palm landing on the glass arrives as a normal 1-2 point touch BEFORE
+    // the stylus is detected. Activating pan/pinch instantly at TouchBegin is
+    // what turns "resting the hand" into an unwanted pan/zoom. Instead, the
+    // gesture is only ACTIVATED after a short grace period; if the stylus
+    // enters proximity (or presses) within the window, the viewport calls
+    // cancelActiveGesture() and the touch never moves the canvas at all.
+    bool m_activationPending = false;        ///< TouchBegin seen, gesture not yet activated
+    QTimer* m_activationTimer = nullptr;     ///< Fires when the grace period expires
+    static constexpr int ACTIVATION_GRACE_MS = 100;  ///< Window for the stylus to veto the gesture
+
     // ===== Single-finger Pan Tracking =====
     bool m_panActive = false;                ///< Whether a touch pan is in progress
     QPointF m_lastPos;                       ///< Last touch position (viewport coords)

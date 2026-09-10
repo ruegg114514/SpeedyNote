@@ -312,7 +312,16 @@ DocumentViewport::DocumentViewport(QWidget* parent)
         // No tablet hover event received - stylus must have left
         if (m_pointerInViewport && !m_pointerActive) {
             m_pointerInViewport = false;
-            
+
+            // Fallback proximity clear for drivers that never send
+            // TabletLeaveProximity: 100ms without hover data while no stroke
+            // is active means the pen is out of range. Never clear while a
+            // stroke is in flight - hovers pause during a press, so the timer
+            // fires mid-stroke and must not re-enable touch there.
+            if (!m_pointerActive) {
+                m_stylusInProximity = false;
+            }
+
             // Trigger repaint to hide eraser cursor
             // Use elliptical region to match circular cursor shape
             // Use toAlignedRect() to properly round floating-point to integer coords
@@ -4555,6 +4564,8 @@ void DocumentViewport::hideEvent(QHideEvent* event)
     if (m_stylusWritingTimer) {
         m_stylusWritingTimer->stop();
     }
+    m_stylusInProximity = false;
+    m_touchSequenceRejected = false;
     
     // Also reset touch handler state including inertia
     // This prevents inertia callbacks from accessing invalid widget state
@@ -4665,6 +4676,11 @@ void DocumentViewport::leaveEvent(QEvent* event)
 
 void DocumentViewport::tabletEvent(QTabletEvent* event)
 {
+    // Any tablet event (hover, press, move) proves the pen is inside the
+    // digitizer's detection range, which is exactly the signal palm
+    // rejection needs: touch input from here on is a resting hand.
+    m_stylusInProximity = true;
+
     // A mouse press whose release never arrived leaves an armed off-page pan
     // behind, and the mouse-gesture guard further down would then swallow every
     // pen event for the rest of the session. Only a pan that has started
@@ -4691,6 +4707,13 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
     switch (event->type()) {
         case QEvent::TabletPress:
             peType = PointerEvent::Press;
+            // A pen-down vetoes any touch gesture in flight. Covers drivers
+            // that never emit TabletEnterProximity: the hand landed first and
+            // started (or queued) a pan/zoom that was really a resting palm.
+            if (m_touchHandler && m_touchHandler->isActive()) {
+                m_touchHandler->cancelActiveGesture();
+                m_touchSequenceRejected = true;
+            }
             if (m_inlineEditSession.active)
                 commitInlineTextEdit();
             else {
@@ -5223,12 +5246,26 @@ bool DocumentViewport::event(QEvent* event)
     // Used to hide eraser cursor when pen is lifted away from the tablet surface.
     if (event->type() == QEvent::TabletEnterProximity) {
         m_pointerInViewport = true;
+        m_stylusInProximity = true;
+
+        // The classic palm sequence: hand lands on the glass FIRST (touch
+        // pan/zoom starts or sits in the grace window), the pen enters range a
+        // moment later. That touch was never a gesture - kill it now and latch
+        // the rejection until every finger lifts, so the rest of the sequence
+        // cannot resume panning even if the pen leaves range again.
+        if (m_touchHandler && m_touchHandler->isActive()) {
+            m_touchHandler->cancelActiveGesture();
+            m_touchSequenceRejected = true;
+        } else if (m_activeTouchCount > 0) {
+            m_touchSequenceRejected = true;
+        }
         return true;
     }
-    
+
     if (event->type() == QEvent::TabletLeaveProximity) {
         m_pointerInViewport = false;
-        
+        m_stylusInProximity = false;
+
         // Stop hover timer - no need to wait for timeout, we know stylus left
         if (m_tabletHoverTimer) {
             m_tabletHoverTimer->stop();
@@ -5370,11 +5407,41 @@ bool DocumentViewport::event(QEvent* event)
             return QWidget::event(event);
         }
         
+        // Stale-latch recovery: a TouchBegin arriving with the pen out of
+        // range and no stroke settling is a NEW sequence whose predecessor's
+        // TouchEnd was lost (driver quirk). Don't let the old latch veto
+        // touch input forever.
+        if (event->type() == QEvent::TouchBegin && m_touchSequenceRejected
+            && !m_stylusInProximity && !m_stylusWritingActive) {
+            m_touchSequenceRejected = false;
+        }
+
+        // Stylus-driven palm rejection. The pen is inside the digitizer's
+        // detection range (or a sequence was already vetoed, or the pen just
+        // lifted within the settle window): any canvas touch is a resting
+        // hand. This sits AFTER the child-widget routing on purpose, so a
+        // finger can still tap floating bars while the pen hovers - only
+        // canvas gestures (pan/zoom) are vetoed.
+        if (m_stylusInProximity || m_touchSequenceRejected || m_stylusWritingActive) {
+            if (m_touchHandler) {
+                m_touchHandler->cancelActiveGesture();
+            }
+            if (event->type() == QEvent::TouchBegin) {
+                m_touchSequenceRejected = true;
+            } else if (event->type() == QEvent::TouchEnd
+                       || event->type() == QEvent::TouchCancel) {
+                // Sequence over - allow the next touch to be judged fresh.
+                m_touchSequenceRejected = false;
+            }
+            event->accept();
+            return true;
+        }
+
         if (m_touchHandler && m_touchHandler->handleTouchEvent(touchEvent)) {
             return true;
         }
     }
-    
+
     // Handle native gesture events (macOS trackpad pinch-to-zoom).
     // On macOS the trackpad delivers pinch as QNativeGestureEvent with
     // Qt::ZoomNativeGesture, bypassing the touch handler entirely.
@@ -6314,17 +6381,11 @@ void DocumentViewport::handlePointerEvent(const PointerEvent& pe)
 
 bool DocumentViewport::updatePalmRejection(QTouchEvent* touchEvent)
 {
-    // While the stylus is actively writing (or within the settle window after
-    // pen-up), any touch input is palm contact - swallow it regardless of point
-    // count. This is the primary fix for "hand resting on glass triggers
-    // pan/zoom while writing".
-    if (m_stylusWritingActive) {
-        if (touchEvent) {
-            touchEvent->accept();
-        }
-        return true;
-    }
-
+    // Note: stylus-driven rejection (pen in proximity, latched sequence,
+    // writing settle window) lives at the touch-forwarding point in event(),
+    // AFTER child-widget routing. This function stays the pure point-count
+    // heuristic so it can run before that routing without breaking taps on
+    // floating child widgets.
     if (!touchEvent) {
         return m_palmContactActive;
     }
