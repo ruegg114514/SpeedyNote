@@ -294,6 +294,17 @@ DocumentViewport::DocumentViewport(QWidget* parent)
     // Tablet hover timer - detects when stylus leaves viewport by timeout
     // When stylus hovers to another widget, we stop receiving TabletMove events.
     // This timer fires if no tablet hover event received within the interval.
+    // Stylus-writing palm rejection: while the pen is down (and for a short
+    // settle window after pen-up), any touch input is treated as palm contact.
+    // This prevents a hand resting on the glass from panning/zooming the canvas
+    // while the user is actively writing.
+    m_stylusWritingTimer = new QTimer(this);
+    m_stylusWritingTimer->setSingleShot(true);
+    m_stylusWritingTimer->setInterval(STYLUS_WRITING_SETTLE_MS);
+    connect(m_stylusWritingTimer, &QTimer::timeout, this, [this]() {
+        m_stylusWritingActive = false;
+    });
+
     m_tabletHoverTimer = new QTimer(this);
     m_tabletHoverTimer->setSingleShot(true);
     m_tabletHoverTimer->setInterval(100);  // 100ms - short enough to feel responsive
@@ -4537,6 +4548,13 @@ void DocumentViewport::hideEvent(QHideEvent* event)
     // A sequence interrupted by a tab switch never gets its TouchEnd, so clear
     // the latch here rather than leaving the next sequence routed to a child.
     m_touchSequenceOnChild = false;
+
+    // Stylus-writing lock must not survive a tab switch or hide; otherwise the
+    // viewport stays in palm-rejection mode after coming back.
+    m_stylusWritingActive = false;
+    if (m_stylusWritingTimer) {
+        m_stylusWritingTimer->stop();
+    }
     
     // Also reset touch handler state including inertia
     // This prevents inertia callbacks from accessing invalid widget state
@@ -4729,22 +4747,13 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
         // synchronous first-time cache rebuild on a freshly visited page.
         // Building here is deferred to the next idle tick (m_strokePreloadTimer)
         // so a hover over a cold, content-dense page never blocks hover
-        // handling; startStroke()'s synchronous warm covers an extra-fast
+        // handling; startStroke()'s Direct fallback covers an extra-fast
         // touchdown that lands before the deferred build runs.
         PageHit hoverPage = viewportToPage(newPos);
         if (hoverPage.valid()) {
-            // Only (re)arm the preload when the hovered page CHANGES. A pen in
-            // continuous motion streams TabletMove events; restarting the 0ms
-            // single-shot timer on every one of them keeps pushing its
-            // deadline back, so the preload would starve and never fire before
-            // pen-down - leaving far pages cold at stroke start (the
-            // "first stroke appears late" stall on stylus only; the mouse
-            // never relied on this path).
-            if (hoverPage.pageIndex != m_strokePreloadPage) {
-                m_strokePreloadPage = hoverPage.pageIndex;
-                if (m_strokePreloadTimer) {
-                    m_strokePreloadTimer->start(0);
-                }
+            m_strokePreloadPage = hoverPage.pageIndex;
+            if (m_strokePreloadTimer) {
+                m_strokePreloadTimer->start(0);
             }
         }
         
@@ -6305,6 +6314,17 @@ void DocumentViewport::handlePointerEvent(const PointerEvent& pe)
 
 bool DocumentViewport::updatePalmRejection(QTouchEvent* touchEvent)
 {
+    // While the stylus is actively writing (or within the settle window after
+    // pen-up), any touch input is palm contact - swallow it regardless of point
+    // count. This is the primary fix for "hand resting on glass triggers
+    // pan/zoom while writing".
+    if (m_stylusWritingActive) {
+        if (touchEvent) {
+            touchEvent->accept();
+        }
+        return true;
+    }
+
     if (!touchEvent) {
         return m_palmContactActive;
     }
@@ -6350,7 +6370,18 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
     // Palm rejection: a hand resting on the touchscreen invalidates pen input,
     // so don't start a new stroke while it is present.
     if (m_palmContactActive) return;
-    
+
+    // Stylus-writing palm rejection: lock out touch input as soon as the pen
+    // touches down. A hand resting on the glass typically arrives as touch
+    // events at (or slightly before) this moment; without this lock the touch
+    // sequence starts a pan/zoom before the palm threshold is reached.
+    if (pe.source == PointerEvent::Stylus && !pe.isEraser) {
+        m_stylusWritingActive = true;
+        if (m_stylusWritingTimer) {
+            m_stylusWritingTimer->stop();
+        }
+    }
+
     // Ensure keyboard focus for shortcuts (stylus events don't auto-focus like mouse)
     if (!hasFocus()) {
         setFocus(Qt::OtherFocusReason);
@@ -6373,11 +6404,9 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
             const qreal notesW = sideNotesWidthFor(i);
             if (notesW <= 0) continue;
             QPointF pos = pagePosition(i);
-            // Use metadata-only size lookup: page(i) would synchronously
-            // lazy-load the page from disk at pen-down, stalling the first
-            // stroke. The hit-test only needs geometry; the winning branch
-            // below loads the page it actually edits.
-            QSizeF psz = m_document->pageSizeAt(i);
+            Page* page = m_document->page(i);
+            if (!page) continue;
+            QSizeF psz = page->size;
             if (psz.isEmpty()) continue;
             QRectF notesRect(pos.x() + psz.width(), pos.y(), notesW, psz.height());
             if (notesRect.contains(docPt)) {
@@ -6828,6 +6857,14 @@ void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
     m_activeDrawingPage = -1;
     m_hardwareEraserActive = false;  // Clear hardware eraser state
     // Note: Don't clear m_lastPointerPos - keep it for eraser cursor during hover
+
+    // Stylus-writing palm rejection: after pen-up, keep touch locked out for
+    // a short settle window so the hand can lift off the glass before gestures
+    // re-enable. Without this, the tail of the hand's touch sequence (which
+    // may still be arriving) triggers a pan/zoom right after the stroke ends.
+    if (m_stylusWritingActive && m_stylusWritingTimer) {
+        m_stylusWritingTimer->start();
+    }
     
     // Pre-load stroke caches after interaction (but NOT PDF cache - it causes thrashing during rapid strokes)
     // PDF cache is preloaded during scroll/zoom, not during drawing
@@ -6914,23 +6951,6 @@ void DocumentViewport::startStroke(const PointerEvent& pe)
     //    fallback for strokes that start without a preceding hover event.
     //  - Capped tier (moderate zoom / off-screen context): warm the whole-page
     //    cache on demand; cost is bounded and typically already preloaded.
-    // A stroke starting means any pan/zoom gesture is over. If the focus
-    // cache is still suspended (pen-down within the 150ms settle window after
-    // the last pan/scroll), chooseRenderTier() would return Direct and the
-    // warm-up below would be skipped entirely - forcing the whole stroke onto
-    // the per-frame Direct re-rasterise path, which on a content-dense cold
-    // page is exactly the "first stroke appears late" stall. Lift the
-    // suspension so the Focus tier warm below actually runs. Stylus users hit
-    // this far more often than mouse users because the pen is already at the
-    // target when the view stops moving, so pen-down routinely lands inside
-    // the window.
-    if (m_focusCacheSuspended) {
-        m_focusCacheSuspended = false;
-        if (m_focusRebuildTimer) {
-            m_focusRebuildTimer->stop();
-        }
-    }
-
     if (!m_document->isEdgeless()) {
         Page* cachePage = m_document->page(m_activeDrawingPage);
         if (cachePage) {

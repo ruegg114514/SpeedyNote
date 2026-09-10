@@ -3094,7 +3094,17 @@ private:
     bool m_palmContactActive = false;
     /// Current down touch-point count across the active touch sequence.
     int m_activeTouchCount = 0;
-    
+
+    /// True while a stylus stroke is in flight or within a short settle window
+    /// after pen-up. During this window any touch event (a hand resting on the
+    /// glass) is treated as palm contact and swallowed before it can trigger
+    /// pan/zoom, regardless of the point count.
+    bool m_stylusWritingActive = false;
+    /// Timer that extends the touch-rejection window briefly after pen-up so
+    /// the hand has time to lift off the glass before touch gestures re-enable.
+    QTimer* m_stylusWritingTimer = nullptr;
+    static constexpr int STYLUS_WRITING_SETTLE_MS = 250;
+
     // ===== Pan Tool State =====
     bool m_isPanToolDragging = false;
     QPointF m_panToolLastPos;
