@@ -310,17 +310,20 @@ DocumentViewport::DocumentViewport(QWidget* parent)
     m_tabletHoverTimer->setInterval(100);  // 100ms - short enough to feel responsive
     connect(m_tabletHoverTimer, &QTimer::timeout, this, [this]() {
         // No tablet hover event received - stylus must have left
+        // Fallback proximity clear for drivers that never send
+        // TabletLeaveProximity: 100ms without hover data while no stroke
+        // is active means the pen is out of range. Never clear while a
+        // stroke is in flight - hovers pause during a press, so the timer
+        // fires mid-stroke and must not re-enable touch there.
+        // NOTE: this must NOT be gated on m_pointerInViewport - the hover
+        // branch sets that to false as soon as the pen drifts off-canvas,
+        // which would leave the proximity lock stuck on.
+        if (!m_pointerActive) {
+            m_stylusInProximity = false;
+        }
+
         if (m_pointerInViewport && !m_pointerActive) {
             m_pointerInViewport = false;
-
-            // Fallback proximity clear for drivers that never send
-            // TabletLeaveProximity: 100ms without hover data while no stroke
-            // is active means the pen is out of range. Never clear while a
-            // stroke is in flight - hovers pause during a press, so the timer
-            // fires mid-stroke and must not re-enable touch there.
-            if (!m_pointerActive) {
-                m_stylusInProximity = false;
-            }
 
             // Trigger repaint to hide eraser cursor
             // Use elliptical region to match circular cursor shape
@@ -331,6 +334,20 @@ DocumentViewport::DocumentViewport(QWidget* parent)
                                    eraserRadius * 2, eraserRadius * 2);
                 update(QRegion(cursorRectF.toAlignedRect(), QRegion::Ellipse));
             }
+        }
+    });
+
+    // Stylus proximity watchdog: restarted by every tablet event. When it
+    // fires with no stroke in flight, the pen is definitively gone - clear
+    // the proximity lock so touch gestures re-enable. Windows Wacom drivers
+    // often omit TabletLeaveProximity, so this timer (not the proximity event)
+    // is the primary unlock path.
+    m_stylusProximityTimer = new QTimer(this);
+    m_stylusProximityTimer->setSingleShot(true);
+    m_stylusProximityTimer->setInterval(STYLUS_PROXIMITY_TIMEOUT_MS);
+    connect(m_stylusProximityTimer, &QTimer::timeout, this, [this]() {
+        if (!m_pointerActive) {
+            m_stylusInProximity = false;
         }
     });
     
@@ -4564,6 +4581,9 @@ void DocumentViewport::hideEvent(QHideEvent* event)
     if (m_stylusWritingTimer) {
         m_stylusWritingTimer->stop();
     }
+    if (m_stylusProximityTimer) {
+        m_stylusProximityTimer->stop();
+    }
     m_stylusInProximity = false;
     m_touchSequenceRejected = false;
     
@@ -4680,6 +4700,10 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
     // digitizer's detection range, which is exactly the signal palm
     // rejection needs: touch input from here on is a resting hand.
     m_stylusInProximity = true;
+    // Restart the "pen left" watchdog - see m_stylusProximityTimer.
+    if (m_stylusProximityTimer) {
+        m_stylusProximityTimer->start();
+    }
 
     // A mouse press whose release never arrived leaves an armed off-page pan
     // behind, and the mouse-gesture guard further down would then swallow every
@@ -5247,6 +5271,12 @@ bool DocumentViewport::event(QEvent* event)
     if (event->type() == QEvent::TabletEnterProximity) {
         m_pointerInViewport = true;
         m_stylusInProximity = true;
+        // Pen just came into range; arm the watchdog in case it hovers
+        // motionless (no TabletMove arrives to keep restarting it) and the
+        // driver never sends TabletLeaveProximity.
+        if (m_stylusProximityTimer) {
+            m_stylusProximityTimer->start();
+        }
 
         // The classic palm sequence: hand lands on the glass FIRST (touch
         // pan/zoom starts or sits in the grace window), the pen enters range a
@@ -5269,6 +5299,9 @@ bool DocumentViewport::event(QEvent* event)
         // Stop hover timer - no need to wait for timeout, we know stylus left
         if (m_tabletHoverTimer) {
             m_tabletHoverTimer->stop();
+        }
+        if (m_stylusProximityTimer) {
+            m_stylusProximityTimer->stop();
         }
         
         // Trigger repaint to hide eraser cursor when pen leaves proximity

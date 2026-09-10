@@ -3111,6 +3111,14 @@ private:
     /// arriving in this state is a resting palm, not a gesture - the pen is
     /// about to write, so the touch must not pan/zoom the canvas.
     bool m_stylusInProximity = false;
+    /// Restarts on EVERY tablet event and clears m_stylusInProximity when it
+    /// expires (with no stroke in flight). This is the reliable "pen left"
+    /// detector: Windows Wacom drivers frequently omit TabletLeaveProximity,
+    /// and the hover cursor timer only fires while the pen is inside the
+    /// viewport rect, so without this a hover that drifts off-canvas or a pen
+    /// that stops moving would leave touch locked forever.
+    QTimer* m_stylusProximityTimer = nullptr;
+    static constexpr int STYLUS_PROXIMITY_TIMEOUT_MS = 150;
     /// Latched rejection for the CURRENT touch sequence: once a sequence has
     /// been identified as palm (e.g. it was already panning when the pen
     /// entered proximity), it stays rejected until every finger lifts,
