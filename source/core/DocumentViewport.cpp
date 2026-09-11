@@ -5458,13 +5458,19 @@ bool DocumentViewport::event(QEvent* event)
             m_touchSequenceRejected = false;
         }
 
-        // Stylus-driven palm rejection. The pen is inside the digitizer's
-        // detection range (or a sequence was already vetoed, or the pen just
-        // lifted within the settle window): any canvas touch is a resting
-        // hand. This sits AFTER the child-widget routing on purpose, so a
-        // finger can still tap floating bars while the pen hovers - only
-        // canvas gestures (pan/zoom) are vetoed.
-        if (m_stylusInProximity || m_touchSequenceRejected || m_stylusWritingActive) {
+        // Stylus-driven palm rejection. A canvas touch is a resting hand only
+        // while the pen is actually writing (or within the post-stroke settle
+        // window), or when the current touch sequence has already been vetoed
+        // by the pen landing. NOTE: deliberately NOT gated on m_stylusInProximity
+        // alone - a Wacom pen stays inside the digitizer's detection range for
+        // several centimetres, and continuous hover TabletMove events keep
+        // restarting the proximity watchdog. Treating mere hover as a veto
+        // would lock touch out for as long as the pen is anywhere near the
+        // glass, i.e. the "can't scroll/exit with a finger after writing" trap.
+        // Purely hovering (pen lifted, not writing) therefore leaves touch
+        // usable; the >=3-point palm path above and the grace-window veto on
+        // pen-down still cover the hand landing while actually writing.
+        if (m_touchSequenceRejected || m_stylusWritingActive) {
             if (m_touchHandler) {
                 m_touchHandler->cancelActiveGesture();
             }
