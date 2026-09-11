@@ -129,6 +129,14 @@ private:
     bool m_activationPending = false;        ///< TouchBegin seen, gesture not yet activated
     QTimer* m_activationTimer = nullptr;     ///< Fires when the grace period expires
     static constexpr int ACTIVATION_GRACE_MS = 100;  ///< Window for the stylus to veto the gesture
+    /// Movement threshold that ends the grace period early. Once the finger
+    /// travels TOUCH_DRAG_SLOP_PX beyond where it landed, this is clearly a
+    /// deliberate drag (not a resting palm), so the gesture activates
+    /// immediately instead of waiting out the full grace window. Keeps
+    /// scrolling responsive (no visible lag on fast swipes) while a still
+    /// hand still waits for the stylus veto.
+    static constexpr qreal TOUCH_DRAG_SLOP_PX = 12.0;
+    QPointF m_graceStartPos;                 ///< Finger position at TouchBegin (viewport coords)
 
     // ===== Single-finger Pan Tracking =====
     bool m_panActive = false;                ///< Whether a touch pan is in progress

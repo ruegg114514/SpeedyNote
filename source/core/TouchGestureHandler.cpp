@@ -480,6 +480,7 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
         // ACTIVATION_GRACE_MS without a stylus veto do we treat it as a gesture.
         if (!activePoints.isEmpty()) {
             m_lastPos = SN_TP_POS(*activePoints.first());
+            m_graceStartPos = m_lastPos;
             m_activationPending = true;
             if (m_activationTimer) {
                 m_activationTimer->start();
@@ -509,10 +510,25 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
                 return true;
             }
             if (!activePoints.isEmpty()) {
-                m_lastPos = SN_TP_POS(*activePoints.first());
+                QPointF curPos = SN_TP_POS(*activePoints.first());
+                m_lastPos = curPos;
+                // Drag slop: the finger has clearly moved from where it
+                // landed, so this is a deliberate swipe, not a resting palm.
+                // Activate the gesture NOW (don't wait out the grace timer) so
+                // fast scrolling tracks the finger with no visible lag; a
+                // still hand continues to wait for the stylus veto below.
+                if (QLineF(m_graceStartPos, curPos).length() >= TOUCH_DRAG_SLOP_PX) {
+                    activatePendingGesture();
+                    // Fall through to the normal update handling below so the
+                    // pan/pinch delta from THIS event is applied as well.
+                } else {
+                    event->accept();
+                    return true;
+                }
+            } else {
+                event->accept();
+                return true;
             }
-            event->accept();
-            return true;
         }
 
         // ===== Handle 3+ finger gestures =====
