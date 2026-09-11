@@ -3115,7 +3115,7 @@ private:
     /// forever and the existing hover/proximity timers, gated on
     /// !m_pointerActive, can never fire.
     QTimer* m_stylusActivityGuard = nullptr;
-    static constexpr int STYLUS_ACTIVITY_GUARD_MS = 600;
+    static constexpr int STYLUS_ACTIVITY_GUARD_MS = 300;
 
     /// True while the stylus is inside the digitizer's proximity range
     /// (hovering or touching). Driven by TabletEnterProximity / any tablet

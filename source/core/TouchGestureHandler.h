@@ -128,7 +128,7 @@ private:
     // cancelActiveGesture() and the touch never moves the canvas at all.
     bool m_activationPending = false;        ///< TouchBegin seen, gesture not yet activated
     QTimer* m_activationTimer = nullptr;     ///< Fires when the grace period expires
-    static constexpr int ACTIVATION_GRACE_MS = 100;  ///< Window for the stylus to veto the gesture
+    static constexpr int ACTIVATION_GRACE_MS = 300;  ///< Window for the stylus to veto the gesture
 
     // ===== Single-finger Pan Tracking =====
     bool m_panActive = false;                ///< Whether a touch pan is in progress
