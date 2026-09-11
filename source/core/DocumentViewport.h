@@ -3104,6 +3104,18 @@ private:
     /// the hand has time to lift off the glass before touch gestures re-enable.
     QTimer* m_stylusWritingTimer = nullptr;
     static constexpr int STYLUS_WRITING_SETTLE_MS = 250;
+    /// Pen-activity watchdog. Restarted on EVERY tablet event (press, move,
+    /// release, hover). When it expires, the pen has stopped producing any
+    /// event for STYLUS_ACTIVITY_GUARD_MS - i.e. it has truly left the
+    /// digitizer, even if the driver never sent TabletRelease or
+    /// TabletLeaveProximity (a known Windows Wacom quirk). Clears ALL pen-
+    /// driven touch locks unconditionally. This is what prevents the
+    /// "touch stays dead after writing" trap when a Release is lost:
+    /// without it m_stylusWritingActive and m_pointerActive stay true
+    /// forever and the existing hover/proximity timers, gated on
+    /// !m_pointerActive, can never fire.
+    QTimer* m_stylusActivityGuard = nullptr;
+    static constexpr int STYLUS_ACTIVITY_GUARD_MS = 600;
 
     /// True while the stylus is inside the digitizer's proximity range
     /// (hovering or touching). Driven by TabletEnterProximity / any tablet

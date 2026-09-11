@@ -350,6 +350,27 @@ DocumentViewport::DocumentViewport(QWidget* parent)
             m_stylusInProximity = false;
         }
     });
+
+    // Pen-activity watchdog: restarted by EVERY tablet event (see header for
+    // rationale). When it expires the pen has stopped producing events for
+    // STYLUS_ACTIVITY_GUARD_MS, so it has truly left - clear every pen-driven
+    // touch lock unconditionally. Unlike the proximity/hover timers this does
+    // NOT check m_pointerActive: a lost TabletRelease leaves that flag stuck
+    // true, and gating on it is exactly what makes the touch lock unreleasable.
+    m_stylusActivityGuard = new QTimer(this);
+    m_stylusActivityGuard->setSingleShot(true);
+    m_stylusActivityGuard->setInterval(STYLUS_ACTIVITY_GUARD_MS);
+    connect(m_stylusActivityGuard, &QTimer::timeout, this, [this]() {
+        m_stylusWritingActive = false;
+        m_touchSequenceRejected = false;
+        m_stylusInProximity = false;
+        if (m_stylusWritingTimer) {
+            m_stylusWritingTimer->stop();
+        }
+        if (m_touchHandler) {
+            m_touchHandler->cancelActiveGesture();
+        }
+    });
     
     // Initialize PDF cache capacity based on default layout mode
     updatePdfCacheCapacity();
@@ -381,6 +402,12 @@ DocumentViewport::~DocumentViewport()
     // Stop tablet hover timer (prevents lambda firing during destruction)
     if (m_tabletHoverTimer) {
         m_tabletHoverTimer->stop();
+    }
+
+    // Stop pen-activity guard (prevents lambda firing during destruction
+    // and dereferencing this).
+    if (m_stylusActivityGuard) {
+        m_stylusActivityGuard->stop();
     }
 
     // Stop focus-cache rebuild debounce (prevents lambda from firing during
@@ -4584,6 +4611,9 @@ void DocumentViewport::hideEvent(QHideEvent* event)
     if (m_stylusProximityTimer) {
         m_stylusProximityTimer->stop();
     }
+    if (m_stylusActivityGuard) {
+        m_stylusActivityGuard->stop();
+    }
     m_stylusInProximity = false;
     m_touchSequenceRejected = false;
     
@@ -4703,6 +4733,13 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
     // Restart the "pen left" watchdog - see m_stylusProximityTimer.
     if (m_stylusProximityTimer) {
         m_stylusProximityTimer->start();
+    }
+    // Restart the pen-activity guard. Every tablet event - press, move,
+    // release, or hover - pushes the "pen is gone" deadline forward; when it
+    // finally expires the pen has been silent long enough that touch locks
+    // must be released even if TabletRelease was never delivered.
+    if (m_stylusActivityGuard) {
+        m_stylusActivityGuard->start();
     }
 
     // A mouse press whose release never arrived leaves an armed off-page pan
