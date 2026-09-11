@@ -3103,7 +3103,7 @@ private:
     /// Timer that extends the touch-rejection window briefly after pen-up so
     /// the hand has time to lift off the glass before touch gestures re-enable.
     QTimer* m_stylusWritingTimer = nullptr;
-    static constexpr int STYLUS_WRITING_SETTLE_MS = 250;
+    static constexpr int STYLUS_WRITING_SETTLE_MS = 200;
     /// Pen-activity watchdog. Restarted on EVERY tablet event (press, move,
     /// release, hover). When it expires, the pen has stopped producing any
     /// event for STYLUS_ACTIVITY_GUARD_MS - i.e. it has truly left the
@@ -3115,7 +3115,7 @@ private:
     /// forever and the existing hover/proximity timers, gated on
     /// !m_pointerActive, can never fire.
     QTimer* m_stylusActivityGuard = nullptr;
-    static constexpr int STYLUS_ACTIVITY_GUARD_MS = 300;
+    static constexpr int STYLUS_ACTIVITY_GUARD_MS = 200;
 
     /// True while the stylus is inside the digitizer's proximity range
     /// (hovering or touching). Driven by TabletEnterProximity / any tablet
