@@ -311,18 +311,19 @@ DocumentViewport::DocumentViewport(QWidget* parent)
     m_tabletHoverTimer->setInterval(100);  // 100ms - short enough to feel responsive
     connect(m_tabletHoverTimer, &QTimer::timeout, this, [this]() {
         // No tablet hover event received - stylus must have left
-        // Fallback proximity clear for drivers that never send
-        // TabletLeaveProximity: 100ms without hover data while no stroke
-        // is active means the pen is out of range. Never clear while a
-        // stroke is in flight - hovers pause during a press, so the timer
-        // fires mid-stroke and must not re-enable touch there.
+        // NOTE: this timer only manages the hover CURSOR (m_pointerInViewport).
+        // It deliberately does NOT touch m_stylusInProximity: a pen held
+        // stationary produces no TabletMove events, so firing 100ms after the
+        // last hover would clear the proximity lock mid-hover and a hand
+        // landing right afterwards would pan/zoom the canvas. The proximity
+        // watchdog (STYLUS_PROXIMITY_TIMEOUT_MS) owns that state and clears
+        // it only after a silence long enough to outlast a hover pause.
+        // Never clear while a stroke is in flight - hovers pause during a
+        // press, so the timer fires mid-stroke and must not re-enable touch
+        // there.
         // NOTE: this must NOT be gated on m_pointerInViewport - the hover
         // branch sets that to false as soon as the pen drifts off-canvas,
         // which would leave the proximity lock stuck on.
-        if (!m_pointerActive) {
-            m_stylusInProximity = false;
-        }
-
         if (m_pointerInViewport && !m_pointerActive) {
             m_pointerInViewport = false;
 
@@ -354,17 +355,22 @@ DocumentViewport::DocumentViewport(QWidget* parent)
 
     // Pen-activity watchdog: restarted by EVERY tablet event (see header for
     // rationale). When it expires the pen has stopped producing events for
-    // STYLUS_ACTIVITY_GUARD_MS, so it has truly left - clear every pen-driven
-    // touch lock unconditionally. Unlike the proximity/hover timers this does
-    // NOT check m_pointerActive: a lost TabletRelease leaves that flag stuck
-    // true, and gating on it is exactly what makes the touch lock unreleasable.
+    // STYLUS_ACTIVITY_GUARD_MS, so it has truly left - clear the WRITING locks
+    // unconditionally. Unlike the proximity/hover timers this does NOT check
+    // m_pointerActive: a lost TabletRelease leaves that flag stuck true, and
+    // gating on it is exactly what makes the touch lock unreleasable.
+    // Deliberately does NOT clear m_stylusInProximity here: that flag drives
+    // palm rejection while the pen is merely hovering, and 200ms of silence is
+    // shorter than a stationary-hover pause between strokes. The proximity
+    // watchdog (STYLUS_PROXIMITY_TIMEOUT_MS) clears it after a much longer
+    // silence, so the two timers together give fast unlock of the writing
+    // locks AND hover-proof palm rejection.
     m_stylusActivityGuard = new QTimer(this);
     m_stylusActivityGuard->setSingleShot(true);
     m_stylusActivityGuard->setInterval(STYLUS_ACTIVITY_GUARD_MS);
     connect(m_stylusActivityGuard, &QTimer::timeout, this, [this]() {
         m_stylusWritingActive = false;
         m_touchSequenceRejected = false;
-        m_stylusInProximity = false;
         if (m_stylusWritingTimer) {
             m_stylusWritingTimer->stop();
         }
@@ -5544,11 +5550,11 @@ bool DocumentViewport::event(QEvent* event)
         // veto (TabletEnterProximity already fired earlier), so without it the
         // touch activates a pan/zoom even though the pen is clearly present.
         // The lock is NOT permanent: the proximity watchdog
-        // (STYLUS_PROXIMITY_TIMEOUT_MS) and the pen-activity guard
-        // (STYLUS_ACTIVITY_GUARD_MS) clear it ~150-200ms after the pen's last
-        // event, and TabletLeaveProximity clears it instantly, so finger
-        // scrolling re-enables as soon as the pen truly leaves the glass even
-        // if the driver never sends TabletLeaveProximity. The >=3-point palm
+        // (STYLUS_PROXIMITY_TIMEOUT_MS) clears it after a long pen silence
+        // (covering stationary hover between strokes), and
+        // TabletLeaveProximity clears it instantly, so finger scrolling
+        // re-enables as soon as the pen truly leaves the glass even if the
+        // driver never sends TabletLeaveProximity. The >=3-point palm
         // path above covers multi-touch resting hands regardless.
         if (m_touchSequenceRejected || m_stylusWritingActive || m_stylusInProximity) {
             if (m_touchHandler) {

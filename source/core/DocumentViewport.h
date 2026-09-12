@@ -3145,18 +3145,30 @@ private:
 
     /// True while the stylus is inside the digitizer's proximity range
     /// (hovering or touching). Driven by TabletEnterProximity / any tablet
-    /// event, cleared by TabletLeaveProximity or hover timeout. Touch input
-    /// arriving in this state is a resting palm, not a gesture - the pen is
-    /// about to write, so the touch must not pan/zoom the canvas.
+    /// event, cleared by TabletLeaveProximity or the proximity watchdog
+    /// timeout. Touch input arriving in this state is a resting palm, not a
+    /// gesture - the pen is about to write, so the touch must not pan/zoom
+    /// the canvas. This MUST persist across stationary hover: the pen being
+    /// held still produces no tablet events, so a short timeout here would
+    /// silently re-enable touch mid-hover and a hand landing right after
+    /// would pan/zoom the canvas (the "it still moves while the pen is in
+    /// range" bug). Only the proximity watchdog below may clear it, and only
+    /// after a generous silence that a between-stroke hover pause never
+    /// reaches.
     bool m_stylusInProximity = false;
     /// Restarts on EVERY tablet event and clears m_stylusInProximity when it
     /// expires (with no stroke in flight). This is the reliable "pen left"
     /// detector: Windows Wacom drivers frequently omit TabletLeaveProximity,
     /// and the hover cursor timer only fires while the pen is inside the
     /// viewport rect, so without this a hover that drifts off-canvas or a pen
-    /// that stops moving would leave touch locked forever.
+    /// that stops moving would leave touch locked forever. The interval is
+    /// deliberately long (not the 100-200ms of the writing/activity guards):
+    /// it must survive a stationary-hover pause between strokes while still
+    /// bounding the worst-case touch lock after the pen truly leaves (drivers
+    /// that DO send TabletLeaveProximity unlock instantly, so this timeout
+    /// only matters on broken drivers).
     QTimer* m_stylusProximityTimer = nullptr;
-    static constexpr int STYLUS_PROXIMITY_TIMEOUT_MS = 150;
+    static constexpr int STYLUS_PROXIMITY_TIMEOUT_MS = 2000;
     /// Latched rejection for the CURRENT touch sequence: once a sequence has
     /// been identified as palm (e.g. it was already panning when the pen
     /// entered proximity), it stays rejected until every finger lifts,
