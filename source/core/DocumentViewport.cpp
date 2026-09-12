@@ -204,7 +204,8 @@ DocumentViewport::DocumentViewport(QWidget* parent)
     // PDF preload timer - debounces preload requests during rapid scrolling
     m_pdfPreloadTimer = new QTimer(this);
     m_pdfPreloadTimer->setSingleShot(true);
-    connect(m_pdfPreloadTimer, &QTimer::timeout, this, &DocumentViewport::doAsyncPdfPreload);
+    connect(m_pdfPreloadTimer, &QTimer::timeout, this,
+            [this]() { doAsyncPdfPreload(); });
 
     m_objectGeometryFeedbackTimer = new QTimer(this);
     m_objectGeometryFeedbackTimer->setSingleShot(true);
