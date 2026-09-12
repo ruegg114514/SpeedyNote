@@ -123,6 +123,7 @@ int handleExportPdf(const QCommandLineParser& parser)
     
     // Annotations only
     options.annotationsOnly = parser.isSet(QStringLiteral("annotations-only"));
+    options.notesOnly = parser.isSet(QStringLiteral("notes-only"));
     options.darkModeBackground = parser.isSet(QStringLiteral("dark-background"));
     options.darkenStrokes = parser.isSet(QStringLiteral("darken-strokes"));
     options.skipImageMasking = parser.isSet(QStringLiteral("skip-image-masking"));

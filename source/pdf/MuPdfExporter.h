@@ -21,6 +21,7 @@
 #include <QObject>
 #include <QString>
 #include <QVector>
+#include <QMap>
 
 #include <atomic>
 #include <map>
@@ -41,6 +42,7 @@ struct PdfExportOptions {
     bool darkModeBackground = false; ///< Apply HSL lightness inversion to PDF background (dark mode)
     bool darkenStrokes = false;      ///< Darken light-coloured strokes for printing (L>0.5 -> 1-L)
     bool skipImageMasking = false;   ///< Bypass image-region detection (invert everything)
+    bool notesOnly = false;          ///< Export only the side-notes column per page (page body excluded)
 };
 
 /**
@@ -60,6 +62,8 @@ struct PdfExportResult {
 #include <QImage>
 #include <QSizeF>
 #include <QRectF>
+
+#include "../strokes/VectorStroke.h"
 
 // Forward declarations for MuPDF implementation
 class Page;
@@ -193,6 +197,21 @@ public:
     static QVector<QRectF> highlightRectsToPdfSpace(const QVector<QRectF>& pageRects,
                                                     qreal pageHeightSn);
 
+    /**
+     * @brief Provide live side-notes column data for a notes-only export.
+     * @param widths Per-page notes column widths (pageIdx -> width; a page has a
+     *               column iff present with width > 0)
+     * @param strokes Per-page notes strokes, stored in notes-local coordinates
+     *                (origin = left edge of the notes column)
+     *
+     * Only needed when PdfExportOptions::notesOnly is set. When the exporter is
+     * used from a UI that owns the live DocumentViewport (e.g. MainWindow), pass
+     * the viewport's current data here so the export reflects unpersisted edits.
+     * Without a call, the exporter falls back to the persisted side_notes.json.
+     */
+    void setSideNotesData(const QMap<int, qreal>& widths,
+                          const QMap<int, QVector<VectorStroke>>& strokes);
+
 signals:
     /**
      * @brief Emitted when export progress changes.
@@ -296,6 +315,22 @@ private:
      * @return true if successful
      */
     bool renderBlankPage(int pageIndex);
+
+    // ===== Side-Notes Column Export =====
+
+    /**
+     * @brief Load side-notes data (columns + strokes) from the persisted
+     *        side_notes.json in the document's notes directory.
+     * @return true if at least one page has a notes column
+     */
+    bool loadSideNotesFromDisk();
+
+    /**
+     * @brief Render a single page's notes column as its own output page.
+     * @param pageIndex 0-based page index (must have a notes column)
+     * @return true if successful
+     */
+    bool renderNotesColumnPage(int pageIndex);
     
     // ===== Vector Stroke Conversion =====
     
@@ -405,9 +440,17 @@ private:
     std::atomic<bool> m_cancelled{false};  ///< Thread-safe cancellation flag
     PdfExportOptions m_options;
     QString m_lastError;  ///< Detailed error message from last failed operation
+
+    // Side-notes column data for notes-only export. Populated either via
+    // setSideNotesData() (live viewport data) or loadSideNotesFromDisk().
+    QMap<int, qreal> m_sideNotesWidths;                  ///< pageIdx -> column width (>0 = has column)
+    QMap<int, QVector<VectorStroke>> m_sideNotesStrokes; ///< pageIdx -> notes strokes
 };
 
 #else // SPEEDYNOTE_MUPDF_EXPORT not defined
+
+// Forward declaration so the stub can mirror the real class's API
+class VectorStroke;
 
 /**
  * @brief Stub class when MuPDF is not available.
@@ -428,6 +471,8 @@ public:
         emit exportFailed(result.errorMessage);
         return result;
     }
+    
+    void setSideNotesData(const QMap<int, qreal>&, const QMap<int, QVector<VectorStroke>>&) {}
     
     void cancel() {}
     bool isExporting() const { return false; }

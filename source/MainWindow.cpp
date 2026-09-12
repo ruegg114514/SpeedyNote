@@ -3486,6 +3486,7 @@ void MainWindow::showExportDialog()
         options.preserveMetadata = dialog.includeMetadata();
         options.preserveOutline = dialog.includeOutline();
         options.annotationsOnly = dialog.annotationsOnly();
+        options.notesOnly = dialog.notesOnly();
         options.darkModeBackground = dialog.darkModeBackground();
         options.darkenStrokes = dialog.darkenStrokes();
         options.skipImageMasking = QSettings("SpeedyNote", "App")
@@ -3494,6 +3495,12 @@ void MainWindow::showExportDialog()
         // Create exporter and export
         MuPdfExporter exporter;
         exporter.setDocument(doc);
+        // Notes-only export uses the live viewport data (may include unsaved
+        // strokes/columns) instead of the persisted side_notes.json.
+        if (options.notesOnly && viewport) {
+            exporter.setSideNotesData(viewport->sideNotesWidths(),
+                                      viewport->sideNotesStrokes());
+        }
         
         QApplication::setOverrideCursor(Qt::WaitCursor);
         PdfExportResult result = exporter.exportPdf(options);

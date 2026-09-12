@@ -131,6 +131,7 @@ struct ExportPdfOptions {
     bool preserveMetadata = true;   ///< Preserve PDF metadata from source
     bool preserveOutline = true;    ///< Preserve PDF outline/bookmarks from source
     bool annotationsOnly = false;   ///< Export strokes only on blank background
+    bool notesOnly = false;         ///< Export only the side-notes column per page
     bool darkModeBackground = false; ///< Apply HSL lightness inversion to PDF background
     bool darkenStrokes = false;      ///< Darken light-coloured strokes for printing
     bool skipImageMasking = false;   ///< Bypass image-region detection (invert everything)

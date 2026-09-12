@@ -252,6 +252,11 @@ QWidget* BatchExportDialog::createPdfTab()
 
     auto* optionsGroup = new QGroupBox(tr("Options"), tab);
     auto* optionsLayout = new QVBoxLayout(optionsGroup);
+    m_notesOnlyCheckbox =
+        new QCheckBox(tr("Export notes column only"), optionsGroup);
+    m_notesOnlyCheckbox->setToolTip(
+        tr("Export only the side notes column of the selected pages, "
+           "each column as its own page sized to the column."));
     m_annotationsOnlyCheckbox =
         new QCheckBox(tr("Annotations only (blank background)"), optionsGroup);
     m_darkModeBgCheckbox =
@@ -264,18 +269,35 @@ QWidget* BatchExportDialog::createPdfTab()
         new QCheckBox(tr("Include bookmarks/outline"), optionsGroup);
     m_includeMetadataCheckbox->setChecked(true);
     m_includeOutlineCheckbox->setChecked(true);
+    optionsLayout->addWidget(m_notesOnlyCheckbox);
     optionsLayout->addWidget(m_annotationsOnlyCheckbox);
     optionsLayout->addWidget(m_darkModeBgCheckbox);
     optionsLayout->addWidget(m_darkenStrokesCheckbox);
     optionsLayout->addWidget(m_includeMetadataCheckbox);
     optionsLayout->addWidget(m_includeOutlineCheckbox);
+    // Notes-only excludes the page body, so the background options (annotations
+    // only, dark-mode background) do not apply and are mutually exclusive.
+    connect(m_notesOnlyCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
+        if (checked) {
+            m_annotationsOnlyCheckbox->setChecked(false);
+            m_darkModeBgCheckbox->setChecked(false);
+        }
+        m_annotationsOnlyCheckbox->setEnabled(!checked);
+        m_darkModeBgCheckbox->setEnabled(!checked);
+    });
     connect(m_annotationsOnlyCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
+        if (checked) m_notesOnlyCheckbox->setChecked(false);
+        m_notesOnlyCheckbox->setEnabled(!checked);
         if (checked) m_darkModeBgCheckbox->setChecked(false);
         m_darkModeBgCheckbox->setEnabled(!checked);
     });
     connect(m_darkModeBgCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
-        if (checked) m_annotationsOnlyCheckbox->setChecked(false);
+        if (checked) {
+            m_annotationsOnlyCheckbox->setChecked(false);
+            m_notesOnlyCheckbox->setChecked(false);
+        }
         m_annotationsOnlyCheckbox->setEnabled(!checked);
+        m_notesOnlyCheckbox->setEnabled(!checked);
     });
     layout->addWidget(optionsGroup);
     layout->addStretch();
@@ -338,6 +360,11 @@ void BatchExportDialog::loadSettings()
         settings.value(QStringLiteral("annotationsOnly"), false).toBool());
     m_darkModeBgCheckbox->setChecked(
         settings.value(QStringLiteral("darkModeBackground"), false).toBool());
+    // Loaded after the background options so that, if a stale session left
+    // both notes-only and dark-background on, notes-only wins (they are
+    // mutually exclusive in the UI).
+    m_notesOnlyCheckbox->setChecked(
+        settings.value(QStringLiteral("notesOnly"), false).toBool());
     m_darkenStrokesCheckbox->setChecked(
         settings.value(QStringLiteral("darkenStrokes"), false).toBool());
     m_includeMetadataCheckbox->setChecked(
@@ -382,6 +409,7 @@ void BatchExportDialog::saveSettings() const
     settings.beginGroup(QStringLiteral("BatchPdfExport"));
     settings.setValue(QStringLiteral("dpi"), dpi());
     settings.setValue(QStringLiteral("annotationsOnly"), annotationsOnly());
+    settings.setValue(QStringLiteral("notesOnly"), notesOnly());
     settings.setValue(QStringLiteral("darkModeBackground"), darkModeBackground());
     settings.setValue(QStringLiteral("darkenStrokes"), darkenStrokes());
     settings.setValue(QStringLiteral("includeMetadata"), includeMetadata());
@@ -519,6 +547,11 @@ QString BatchExportDialog::pageRange() const
 bool BatchExportDialog::annotationsOnly() const
 {
     return m_annotationsOnlyCheckbox->isChecked();
+}
+
+bool BatchExportDialog::notesOnly() const
+{
+    return m_notesOnlyCheckbox->isChecked();
 }
 
 bool BatchExportDialog::darkModeBackground() const

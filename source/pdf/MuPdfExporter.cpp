@@ -14,14 +14,19 @@
 #include "../layers/VectorLayer.h"
 #include "../objects/ImageObject.h"
 #include "../objects/LinkObject.h"
+#include "../strokes/VectorStroke.h"
 
 #include <mupdf/fitz.h>
 #include <mupdf/pdf.h>
 
 #include <QBuffer>
 #include <QDebug>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPainter>
 #include <QRegularExpression>
 #include <QSet>
@@ -38,6 +43,12 @@ static void appendLayerStrokesToBuffer(fz_context* ctx, pdf_document* outputDoc,
                                        fz_buffer* buf, pdf_obj* resources,
                                        const VectorLayer* layer, qreal pageHeightSn,
                                        int& gsIndex, std::map<int, QString>& alphaToGsName,
+                                       bool darkenStrokes = false);
+static void appendNotesStrokesToBuffer(fz_context* ctx, pdf_document* outputDoc,
+                                       fz_buffer* buf, pdf_obj* resources,
+                                       const QVector<VectorStroke>& strokes,
+                                       qreal pageHeightSn, int& gsIndex,
+                                       std::map<int, QString>& alphaToGsName,
                                        bool darkenStrokes = false);
 static int getSourcePageRotation(fz_context* ctx, pdf_document* srcPdf, int pageIndex);
 static fz_rect getSourcePageBBox(fz_context* ctx, pdf_document* srcPdf, int pageIndex);
@@ -732,10 +743,40 @@ PdfExportResult MuPdfExporter::exportPdf(const PdfExportOptions& options)
     m_cancelled.store(false);
     m_lastError.clear();
     
+    // Notes-only mode: obtain the side-notes data (live data provided by the
+    // caller wins over the persisted JSON) and restrict the output to pages
+    // that actually have a notes column.
+    if (m_options.notesOnly) {
+        if (m_sideNotesStrokes.isEmpty() && m_sideNotesWidths.isEmpty()
+                && !loadSideNotesFromDisk()) {
+            result.errorMessage = tr("No side notes data found for this document");
+            cleanup();
+            emit exportFailed(result.errorMessage);
+            m_isExporting = false;
+            return result;
+        }
+        QVector<int> withNotes;
+        withNotes.reserve(pageIndices.size());
+        for (int idx : pageIndices) {
+            if (m_sideNotesWidths.value(idx, 0.0) > 0.0) {
+                withNotes.append(idx);
+            }
+        }
+        if (withNotes.isEmpty()) {
+            result.errorMessage = tr("None of the selected pages have a notes column");
+            cleanup();
+            emit exportFailed(result.errorMessage);
+            m_isExporting = false;
+            return result;
+        }
+        pageIndices = withNotes;
+    }
+    
     #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "[MuPdfExporter] Starting export:"
              << pageIndices.size() << "pages at" << options.dpi << "DPI"
-             << "to" << options.outputPath;
+             << "to" << options.outputPath
+             << (m_options.notesOnly ? "[notes only]" : "");
     #endif
     
     // Initialize MuPDF
@@ -747,8 +788,9 @@ PdfExportResult MuPdfExporter::exportPdf(const PdfExportOptions& options)
         return result;
     }
     
-    // Open source PDF if document has one
-    if (!openSourcePdf()) {
+    // Open source PDF if document has one (skipped for notes-only export: the
+    // output contains just the notes columns, so no source PDF is needed).
+    if (!m_options.notesOnly && !openSourcePdf()) {
         // Use detailed error message if available
         result.errorMessage = m_lastError.isEmpty() 
             ? tr("Failed to open source PDF") 
@@ -780,6 +822,9 @@ PdfExportResult MuPdfExporter::exportPdf(const PdfExportOptions& options)
         if (!currentPage) {
             qWarning() << "[MuPdfExporter] Failed to get page" << pageIndex;
             pageSuccess = false;
+        } else if (m_options.notesOnly) {
+            // Notes-only export: output just this page's notes column
+            pageSuccess = renderNotesColumnPage(pageIndex);
         } else {
             // Point the active-source aliases at THIS page's own PDF source so that
             // graft/render/import operate on the correct source (multi-source docs).
@@ -1921,6 +1966,167 @@ bool MuPdfExporter::renderBlankPage(int pageIndex)
 }
 
 // ============================================================================
+// Side-Notes Column Export
+// ============================================================================
+
+void MuPdfExporter::setSideNotesData(const QMap<int, qreal>& widths,
+                                     const QMap<int, QVector<VectorStroke>>& strokes)
+{
+    m_sideNotesWidths = widths;
+    m_sideNotesStrokes = strokes;
+}
+
+bool MuPdfExporter::loadSideNotesFromDisk()
+{
+    if (!m_document) return false;
+    if (m_document->isEdgeless()) return false;
+    const int pageCount = m_document->pageCount();
+    if (pageCount <= 0) return false;
+
+    const QString notesDir = m_document->notesPath();
+    if (notesDir.isEmpty()) return false;
+
+    const QString filePath = notesDir + "/side_notes.json";
+    QFile file(filePath);
+    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+
+    const QByteArray raw = file.readAll();
+    file.close();
+
+    QJsonDocument doc = QJsonDocument::fromJson(raw);
+    if (!doc.isObject()) return false;
+    QJsonObject root = doc.object();
+
+    m_sideNotesWidths.clear();
+    m_sideNotesStrokes.clear();
+
+    const auto pageInRange = [pageCount](int pageIndex) {
+        return pageIndex >= 0 && pageIndex < pageCount;
+    };
+
+    // Per-page column widths (a page has a column iff its key is present with width > 0)
+    QJsonObject widthsObj = root.value("pageWidths").toObject();
+    for (auto it = widthsObj.begin(); it != widthsObj.end(); ++it) {
+        const qreal w = it.value().toDouble(0.0);
+        const int pageIndex = it.key().toInt();
+        if (w > 0.0 && pageInRange(pageIndex)) {
+            m_sideNotesWidths[pageIndex] = w;
+        }
+    }
+
+    // Legacy fallback: old format stored one global width applied to every page
+    // that already had committed strokes.
+    if (m_sideNotesWidths.isEmpty()) {
+        const double legacyWidth = root.value("notesWidth").toDouble(200.0);
+        if (legacyWidth > 0.0) {
+            const QJsonObject legacyPages = root.value("pages").toObject();
+            for (auto it = legacyPages.begin(); it != legacyPages.end(); ++it) {
+                const int pageIndex = it.key().toInt();
+                if (pageInRange(pageIndex)) {
+                    m_sideNotesWidths[pageIndex] = legacyWidth;
+                }
+            }
+        }
+    }
+
+    // Per-page notes strokes
+    QJsonObject pagesObj = root.value("pages").toObject();
+    for (auto it = pagesObj.begin(); it != pagesObj.end(); ++it) {
+        const int pageIndex = it.key().toInt();
+        if (!pageInRange(pageIndex)) continue;
+
+        QVector<VectorStroke> strokes;
+        const QJsonArray strokesArr = it.value().toArray();
+        for (const QJsonValue& v : strokesArr) {
+            const QJsonObject strokeObj = v.toObject();
+            VectorStroke stroke;
+            stroke.id = strokeObj.value("id").toString();
+            stroke.color = QColor(strokeObj.value("color").toString());
+            stroke.baseThickness = strokeObj.value("thickness").toDouble(5.0);
+
+            const QJsonArray pointsArr = strokeObj.value("points").toArray();
+            stroke.points.reserve(pointsArr.size());
+            for (const QJsonValue& pv : pointsArr) {
+                const QJsonObject ptObj = pv.toObject();
+                StrokePoint pt;
+                pt.pos = QPointF(ptObj.value("x").toDouble(),
+                                 ptObj.value("y").toDouble());
+                pt.pressure = ptObj.value("pressure").toDouble(1.0);
+                stroke.points.append(pt);
+            }
+            if (!stroke.points.isEmpty()) {
+                stroke.updateBoundingBox();
+                strokes.append(stroke);
+            }
+        }
+        if (!strokes.isEmpty()) {
+            m_sideNotesStrokes[pageIndex] = strokes;
+        }
+    }
+
+    return !m_sideNotesWidths.isEmpty();
+}
+
+bool MuPdfExporter::renderNotesColumnPage(int pageIndex)
+{
+    if (!m_outputDoc || !m_ctx || !m_document) {
+        return false;
+    }
+
+    const qreal notesW = m_sideNotesWidths.value(pageIndex, 0.0);
+    if (notesW <= 0.0) {
+        // No notes column on this page - nothing to export for it
+        return false;
+    }
+
+    Page* page = m_document->page(pageIndex);
+    if (!page) return false;
+
+    // Output page is exactly the notes column: width = column width,
+    // height = page height (both SpeedyNote units -> PDF points).
+    const float widthPt = notesW * SN_TO_PDF_SCALE;
+    const float heightPt = page->size.height() * SN_TO_PDF_SCALE;
+
+    fz_buffer* content = nullptr;
+    pdf_obj* resources = nullptr;
+
+    fz_try(m_ctx) {
+        content = fz_new_buffer(m_ctx, 1024);
+        resources = pdf_new_dict(m_ctx, m_outputDoc, 4);
+
+        // Emit the page's notes strokes (notes-local coordinates already)
+        int gsIndex = 0;
+        std::map<int, QString> alphaToGsName;
+        const auto it = m_sideNotesStrokes.constFind(pageIndex);
+        if (it != m_sideNotesStrokes.constEnd()) {
+            appendNotesStrokesToBuffer(m_ctx, m_outputDoc, content, resources,
+                                       it.value(), page->size.height(),
+                                       gsIndex, alphaToGsName,
+                                       m_options.darkenStrokes);
+        }
+
+        fz_rect mediabox = fz_make_rect(0, 0, widthPt, heightPt);
+        pdf_obj* pageObj = pdf_add_page(m_ctx, m_outputDoc, mediabox, 0, resources, content);
+        pdf_insert_page(m_ctx, m_outputDoc, -1, pageObj);
+        pdf_drop_obj(m_ctx, pageObj);
+    }
+    fz_always(m_ctx) {
+        if (content) fz_drop_buffer(m_ctx, content);
+        // resources is owned by the page, no need to drop
+    }
+    fz_catch(m_ctx) {
+        m_lastError = QString::fromUtf8(fz_caught_message(m_ctx));
+        qWarning() << "[MuPdfExporter] renderNotesColumnPage failed for page"
+                   << pageIndex << ":" << m_lastError;
+        return false;
+    }
+
+    return true;
+}
+
+// ============================================================================
 // Vector Stroke Conversion (Phase 3)
 // ============================================================================
 
@@ -2233,6 +2439,75 @@ static void appendLayerStrokesToBuffer(fz_context* ctx, pdf_document* outputDoc,
         }
         
         // Restore graphics state if we saved it for transparency
+        if (needsTransparency) {
+            fz_append_string(ctx, buf, "Q\n");
+        }
+    }
+}
+
+/**
+ * @brief Append a set of side-notes column strokes to a PDF content buffer.
+ *
+ * Mirrors appendLayerStrokesToBuffer for the notes column: strokes are stored
+ * in notes-local coordinates (origin = left edge of the notes column), so they
+ * can be emitted verbatim into a page whose mediabox is exactly the column.
+ */
+static void appendNotesStrokesToBuffer(fz_context* ctx, pdf_document* outputDoc,
+                                       fz_buffer* buf, pdf_obj* resources,
+                                       const QVector<VectorStroke>& strokes,
+                                       qreal pageHeightSn, int& gsIndex,
+                                       std::map<int, QString>& alphaToGsName,
+                                       bool darkenStrokes)
+{
+    if (!ctx || !buf || strokes.isEmpty()) return;
+
+    for (const VectorStroke& stroke : strokes) {
+        // Build the stroke polygon using the same VectorLayer logic as normal strokes
+        VectorLayer::StrokePolygonResult polyResult = VectorLayer::buildStrokePolygon(stroke);
+
+        // Effective alpha (notes strokes carry their own alpha; no layer opacity)
+        float strokeAlpha = static_cast<float>(stroke.color.alphaF());
+        bool needsTransparency = (strokeAlpha < 0.999f) && resources && outputDoc;
+
+        if (needsTransparency) {
+            fz_append_string(ctx, buf, "q\n");
+
+            QString gsName = getOrCreateExtGState(ctx, outputDoc, resources, strokeAlpha, gsIndex, alphaToGsName);
+            if (!gsName.isEmpty()) {
+                char gsCmd[32];
+                snprintf(gsCmd, sizeof(gsCmd), "/%s gs\n", gsName.toUtf8().constData());
+                fz_append_string(ctx, buf, gsCmd);
+            }
+        }
+
+        QColor strokeColor = stroke.color;
+        if (darkenStrokes) {
+            strokeColor = DarkModeUtils::darkenColorForExport(strokeColor);
+        }
+        float r = strokeColor.redF();
+        float g = strokeColor.greenF();
+        float b = strokeColor.blueF();
+
+        char colorCmd[64];
+        snprintf(colorCmd, sizeof(colorCmd), "%.4f %.4f %.4f rg\n", r, g, b);
+        fz_append_string(ctx, buf, colorCmd);
+
+        if (polyResult.isSinglePoint) {
+            appendCircleToBuffer(ctx, buf, polyResult.startCapCenter,
+                                 polyResult.startCapRadius, pageHeightSn);
+            fz_append_string(ctx, buf, "f\n");
+        } else if (!polyResult.polygon.isEmpty()) {
+            appendPolygonToBuffer(ctx, buf, polyResult.polygon, pageHeightSn);
+
+            if (polyResult.hasRoundCaps) {
+                appendCircleToBuffer(ctx, buf, polyResult.startCapCenter,
+                                     polyResult.startCapRadius, pageHeightSn);
+                appendCircleToBuffer(ctx, buf, polyResult.endCapCenter,
+                                     polyResult.endCapRadius, pageHeightSn);
+            }
+            fz_append_string(ctx, buf, "f\n");
+        }
+
         if (needsTransparency) {
             fz_append_string(ctx, buf, "Q\n");
         }

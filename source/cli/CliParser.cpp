@@ -142,6 +142,10 @@ void setupParser(QCommandLineParser& parser, Command cmd)
                 QCoreApplication::translate("CLI", "Export strokes only (blank background)")));
 
             parser.addOption(QCommandLineOption(
+                QStringLiteral("notes-only"),
+                QCoreApplication::translate("CLI", "Export only the side notes column of each page")));
+
+            parser.addOption(QCommandLineOption(
                 QStringLiteral("dark-background"),
                 QCoreApplication::translate("CLI", "Apply dark mode lightness inversion to PDF backgrounds")));
 

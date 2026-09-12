@@ -622,6 +622,22 @@ public:
     qreal sideNotesWidthFor(int pageIndex) const;
 
     /**
+     * @brief All notes-column widths (pageIdx -> width, only entries > 0).
+     *
+     * Exposed read-only for PDF notes-only export so live (possibly unsaved)
+     * columns can be handed to the exporter.
+     */
+    const QMap<int, qreal>& sideNotesWidths() const { return m_sideNotesWidths; }
+
+    /**
+     * @brief All notes strokes (pageIdx -> strokes) in notes-local coordinates.
+     *
+     * Exposed read-only for PDF notes-only export so live (possibly unsaved)
+     * strokes can be handed to the exporter.
+     */
+    const QMap<int, QVector<VectorStroke>>& sideNotesStrokes() const { return m_sideNotesStrokes; }
+
+    /**
      * @brief Set the width (document units) of a page's notes column.
      * @param width Width <= 0 removes the column for that page.
      * @param pageIndex

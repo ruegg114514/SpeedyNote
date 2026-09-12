@@ -48,6 +48,7 @@ public:
     int dpi() const;
     QString pageRange() const;
     bool annotationsOnly() const;
+    bool notesOnly() const;
     bool darkModeBackground() const;
     bool darkenStrokes() const;
     bool includeMetadata() const;
@@ -101,6 +102,7 @@ private:
     QSpinBox* m_dpiSpinBox = nullptr;
 
     QCheckBox* m_annotationsOnlyCheckbox = nullptr;
+    QCheckBox* m_notesOnlyCheckbox = nullptr;
     QCheckBox* m_darkModeBgCheckbox = nullptr;
     QCheckBox* m_darkenStrokesCheckbox = nullptr;
     QCheckBox* m_includeMetadataCheckbox = nullptr;
