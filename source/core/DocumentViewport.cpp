@@ -5534,19 +5534,23 @@ bool DocumentViewport::event(QEvent* event)
             m_touchSequenceRejected = false;
         }
 
-        // Stylus-driven palm rejection. A canvas touch is a resting hand only
-        // while the pen is actually writing (or within the post-stroke settle
-        // window), or when the current touch sequence has already been vetoed
-        // by the pen landing. NOTE: deliberately NOT gated on m_stylusInProximity
-        // alone - a Wacom pen stays inside the digitizer's detection range for
-        // several centimetres, and continuous hover TabletMove events keep
-        // restarting the proximity watchdog. Treating mere hover as a veto
-        // would lock touch out for as long as the pen is anywhere near the
-        // glass, i.e. the "can't scroll/exit with a finger after writing" trap.
-        // Purely hovering (pen lifted, not writing) therefore leaves touch
-        // usable; the >=3-point palm path above and the grace-window veto on
-        // pen-down still cover the hand landing while actually writing.
-        if (m_touchSequenceRejected || m_stylusWritingActive) {
+        // Stylus-driven palm rejection. A canvas touch is a resting hand while
+        // the pen is writing (or within the post-stroke settle window), when
+        // the current touch sequence has already been vetoed by the pen
+        // landing, OR while the pen is inside the digitizer's proximity range.
+        // The proximity term closes the gap where the pen is ALREADY hovering
+        // over the glass (e.g. between strokes, or before pen-down) and the
+        // hand lands: no new stylus event arrives to trigger the grace-window
+        // veto (TabletEnterProximity already fired earlier), so without it the
+        // touch activates a pan/zoom even though the pen is clearly present.
+        // The lock is NOT permanent: the proximity watchdog
+        // (STYLUS_PROXIMITY_TIMEOUT_MS) and the pen-activity guard
+        // (STYLUS_ACTIVITY_GUARD_MS) clear it ~150-200ms after the pen's last
+        // event, and TabletLeaveProximity clears it instantly, so finger
+        // scrolling re-enables as soon as the pen truly leaves the glass even
+        // if the driver never sends TabletLeaveProximity. The >=3-point palm
+        // path above covers multi-touch resting hands regardless.
+        if (m_touchSequenceRejected || m_stylusWritingActive || m_stylusInProximity) {
             if (m_touchHandler) {
                 m_touchHandler->cancelActiveGesture();
             }
