@@ -3121,52 +3121,46 @@ private:
     /// Current down touch-point count across the active touch sequence.
     int m_activeTouchCount = 0;
 
-    /// True while a stylus stroke is in flight or within a short settle window
-    /// after pen-up. During this window any touch event (a hand resting on the
-    /// glass) is treated as palm contact and swallowed before it can trigger
-    /// pan/zoom, regardless of the point count.
-    bool m_stylusWritingActive = false;
-    /// Timer that extends the touch-rejection window briefly after pen-up so
-    /// the hand has time to lift off the glass before touch gestures re-enable.
-    QTimer* m_stylusWritingTimer = nullptr;
-    static constexpr int STYLUS_WRITING_SETTLE_MS = 200;
     /// Pen-activity watchdog. Restarted on EVERY tablet event (press, move,
     /// release, hover). When it expires, the pen has stopped producing any
     /// event for STYLUS_ACTIVITY_GUARD_MS - i.e. it has truly left the
     /// digitizer, even if the driver never sent TabletRelease or
-    /// TabletLeaveProximity (a known Windows Wacom quirk). Clears ALL pen-
-    /// driven touch locks unconditionally. This is what prevents the
-    /// "touch stays dead after writing" trap when a Release is lost:
-    /// without it m_stylusWritingActive and m_pointerActive stay true
-    /// forever and the existing hover/proximity timers, gated on
-    /// !m_pointerActive, can never fire.
+    /// TabletLeaveProximity (a known Windows Wacom quirk). Clears the
+    /// per-sequence touch latch and cancels any in-flight touch gesture so a
+    /// lost TabletRelease / TouchEnd can never leave touch dead. This is what
+    /// prevents the "touch stays dead after writing" trap when a Release is
+    /// lost. It deliberately does NOT clear m_stylusInProximity: that flag is
+    /// the single "pen present" state and is owned by the proximity watchdog
+    /// below (and TabletLeaveProximity), which clear it only once the pen is
+    /// truly gone.
     QTimer* m_stylusActivityGuard = nullptr;
     static constexpr int STYLUS_ACTIVITY_GUARD_MS = 200;
 
-    /// True while the stylus is inside the digitizer's proximity range
-    /// (hovering or touching). Driven by TabletEnterProximity / any tablet
-    /// event, cleared by TabletLeaveProximity or the proximity watchdog
-    /// timeout. Touch input arriving in this state is a resting palm, not a
-    /// gesture - the pen is about to write, so the touch must not pan/zoom
-    /// the canvas. This MUST persist across stationary hover: the pen being
-    /// held still produces no tablet events, so a short timeout here would
-    /// silently re-enable touch mid-hover and a hand landing right after
-    /// would pan/zoom the canvas (the "it still moves while the pen is in
-    /// range" bug). Only the proximity watchdog below may clear it, and only
-    /// after a generous silence that a between-stroke hover pause never
-    /// reaches.
+    /// THE single "pen present" state. True while the stylus is inside the
+    /// digitizer's proximity range - whether it is hovering or pressing is
+    /// deliberately NOT distinguished: a press is just a hover with contact,
+    /// and every pen event (press, move, release, hover) sets this true, so
+    /// writing is always covered. Palm rejection needs exactly two states:
+    /// the pen is in the hand (touch = resting palm, reject) or it is not
+    /// (touch = deliberate gesture, allow). Driven by TabletEnterProximity /
+    /// any tablet event, cleared by TabletLeaveProximity or the proximity
+    /// watchdog timeout. This MUST persist across stationary hover: the pen
+    /// being held still produces no tablet events, so a short timeout here
+    /// would silently re-enable touch mid-hover and a hand landing right
+    /// after would pan/zoom the canvas (the "it still moves while the pen is
+    /// in range" bug). Only the proximity watchdog below may clear it, and
+    /// only after a silence long enough to outlast a between-stroke pause.
     bool m_stylusInProximity = false;
     /// Restarts on EVERY tablet event and clears m_stylusInProximity when it
-    /// expires (with no stroke in flight). This is the reliable "pen left"
-    /// detector: Windows Wacom drivers frequently omit TabletLeaveProximity,
-    /// and the hover cursor timer only fires while the pen is inside the
-    /// viewport rect, so without this a hover that drifts off-canvas or a pen
-    /// that stops moving would leave touch locked forever. The interval is
-    /// deliberately long (not the 100-200ms of the writing/activity guards):
-    /// it must survive a stationary-hover pause between strokes while still
-    /// bounding the worst-case touch lock after the pen truly leaves (drivers
-    /// that DO send TabletLeaveProximity unlock instantly, so this timeout
-    /// only matters on broken drivers).
+    /// expires. This is the reliable "pen left" detector: Windows Wacom
+    /// drivers frequently omit TabletLeaveProximity, and the hover cursor
+    /// timer only fires while the pen is inside the viewport rect, so without
+    /// this a hover that drifts off-canvas or a pen that stops moving would
+    /// leave touch locked forever. The interval is deliberately long: it must
+    /// survive a stationary-hover pause between strokes while still bounding
+    /// the worst-case touch lock after the pen truly leaves (drivers that DO
+    /// send TabletLeaveProximity unlock instantly, so this timeout only
+    /// matters on broken drivers).
     QTimer* m_stylusProximityTimer = nullptr;
     static constexpr int STYLUS_PROXIMITY_TIMEOUT_MS = 2000;
     /// Latched rejection for the CURRENT touch sequence: once a sequence has

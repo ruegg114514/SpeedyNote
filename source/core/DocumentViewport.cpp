@@ -295,17 +295,6 @@ DocumentViewport::DocumentViewport(QWidget* parent)
     // Tablet hover timer - detects when stylus leaves viewport by timeout
     // When stylus hovers to another widget, we stop receiving TabletMove events.
     // This timer fires if no tablet hover event received within the interval.
-    // Stylus-writing palm rejection: while the pen is down (and for a short
-    // settle window after pen-up), any touch input is treated as palm contact.
-    // This prevents a hand resting on the glass from panning/zooming the canvas
-    // while the user is actively writing.
-    m_stylusWritingTimer = new QTimer(this);
-    m_stylusWritingTimer->setSingleShot(true);
-    m_stylusWritingTimer->setInterval(STYLUS_WRITING_SETTLE_MS);
-    connect(m_stylusWritingTimer, &QTimer::timeout, this, [this]() {
-        m_stylusWritingActive = false;
-    });
-
     m_tabletHoverTimer = new QTimer(this);
     m_tabletHoverTimer->setSingleShot(true);
     m_tabletHoverTimer->setInterval(100);  // 100ms - short enough to feel responsive
@@ -340,40 +329,35 @@ DocumentViewport::DocumentViewport(QWidget* parent)
     });
 
     // Stylus proximity watchdog: restarted by every tablet event. When it
-    // fires with no stroke in flight, the pen is definitively gone - clear
-    // the proximity lock so touch gestures re-enable. Windows Wacom drivers
-    // often omit TabletLeaveProximity, so this timer (not the proximity event)
-    // is the primary unlock path.
+    // fires, the pen has been silent for STYLUS_PROXIMITY_TIMEOUT_MS - it is
+    // definitively gone (hover-still, lost Release, or out of range) - so
+    // clear the proximity lock and let touch gestures re-enable. Windows
+    // Wacom drivers often omit TabletLeaveProximity, so this timer (not the
+    // proximity event) is the primary unlock path. NOT gated on
+    // m_pointerActive on purpose: a lost TabletRelease would leave that flag
+    // stuck true forever, and gating on it would make the touch lock
+    // unreleasable; a pen that has been silent this long is gone regardless
+    // of what the last event was.
     m_stylusProximityTimer = new QTimer(this);
     m_stylusProximityTimer->setSingleShot(true);
     m_stylusProximityTimer->setInterval(STYLUS_PROXIMITY_TIMEOUT_MS);
     connect(m_stylusProximityTimer, &QTimer::timeout, this, [this]() {
-        if (!m_pointerActive) {
-            m_stylusInProximity = false;
-        }
+        m_stylusInProximity = false;
     });
 
     // Pen-activity watchdog: restarted by EVERY tablet event (see header for
     // rationale). When it expires the pen has stopped producing events for
-    // STYLUS_ACTIVITY_GUARD_MS, so it has truly left - clear the WRITING locks
-    // unconditionally. Unlike the proximity/hover timers this does NOT check
-    // m_pointerActive: a lost TabletRelease leaves that flag stuck true, and
-    // gating on it is exactly what makes the touch lock unreleasable.
-    // Deliberately does NOT clear m_stylusInProximity here: that flag drives
-    // palm rejection while the pen is merely hovering, and 200ms of silence is
-    // shorter than a stationary-hover pause between strokes. The proximity
-    // watchdog (STYLUS_PROXIMITY_TIMEOUT_MS) clears it after a much longer
-    // silence, so the two timers together give fast unlock of the writing
-    // locks AND hover-proof palm rejection.
+    // STYLUS_ACTIVITY_GUARD_MS, so it has truly left - clear the per-sequence
+    // touch latch and cancel any in-flight gesture so a lost TabletRelease or
+    // TouchEnd can never leave touch dead. It deliberately does NOT clear
+    // m_stylusInProximity: that is the single "pen present" state, owned by
+    // the proximity watchdog (STYLUS_PROXIMITY_TIMEOUT_MS) and
+    // TabletLeaveProximity, which clear it only once the pen is truly gone.
     m_stylusActivityGuard = new QTimer(this);
     m_stylusActivityGuard->setSingleShot(true);
     m_stylusActivityGuard->setInterval(STYLUS_ACTIVITY_GUARD_MS);
     connect(m_stylusActivityGuard, &QTimer::timeout, this, [this]() {
-        m_stylusWritingActive = false;
         m_touchSequenceRejected = false;
-        if (m_stylusWritingTimer) {
-            m_stylusWritingTimer->stop();
-        }
         if (m_touchHandler) {
             m_touchHandler->cancelActiveGesture();
         }
@@ -4627,12 +4611,8 @@ void DocumentViewport::hideEvent(QHideEvent* event)
     // the latch here rather than leaving the next sequence routed to a child.
     m_touchSequenceOnChild = false;
 
-    // Stylus-writing lock must not survive a tab switch or hide; otherwise the
-    // viewport stays in palm-rejection mode after coming back.
-    m_stylusWritingActive = false;
-    if (m_stylusWritingTimer) {
-        m_stylusWritingTimer->stop();
-    }
+    // The "pen present" state must not survive a tab switch or hide;
+    // otherwise the viewport stays in palm-rejection mode after coming back.
     if (m_stylusProximityTimer) {
         m_stylusProximityTimer->stop();
     }
@@ -5532,22 +5512,23 @@ bool DocumentViewport::event(QEvent* event)
         }
         
         // Stale-latch recovery: a TouchBegin arriving with the pen out of
-        // range and no stroke settling is a NEW sequence whose predecessor's
+        // range is a NEW sequence whose predecessor's
         // TouchEnd was lost (driver quirk). Don't let the old latch veto
         // touch input forever.
         if (event->type() == QEvent::TouchBegin && m_touchSequenceRejected
-            && !m_stylusInProximity && !m_stylusWritingActive) {
+            && !m_stylusInProximity) {
             m_touchSequenceRejected = false;
         }
 
-        // Stylus-driven palm rejection. A canvas touch is a resting hand while
-        // the pen is writing (or within the post-stroke settle window), when
-        // the current touch sequence has already been vetoed by the pen
-        // landing, OR while the pen is inside the digitizer's proximity range.
-        // The proximity term closes the gap where the pen is ALREADY hovering
-        // over the glass (e.g. between strokes, or before pen-down) and the
-        // hand lands: no new stylus event arrives to trigger the grace-window
-        // veto (TabletEnterProximity already fired earlier), so without it the
+        // Stylus-driven palm rejection. Pen presence is a single two-state
+        // model: while the pen is inside the digitizer's range (hovering OR
+        // pressing - deliberately not distinguished), any canvas touch is a
+        // resting palm, not a gesture. Pressing is always covered because
+        // every pen event sets the proximity flag. The proximity term closes
+        // the gap where the pen is ALREADY hovering over the glass (e.g.
+        // between strokes, or before pen-down) and the hand lands: no new
+        // stylus event arrives to trigger the grace-window veto
+        // (TabletEnterProximity already fired earlier), so without it the
         // touch activates a pan/zoom even though the pen is clearly present.
         // The lock is NOT permanent: the proximity watchdog
         // (STYLUS_PROXIMITY_TIMEOUT_MS) clears it after a long pen silence
@@ -5556,7 +5537,7 @@ bool DocumentViewport::event(QEvent* event)
         // re-enables as soon as the pen truly leaves the glass even if the
         // driver never sends TabletLeaveProximity. The >=3-point palm
         // path above covers multi-touch resting hands regardless.
-        if (m_touchSequenceRejected || m_stylusWritingActive || m_stylusInProximity) {
+        if (m_touchSequenceRejected || m_stylusInProximity) {
             if (m_touchHandler) {
                 m_touchHandler->cancelActiveGesture();
             }
@@ -6576,16 +6557,10 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
     // so don't start a new stroke while it is present.
     if (m_palmContactActive) return;
 
-    // Stylus-writing palm rejection: lock out touch input as soon as the pen
-    // touches down. A hand resting on the glass typically arrives as touch
-    // events at (or slightly before) this moment; without this lock the touch
-    // sequence starts a pan/zoom before the palm threshold is reached.
-    if (pe.source == PointerEvent::Stylus && !pe.isEraser) {
-        m_stylusWritingActive = true;
-        if (m_stylusWritingTimer) {
-            m_stylusWritingTimer->stop();
-        }
-    }
+    // Pen presence is tracked globally by the proximity flag, which tabletEvent
+    // already set true for THIS press (every pen event does). Nothing extra is
+    // needed here: the touch path rejects any touch while the pen is present,
+    // whether it is pressing or merely hovering.
 
     // Ensure keyboard focus for shortcuts (stylus events don't auto-focus like mouse)
     if (!hasFocus()) {
@@ -7065,14 +7040,12 @@ void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
     m_hardwareEraserActive = false;  // Clear hardware eraser state
     // Note: Don't clear m_lastPointerPos - keep it for eraser cursor during hover
 
-    // Stylus-writing palm rejection: after pen-up, keep touch locked out for
-    // a short settle window so the hand can lift off the glass before gestures
-    // re-enable. Without this, the tail of the hand's touch sequence (which
-    // may still be arriving) triggers a pan/zoom right after the stroke ends.
-    if (m_stylusWritingActive && m_stylusWritingTimer) {
-        m_stylusWritingTimer->start();
-    }
-    
+    // Pen presence is untouched here on purpose: after pen-up the pen is still
+    // in range (hovering), so m_stylusInProximity keeps rejecting touch - the
+    // hand resting on the glass stays rejected until it lifts and the pen
+    // leaves. There is no 200ms settle window to manage; the single "pen
+    // present" flag covers the whole transition.
+
     // Pre-load stroke caches after interaction (but NOT PDF cache - it causes thrashing during rapid strokes)
     // PDF cache is preloaded during scroll/zoom, not during drawing
     preloadStrokeCaches();
