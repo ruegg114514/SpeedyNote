@@ -3156,15 +3156,12 @@ private:
     /// drivers frequently omit TabletLeaveProximity, and the hover cursor
     /// timer only fires while the pen is inside the viewport rect, so without
     /// this a hover that drifts off-canvas or a pen that stops moving would
-    /// leave touch locked forever. The interval balances two requirements:
-    /// it must outlast a brief stationary-hover pause between strokes (else
-    /// touch re-enables mid-hover and a hand landing right after pans the
-    /// canvas), while bounding the worst-case touch lock after the pen truly
-    /// leaves (drivers that DO send TabletLeaveProximity unlock instantly, so
-    /// this timeout only matters on broken drivers). 500ms is the tuned
-    /// balance - short enough that scrolling resumes quickly after writing.
+    /// leave touch locked forever. 200ms: pen silence that short means the
+    /// pen has truly left - touch re-enables almost immediately after
+    /// writing (drivers that DO send TabletLeaveProximity unlock instantly;
+    /// this timeout only matters on broken drivers).
     QTimer* m_stylusProximityTimer = nullptr;
-    static constexpr int STYLUS_PROXIMITY_TIMEOUT_MS = 500;
+    static constexpr int STYLUS_PROXIMITY_TIMEOUT_MS = 200;
     /// Latched rejection for the CURRENT touch sequence: once a sequence has
     /// been identified as palm (e.g. it was already panning when the pen
     /// entered proximity), it stays rejected until every finger lifts,
