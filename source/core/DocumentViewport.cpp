@@ -3271,6 +3271,10 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
                         m_gesture.targetPan,
                         QSizeF(width() / m_zoomLevel, height() / m_zoomLevel));
                     const QVector<int> destVisible = pagesIntersectingRect(destViewRect);
+                    // Strip repaint: flag so renderPage() can drop the most
+                    // expensive per-frame work (Direct-tier vector redraws) for
+                    // this one paint; the post-gesture full repaint restores it.
+                    m_gestureStripRender = true;
                     for (int pageIdx : destVisible) {
                         Page* page = m_document->page(pageIdx);
                         if (!page) continue;
@@ -3280,6 +3284,7 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
                         drawNotesColumn(painter, page, pageIdx);
                         painter.restore();
                     }
+                    m_gestureStripRender = false;
                 }
                 painter.restore();
             }
@@ -5239,8 +5244,16 @@ void DocumentViewport::updatePanGesture(QPointF panDelta)
     // streaming into the cache during the drag without hammering the pool.
     // Pass the destination view rect: m_panOffset is frozen during the
     // gesture, so visiblePages() alone would warm the wrong pages.
+    // Relax the throttle while inertia is driving (finger up): every frame
+    // already repaints the exposed strip on the main thread, and firing a
+    // preload batch at the finger-drag rate would saturate the thread pool
+    // and stall the glide on low-end devices.
+    const bool inertiaPhase = m_touchHandler && m_touchHandler->isInertiaActive();
+    const int throttleMs = inertiaPhase
+        ? GESTURE_PRELOAD_THROTTLE_MS_INERTIA
+        : GESTURE_PRELOAD_THROTTLE_MS;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (now - m_lastGesturePreloadMs >= GESTURE_PRELOAD_THROTTLE_MS) {
+    if (now - m_lastGesturePreloadMs >= throttleMs) {
         m_lastGesturePreloadMs = now;
         const QRectF destViewRect(
             m_gesture.targetPan,
@@ -5767,9 +5780,17 @@ void DocumentViewport::doAsyncPdfPreload(const QRectF* viewRectOverride)
     if (pagesToPreload.isEmpty()) {
         return;  // All pages already cached
     }
-    
-    // Launch async render for each page that needs caching
+
+    // Launch async render for each page that needs caching. Cap concurrent
+    // background renders: a fast swipe can otherwise enqueue a full
+    // ±4/±6-page batch every throttle interval, and on a low-end tablet the
+    // pool then saturates the CPU and starves the main-thread paint that the
+    // inertia glide depends on. Un-launched pages are retried on the next
+    // throttle tick as the in-flight watchers finish.
     for (const PreloadItem& item : pagesToPreload) {
+        if (m_activePdfWatchers.size() >= PDF_PRELOAD_MAX_CONCURRENT) {
+            break;
+        }
         const QString sourceId = item.sourceId;
         const int pdfPageNum = item.pdfPageNum;
         const int renderPageNum = item.renderPageNum;
@@ -20526,6 +20547,19 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
             if (tier != VectorLayer::RenderTier::Capped &&
                 layer->hasStrokeCacheAllocated()) {
                 layer->releaseStrokeCache();
+            }
+
+            // Exposed-strip repaint during a pan gesture: the strip redraws
+            // every gesture frame, so a Direct-tier vector redraw (no cache,
+            // every stroke point re-emitted) would stall the glide on low-end
+            // hardware. Skip the ink (and this layer's affinity objects) for
+            // this one paint - the post-gesture full repaint draws them once
+            // the user stops.
+            const bool stripInkSkip =
+                m_gestureStripRender &&
+                tier == VectorLayer::RenderTier::Direct;
+            if (stripInkSkip) {
+                continue;
             }
 
             // CR-2B-7: If this layer contains selected strokes, render with

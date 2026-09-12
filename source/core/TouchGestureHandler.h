@@ -90,6 +90,15 @@ public:
     bool isActive() const { return m_activationPending || m_panActive || m_pinchActive || (m_inertiaTimer && m_inertiaTimer->isActive()); }
 
     /**
+     * @brief Check if the free-scroll inertia animation is currently running.
+     * Distinct from isActive(): the finger is up and the viewport is being
+     * driven purely by the inertia timer. Callers use this to relax or skip
+     * work (e.g. background PDF preload) that would fight the per-frame
+     * repaint on low-end devices.
+     */
+    bool isInertiaActive() const { return m_inertiaTimer && m_inertiaTimer->isActive(); }
+
+    /**
      * @brief Cancel any pending or in-flight gesture immediately, without inertia.
      *
      * Called by the viewport when the stylus enters proximity or presses while

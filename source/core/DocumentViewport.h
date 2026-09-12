@@ -3846,6 +3846,18 @@ private:
     /// low-end devices). Instead, while a gesture is live we kick the async
     /// preload directly, throttled to at most once per interval.
     static constexpr int GESTURE_PRELOAD_THROTTLE_MS = 150;
+    /// Inertia-phase preload throttle. Free scrolling runs at up to ~60 FPS on
+    /// the main thread; firing a preload batch every GESTURE_PRELOAD_THROTTLE_MS
+    /// would keep the thread pool saturated and starve the renderer on
+    /// low-end devices. While the finger is up (inertia), relax the throttle so
+    /// background PDF renders don't fight the per-frame strip repaint.
+    static constexpr int GESTURE_PRELOAD_THROTTLE_MS_INERTIA = 300;
+    /// Cap on simultaneous background PDF preload renders. Without a cap, a
+    /// fast swipe can enqueue a full ±4/±6-page batch every throttle interval;
+    /// on a 4-core tablet the pool then saturates the CPU and the main-thread
+    /// paint stalls (visible as one-frame-at-a-time inertia). Two in flight is
+    /// enough to keep up with a 1-2 s glide while leaving cores for rendering.
+    static constexpr int PDF_PRELOAD_MAX_CONCURRENT = 2;
     qint64 m_lastGesturePreloadMs = 0;   ///< Timestamp of the last gesture-time preload
 
     // ===== Scroll-activity gate (SP1) =====
@@ -4026,6 +4038,12 @@ private:
         }
     };
     ViewportGestureState m_gesture;
+    /// True while the paintEvent pan-gesture path is repainting the exposed
+    /// strip (the region the shifted cached frame no longer covers). The strip
+    /// repaint runs once per gesture frame, so expensive per-frame work that a
+    /// full render would do - notably Direct-tier vector stroke redraws - is
+    /// skipped here and picked up by the post-gesture full repaint.
+    bool m_gestureStripRender = false;
     QTimer* m_gestureTimeoutTimer = nullptr;  ///< Fallback gesture end detection
     static constexpr int GESTURE_TIMEOUT_MS = 3000;  ///< Timeout for gesture end fallback (3s)
     bool m_backtickHeld = false;  ///< Track backtick (`) key for deferred vertical pan
