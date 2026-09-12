@@ -3004,7 +3004,7 @@ QRectF DocumentViewport::visibleRect() const
     return QRectF(m_panOffset, QSizeF(viewWidth, viewHeight));
 }
 
-QVector<int> DocumentViewport::visiblePages() const
+QVector<int> DocumentViewport::pagesIntersectingRect(const QRectF& rect) const
 {
     QVector<int> result;
     
@@ -3021,8 +3021,8 @@ QVector<int> DocumentViewport::visiblePages() const
     // Ensure cache is valid for O(1) page position lookup
     ensurePageLayoutCache();
     
-    QRectF viewRect = visibleRect();
     int pageCount = m_document->pageCount();
+    const QRectF& viewRect = rect;
     
     // For single column: use binary search to find visible range (O(log n))
     if (m_layoutMode == LayoutMode::SingleColumn && !m_pageYCache.isEmpty()) {
@@ -3059,8 +3059,8 @@ QVector<int> DocumentViewport::visiblePages() const
                 break;
             }
             
-            QRectF rect = pageRect(i);  // O(1) now
-            if (rect.intersects(viewRect)) {
+            QRectF r = pageRect(i);  // O(1) now
+            if (r.intersects(viewRect)) {
                 result.append(i);
             }
         }
@@ -3132,13 +3132,27 @@ QVector<int> DocumentViewport::visiblePages() const
     
     // Fallback: linear search if cache not available
     for (int i = 0; i < pageCount; ++i) {
-        QRectF rect = pageRect(i);
-        if (rect.intersects(viewRect)) {
+        QRectF r = pageRect(i);
+        if (r.intersects(viewRect)) {
             result.append(i);
         }
     }
     
     return result;
+}
+
+QVector<int> DocumentViewport::visiblePages() const
+{
+    if (!m_document || m_document->pageCount() == 0) {
+        return QVector<int>();
+    }
+    
+    // For edgeless documents, page 0 is always visible
+    if (m_document->isEdgeless()) {
+        return QVector<int>{0};
+    }
+    
+    return pagesIntersectingRect(visibleRect());
 }
 
 // ===== Qt Event Overrides =====
@@ -3255,9 +3269,8 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
                     const QRectF destViewRect(
                         m_gesture.targetPan,
                         QSizeF(width() / m_zoomLevel, height() / m_zoomLevel));
-                    const int pageCount = m_document->pageCount();
-                    for (int pageIdx = 0; pageIdx < pageCount; ++pageIdx) {
-                        if (!pageRect(pageIdx).intersects(destViewRect)) continue;
+                    const QVector<int> destVisible = pagesIntersectingRect(destViewRect);
+                    for (int pageIdx : destVisible) {
                         Page* page = m_document->page(pageIdx);
                         if (!page) continue;
                         painter.save();
@@ -5219,8 +5232,20 @@ void DocumentViewport::updatePanGesture(QPointF panDelta)
     m_gestureTimeoutTimer->start(GESTURE_TIMEOUT_MS);
     
     // Warm the PDF cache during the gesture so pages are ready when it ends.
-    // The debounce timer ensures this only triggers one actual preload per burst.
-    preloadPdfCache();
+    // The debounce timer never fires while a gesture is running (every touch
+    // event restarts it), so throttle the async preload directly instead:
+    // at most one preload per GESTURE_PRELOAD_THROTTLE_MS keeps pages
+    // streaming into the cache during the drag without hammering the pool.
+    // Pass the destination view rect: m_panOffset is frozen during the
+    // gesture, so visiblePages() alone would warm the wrong pages.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - m_lastGesturePreloadMs >= GESTURE_PRELOAD_THROTTLE_MS) {
+        m_lastGesturePreloadMs = now;
+        const QRectF destViewRect(
+            m_gesture.targetPan,
+            QSizeF(width() / m_zoomLevel, height() / m_zoomLevel));
+        doAsyncPdfPreload(&destViewRect);
+    }
     
     // Trigger repaint (will use fast cached frame shifting)
     update();
@@ -5672,13 +5697,15 @@ void DocumentViewport::preloadPdfCache()
     }
 }
 
-void DocumentViewport::doAsyncPdfPreload()
+void DocumentViewport::doAsyncPdfPreload(const QRectF* viewRectOverride)
 {
     if (!m_document) {
         return;
     }
     
-    QVector<int> visible = visiblePages();
+    QVector<int> visible = viewRectOverride
+        ? pagesIntersectingRect(*viewRectOverride)
+        : visiblePages();
     if (visible.isEmpty()) {
         return;
     }
@@ -20380,7 +20407,14 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
                     // cached pixmap if present, else fall back to the page
                     // background (already filled above). The settle handler
                     // renders the final visible pages once scrolling stops.
-                    QPixmap pdfPixmap = isScrolling()
+                    // Same during a viewport gesture once its cached frame
+                    // exists: the exposed-strip repaint runs every gesture
+                    // frame, so a synchronous render would stall the gesture
+                    // on low-end hardware. The gesture-end repaint and the
+                    // async preloader fill the pages right after.
+                    const bool gestureLive =
+                        m_gesture.isActive() && !m_gesture.cachedFrame.isNull();
+                    QPixmap pdfPixmap = (isScrolling() || gestureLive)
                         ? lookupCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi)
                         : getCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi);
                     

@@ -2256,6 +2256,16 @@ public:
     QVector<int> visiblePages() const;
     
     /**
+     * @brief Get the list of pages intersecting an arbitrary document-space rect.
+     * Uses the same binary-search page-range narrowing as visiblePages(), so it
+     * is O(log n + k) instead of O(n) - used by the pan-gesture exposed-strip
+     * repaint which runs on every gesture frame.
+     * @param rect Document-space rectangle to test pages against.
+     * @return Vector of page indices whose page rect intersects @p rect.
+     */
+    QVector<int> pagesIntersectingRect(const QRectF& rect) const;
+    
+    /**
      * @brief Get the visible rectangle in document coordinates.
      * @return The area of the document currently visible in the viewport.
      */
@@ -3829,6 +3839,14 @@ private:
     QTimer* m_pdfPreloadTimer = nullptr;  ///< Debounce timer for preload requests
     QList<QFutureWatcher<QImage>*> m_activePdfWatchers;  ///< Active async render operations (returns QImage for thread safety)
     static constexpr int PDF_PRELOAD_DELAY_MS = 80;    ///< Debounce delay (ms) before preloading (was 150, reduced for faster preload)
+    /// Gesture-time preload throttle. During a pan/zoom gesture the touch
+    /// events arrive faster than PDF_PRELOAD_DELAY_MS, so the debounce timer
+    /// never fires and no preload happens until the gesture ends - the exposed
+    /// strip then repaints against an empty cache every frame (blank flash on
+    /// low-end devices). Instead, while a gesture is live we kick the async
+    /// preload directly, throttled to at most once per interval.
+    static constexpr int GESTURE_PRELOAD_THROTTLE_MS = 150;
+    qint64 m_lastGesturePreloadMs = 0;   ///< Timestamp of the last gesture-time preload
 
     // ===== Scroll-activity gate (SP1) =====
     // The immediate-pan route (wheel/touchpad/scroll-bar) marks itself active on
@@ -4155,8 +4173,13 @@ private:
     /**
      * @brief Actually perform async PDF preload.
      * Called by timer after debounce delay. Runs in background threads.
+     * @param viewRectOverride Optional document-space view rect. During a pan
+     * gesture the viewport's own m_panOffset is unchanged (the gesture tracks
+     * targetPan instead), so preloading from visiblePages() would warm the
+     * wrong pages; pass the gesture's destination rect to preload what the
+     * finger is heading toward.
      */
-    void doAsyncPdfPreload();
+    void doAsyncPdfPreload(const QRectF* viewRectOverride = nullptr);
 
     /**
      * @brief Mark the immediate-pan route as actively scrolling (SP1).
