@@ -137,7 +137,14 @@ private:
     // cancelActiveGesture() and the touch never moves the canvas at all.
     bool m_activationPending = false;        ///< TouchBegin seen, gesture not yet activated
     QTimer* m_activationTimer = nullptr;     ///< Fires when the grace period expires
-    static constexpr int ACTIVATION_GRACE_MS = 100;  ///< Window for the stylus to veto the gesture
+    /// Window for the stylus to veto the gesture. Deliberately short: since
+    /// the drag-slop early activation was removed, this window is a fixed
+    /// dead zone for every finger scroll (the canvas cannot move until it
+    /// expires), so 50ms keeps fast swipes responsive while still catching a
+    /// pen that arrives right after the hand lands. When the pen is ALREADY
+    /// in proximity the viewport rejects the touch outright and this window
+    /// is never even reached.
+    static constexpr int ACTIVATION_GRACE_MS = 50;
 
     // ===== Single-finger Pan Tracking =====
     bool m_panActive = false;                ///< Whether a touch pan is in progress
