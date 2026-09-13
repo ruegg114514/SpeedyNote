@@ -2713,15 +2713,6 @@ public slots:
     void pasteLassoSelection();
     
     /**
-     * @brief True when the SYSTEM clipboard currently holds an image.
-     *
-     * Used by the paste shortcut to decide whether paste can proceed even
-     * when the internal stroke clipboard is empty (cross-app / cross-page
-     * paste of a screenshot or image copied in another application).
-     */
-    bool hasSystemClipboardImage() const;
-    
-    /**
      * @brief Delete current lasso selection.
      * Action Bar: Called by LassoActionBar::deleteRequested.
      */
@@ -4561,23 +4552,6 @@ private:
                              const QByteArray& encodedFormat = QByteArray(),
                              const QPointF& docPosition = QPointF(),
                              const QSizeF& docSize = QSizeF());
-    
-    /**
-     * @brief Render the current lasso selection to a standalone image.
-     *
-     * Used for system-clipboard export (cross-app / cross-page paste). The
-     * strokes are flattened with the selection's live transform onto a white
-     * background. Null image if there is no selection.
-     */
-    QImage renderLassoSelectionToImage() const;
-
-    /**
-     * @brief Render all selected objects to one composite image.
-     *
-     * Used for system-clipboard export so a multi-object selection can be
-     * pasted into other applications. Null image if nothing is selected.
-     */
-    QImage renderSelectedObjectsToImage() const;
     
     /**
      * @brief Clear the current object selection.
