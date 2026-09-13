@@ -1,0 +1,294 @@
+name: Build SpeedyNote Windows amd64
+
+# Windows amd64 only (x86_64). The full multi-arch build lives in
+# build-windows.yml; this workflow is intentionally limited to the amd64
+# target so CI only compiles the x86_64 binary.
+on:
+  push:
+    branches:
+      - fix-bugs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-amd64:
+    name: Build Windows amd64 (x86_64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-make
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-pkgconf
+            mingw-w64-clang-x86_64-pkg-config
+            mingw-w64-clang-x86_64-cppwinrt
+            mingw-w64-clang-x86_64-qt6-base
+            mingw-w64-clang-x86_64-qt6-tools
+            mingw-w64-clang-x86_64-qt6-svg
+            mingw-w64-clang-x86_64-qt6-translations
+            mingw-w64-clang-x86_64-mupdf
+            mingw-w64-clang-x86_64-ntldd
+
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup -y
+        shell: pwsh
+
+      - name: Check MuPDF installation
+        run: |
+          Write-Host "Checking MuPDF library files..." -ForegroundColor Cyan
+          # Derive MSYS2 location from RUNNER_TEMP so this job is portable
+          # across runner OS images (windows-latest is on D:, but GitHub
+          # could change that the way they did for windows-11-arm on C:).
+          $toolchainPath = "$env:RUNNER_TEMP\msys64\clang64"
+          Write-Host "Toolchain path: $toolchainPath" -ForegroundColor Cyan
+
+          Write-Host "Looking for MuPDF in: $toolchainPath\lib" -ForegroundColor Gray
+          Get-ChildItem -Path "$toolchainPath\lib" -Filter "*mupdf*" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "  Found: $($_.Name)" -ForegroundColor Green
+          }
+          Get-ChildItem -Path "$toolchainPath\lib" -Filter "*mujs*" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "  Found: $($_.Name)" -ForegroundColor Green
+          }
+
+          Write-Host "Looking for MuPDF DLLs in: $toolchainPath\bin" -ForegroundColor Gray
+          Get-ChildItem -Path "$toolchainPath\bin" -Filter "*mupdf*" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "  Found: $($_.Name)" -ForegroundColor Green
+          }
+        shell: pwsh
+
+      - name: Build
+        timeout-minutes: 60
+        run: |
+          $ErrorActionPreference = "Stop"
+          # See note in "Check MuPDF installation" — derive from RUNNER_TEMP.
+          $toolchainPath = "$env:RUNNER_TEMP\msys64\clang64"
+
+          Write-Host "::group::Prepare build directory" -ForegroundColor Cyan
+          if (Test-Path "build") { Remove-Item -Path "build" -Recurse -Force }
+          New-Item -ItemType Directory -Path "build" | Out-Null
+
+          # Compile translations: glob all app_*.ts so any newly-added language
+          # is compiled and embedded in the .exe automatically (resources.qrc
+          # references the resulting .qm files in resources/translations/).
+          $lreleaseExe = "$toolchainPath\bin\lrelease-qt6.exe"
+          if (Test-Path $lreleaseExe) {
+            Write-Host "Compiling translation files..." -ForegroundColor Green
+            $tsFiles = Get-ChildItem -Path ".\resources\translations\app_*.ts" -ErrorAction SilentlyContinue
+            if ($tsFiles) {
+              & $lreleaseExe @($tsFiles | ForEach-Object { $_.FullName })
+            }
+            Copy-Item -Path ".\resources\translations\*.qm" -Destination ".\build" -Force -ErrorAction SilentlyContinue
+          } else {
+            Write-Host "Warning: lrelease not found, skipping translations" -ForegroundColor Yellow
+          }
+          Write-Host "::endgroup::"
+
+          Set-Location build
+
+          # Setup environment - add MSYS2 to PATH
+          $env:PATH = "$toolchainPath\bin;$env:PATH"
+
+          Write-Host "::group::Configure CMake" -ForegroundColor Cyan
+          $cmakeArgs = @(
+            "-G", "MinGW Makefiles",
+            "-DCMAKE_C_COMPILER=clang",
+            "-DCMAKE_CXX_COMPILER=clang++",
+            "-DCMAKE_MAKE_PROGRAM=mingw32-make",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DENABLE_DEBUG_OUTPUT=OFF",
+            "-DQT_PATH=$toolchainPath"
+          )
+
+          & cmake @cmakeArgs ..
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "::endgroup::"
+
+          Write-Host "::group::Build project" -ForegroundColor Cyan
+          # Use 4 parallel jobs (GitHub Actions runners have 2 cores, but 4 jobs is usually safe)
+          & cmake --build . --config Release -- -j4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "::endgroup::"
+
+          Write-Host "::group::Deploy Qt runtime" -ForegroundColor Cyan
+          & windeployqt6 speedynote.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "::endgroup::"
+
+          Write-Host "::group::Copy dependencies (automatic detection with ntldd)" -ForegroundColor Cyan
+
+          $sourceDir = "$toolchainPath\bin"
+          $copiedCount = 0
+          $ntlddExe = "$toolchainPath\bin\ntldd.exe"
+
+          # Windows system directories to exclude
+          $systemPaths = @("c:\windows")
+
+          function Test-SystemDll {
+            param([string]$dllPath)
+            $lowerPath = $dllPath.ToLower()
+            foreach ($sysPath in $systemPaths) {
+              if ($lowerPath.StartsWith($sysPath)) { return $true }
+            }
+            if ($lowerPath -match "not found") { return $true }
+            return $false
+          }
+
+          if (Test-Path $ntlddExe) {
+            Write-Host "Using ntldd for automatic dependency detection..." -ForegroundColor Gray
+
+            # Get all dependencies recursively
+            $ntlddOutput = & $ntlddExe -R "speedynote.exe" 2>$null
+
+            $dllsToCopy = @{}
+            foreach ($line in $ntlddOutput) {
+              if ($line -match '^\s*(\S+\.dll)\s+=>\s+(.+?)\s*(\(0x|$)') {
+                $dllName = $Matches[1]
+                $dllPath = $Matches[2].Trim()
+
+                if (-not (Test-SystemDll $dllPath)) {
+                  if ($dllPath.StartsWith("/")) {
+                    $dllPath = $dllPath -replace "^/clang64", $toolchainPath
+                    $dllPath = $dllPath -replace "/", "\"
+                  }
+
+                  if ((Test-Path $dllPath) -and (-not $dllsToCopy.ContainsKey($dllName))) {
+                    $dllsToCopy[$dllName] = $dllPath
+                  }
+                }
+              }
+            }
+
+            Write-Host "Found $($dllsToCopy.Count) dependencies to copy" -ForegroundColor Gray
+
+            foreach ($dll in $dllsToCopy.GetEnumerator()) {
+              $destPath = $dll.Key
+              if (-not (Test-Path $destPath)) {
+                Copy-Item -Path $dll.Value -Destination $destPath -Force
+                $copiedCount++
+              }
+            }
+          } else {
+            Write-Host "ntldd not found, using fallback DLL list..." -ForegroundColor Yellow
+
+            # Fallback: copy common DLLs by pattern (MuPDF and general dependencies)
+            $dllPatterns = @(
+              "libmupdf*.dll", "libmujs*.dll",
+              "libdeflate.dll", "libiconv-2.dll", "libnettle-8.dll",
+              "libexpat-1.dll", "libicuin*.dll", "libicuuc*.dll", "libicudt*.dll",
+              "libfreetype-6.dll", "libfontconfig-1.dll", "libglib-2.0-0.dll",
+              "libintl-8.dll", "libpng16-16.dll", "libjpeg-8.dll", "libtiff-*.dll",
+              "libopenjp2-*.dll", "liblcms2-2.dll", "libcrypto-3*.dll", "libssl-3*.dll",
+              "libzstd.dll", "zlib1.dll", "libbz2-1.dll", "liblzma-5.dll",
+              "libharfbuzz-0.dll", "libgraphite2.dll",
+              "libbrotlidec.dll", "libbrotlicommon.dll", "libpcre2-16-0.dll",
+              "libgobject-2.0-0.dll", "libc++.dll", "libunwind.dll", "libwinpthread-1.dll"
+            )
+
+            foreach ($pattern in $dllPatterns) {
+              $files = Get-ChildItem -Path $sourceDir -Filter $pattern -ErrorAction SilentlyContinue
+              foreach ($file in $files) {
+                if (-not (Test-Path $file.Name)) {
+                  Copy-Item -Path $file.FullName -Destination . -Force -ErrorAction SilentlyContinue
+                  $copiedCount++
+                }
+              }
+            }
+          }
+
+          Write-Host "Copied $copiedCount DLL(s)" -ForegroundColor Green
+          Write-Host "::endgroup::"
+
+          Write-Host "::group::Clean up build artifacts" -ForegroundColor Cyan
+          # Remove build artifacts not needed for packaging
+          $cleanupItems = @(
+            ".qt",                    # Qt internal cache
+            "speedynote_autogen",     # CMake Qt autogen (MOC/UIC/RCC)
+            "CMakeFiles",             # CMake internal files
+            "CMakeCache.txt",         # CMake cache
+            "cmake_install.cmake",    # CMake install script
+            "Makefile",               # Generated Makefile
+            "compile_commands.json",  # Clang compilation database
+            "qrc_*.cpp",              # Generated resource files
+            "*.o",                    # Object files
+            "*.obj"                   # Object files (MSVC style)
+          )
+
+          $cleanedCount = 0
+          foreach ($pattern in $cleanupItems) {
+            $items = Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue -Force
+            foreach ($item in $items) {
+              if ($item.PSIsContainer) {
+                Remove-Item -Path $item.FullName -Recurse -Force -ErrorAction SilentlyContinue
+              } else {
+                Remove-Item -Path $item.FullName -Force -ErrorAction SilentlyContinue
+              }
+              $cleanedCount++
+            }
+          }
+          Write-Host "Removed $cleanedCount build artifact(s)" -ForegroundColor Gray
+          Write-Host "::endgroup::"
+
+          Write-Host "Build completed successfully!" -ForegroundColor Green
+          Get-Item speedynote.exe | Format-List Name,Length,LastWriteTime
+
+          Set-Location ..
+        shell: pwsh
+
+      - name: Create Inno Setup Installer
+        run: |
+          Write-Host "Creating Windows installer with Inno Setup..." -ForegroundColor Cyan
+
+          # Verify build directory exists
+          if (-not (Test-Path "build\speedynote.exe")) {
+            Write-Host "Error: speedynote.exe not found in build directory" -ForegroundColor Red
+            exit 1
+          }
+
+          # Download unofficial Chinese Simplified language file for Inno Setup
+          # (not included in standard installation)
+          # Source: https://github.com/jrsoftware/issrc/blob/main/Files/Languages/ChineseSimplified.isl
+          $islUrl = "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl"
+          $islPath = "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
+          Write-Host "Downloading Chinese Simplified language file..." -ForegroundColor Gray
+          Invoke-WebRequest -Uri $islUrl -OutFile $islPath
+
+          # Create Output directory for installer
+          New-Item -ItemType Directory -Path "Output" -Force | Out-Null
+
+          # Run Inno Setup compiler
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging.iss
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Inno Setup compilation failed" -ForegroundColor Red
+            exit $LASTEXITCODE
+          }
+
+          Write-Host "Installer created successfully!" -ForegroundColor Green
+          Get-ChildItem -Path "Output" -Filter "*.exe" | Format-List Name,Length,LastWriteTime
+        shell: pwsh
+
+      - name: Upload Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedynote-windows-installer-x86_64
+          path: "Output/*.exe"
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: "Output/*.exe"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
