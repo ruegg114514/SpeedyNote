@@ -4893,7 +4893,6 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
                     m_strokePreloadTimer->start(0);
                 }
             }
-            }
         }
         
         // Check if eraser tool is active or this is hardware eraser
