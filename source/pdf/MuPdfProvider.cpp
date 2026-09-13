@@ -205,12 +205,22 @@ QVector<PdfOutlineItem> MuPdfProvider::convertOutline(fz_outline* ol) const
         item.title = cleaned.trimmed();
         item.isOpen = ol->is_open;
         
-        // Get destination page (MuPDF 1.19+: fz_outline::page is a plain int)
+        // Get destination page. fz_outline::page is a plain int in MuPDF
+        // < 1.20 (Linux distro builds) and an fz_location {chapter, page}
+        // struct in MuPDF >= 1.20 (MSYS2 clang64 ships 1.28.x), so the
+        // access must be guarded by the version macros.
+#if defined(FZ_VERSION_MAJOR) && (FZ_VERSION_MAJOR > 1 || (FZ_VERSION_MAJOR == 1 && FZ_VERSION_MINOR >= 20))
+        {
+            const fz_location loc = ol->page;
+            item.targetPage = (loc.page >= 0) ? loc.page : -1;
+        }
+#else
         if (ol->page >= 0) {
             item.targetPage = ol->page;
         } else {
             item.targetPage = -1;
         }
+#endif
         
         // Convert children recursively
         if (ol->down) {
