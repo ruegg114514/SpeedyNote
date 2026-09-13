@@ -1,11 +1,13 @@
 #pragma once
 
 // ============================================================================
-// ScreenClipWidget - Fullscreen screenshot region selector
+// ScreenClipWidget - In-app region selector
 // ============================================================================
-// Shows a grabbed desktop pixmap fullscreen and lets the user drag out a
-// region. Enter / double-click confirms, Esc cancels. The captured region is
-// returned device-pixel-accurate via capturedRegion().
+// Shows a captured pixmap (the app's own viewport content, not the desktop)
+// and lets the user drag out a region. Confirm / Cancel buttons at the bottom
+// work with touch, and Enter / double-click / Esc also work for keyboard
+// users. The captured region is returned device-pixel-accurate via
+// capturedRegion().
 // ============================================================================
 
 #include <QDialog>
@@ -33,6 +35,23 @@ public:
      */
     QPixmap capturedRegion() const;
 
+    /**
+     * @brief The current selection in widget logical coordinates.
+     *
+     * The caller positions this widget exactly over the viewport it captured,
+     * so a selection here maps 1:1 onto viewport coordinates. Empty rect if
+     * the user has not dragged a region yet.
+     */
+    QRect selectionRect() const { return m_selection; }
+
+    /**
+     * @brief Whether a usable (non-degenerate) selection exists.
+     */
+    bool hasValidSelection() const
+    {
+        return m_selection.width() >= 4 && m_selection.height() >= 4;
+    }
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
@@ -44,8 +63,10 @@ protected:
 
 private:
     QRect normalizedRect(const QPoint& a, const QPoint& b) const;
+    QRect cancelButtonRect() const;
+    QRect confirmButtonRect() const;
 
-    QPixmap m_shot;         ///< The grabbed desktop (device-pixel sized)
+    QPixmap m_shot;         ///< The captured viewport content (device-pixel sized)
     QPoint  m_anchor;       ///< Selection start (widget logical coords)
     QRect   m_selection;    ///< Current selection (widget logical coords)
     bool    m_selecting = false;

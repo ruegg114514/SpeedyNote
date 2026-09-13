@@ -6,7 +6,7 @@ name: Build SpeedyNote Windows amd64
 on:
   push:
     branches:
-      - fix-bugs
+      - work-palm
   workflow_dispatch:
 
 permissions:

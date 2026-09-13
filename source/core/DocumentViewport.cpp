@@ -9473,7 +9473,9 @@ void DocumentViewport::insertImageFromFile(const QString& filePath)
 
 void DocumentViewport::insertPreparedImage(const QImage& image,
                                            const QByteArray& encodedData,
-                                           const QByteArray& encodedFormat)
+                                           const QByteArray& encodedFormat,
+                                           const QPointF& docPosition,
+                                           const QSizeF& docSize)
 {
     if (!m_document || image.isNull()) {
         return;
@@ -9485,9 +9487,19 @@ void DocumentViewport::insertPreparedImage(const QImage& image,
     imgObj->setSourceImage(image, encodedData, encodedFormat);
     const qint64 pixmapMs = timer.elapsed();
 
-    if (!prepareFreshImageForInsertion(*imgObj)) {
-        qWarning() << "insertPreparedImage: Invalid image insertion bounds";
-        return;
+    if (docSize.isEmpty()) {
+        // No explicit placement: normalize, constrain and center like before.
+        if (!prepareFreshImageForInsertion(*imgObj)) {
+            qWarning() << "insertPreparedImage: Invalid image insertion bounds";
+            return;
+        }
+    } else {
+        // Explicit document-space placement (e.g. screenshot region mapped
+        // back onto the page). `docPosition` is in document coordinates and
+        // gets converted to page/tile-local space below, matching how the
+        // paint path positions objects.
+        imgObj->position = docPosition;
+        imgObj->size = docSize;
     }
 
     const int activeLayer = m_document->isEdgeless()
@@ -9582,43 +9594,47 @@ void DocumentViewport::captureScreenAndInsert()
     }
     m_screenCaptureActive = true;
 
-    // Let the host window hide itself before the grab so the app's own UI
-    // does not appear inside the screenshot.
-    emit screenCaptureAboutToStart();
-
-    // Wait a beat for the hide to be composited before grabbing; grabbing
-    // immediately can still catch the outgoing frame of the window.
-    QTimer::singleShot(300, this, [this]() {
-        QScreen* screen = QGuiApplication::screenAt(QCursor::pos());
-        if (!screen) {
-            screen = QGuiApplication::primaryScreen();
-        }
-        if (!screen) {
-            m_screenCaptureActive = false;
-            emit screenCaptureFinished();
-            return;
-        }
-
-        const QPixmap shot = screen->grabWindow(0);
-        if (shot.isNull()) {
-            m_screenCaptureActive = false;
-            emit screenCaptureFinished();
-            return;
-        }
-
-        ScreenClipWidget clip(shot);
-        clip.setGeometry(screen->geometry());
-        const int result = clip.exec();
+    // Capture the app's OWN content (PDF pages, handwriting, objects) instead
+    // of the desktop: render this viewport into a pixmap. grabOpaqueViewport()
+    // draws the canvas without its child widgets (floating bars), so the shot
+    // is a clean copy of what is on the page.
+    const bool savedSkipSelection = m_skipSelectionRendering;
+    const bool savedSkipObjects = m_skipSelectedObjectRendering;
+    m_skipSelectionRendering = true;
+    m_skipSelectedObjectRendering = true;
+    const QPixmap shot = grabOpaqueViewport();
+    m_skipSelectionRendering = savedSkipSelection;
+    m_skipSelectedObjectRendering = savedSkipObjects;
+    if (shot.isNull()) {
         m_screenCaptureActive = false;
         emit screenCaptureFinished();
+        return;
+    }
 
-        if (result == QDialog::Accepted) {
-            const QPixmap region = clip.capturedRegion();
-            if (!region.isNull()) {
-                insertPreparedImage(region.toImage());
-            }
+    // Position the region-selector exactly over this viewport so the
+    // selection rect maps 1:1 onto viewport coordinates, which we then map
+    // back into document space for insertion.
+    ScreenClipWidget clip(shot);
+    clip.setGeometry(QRect(mapToGlobal(QPoint(0, 0)), size()));
+    const int result = clip.exec();
+    m_screenCaptureActive = false;
+    emit screenCaptureFinished();
+
+    if (result == QDialog::Accepted) {
+        const QPixmap region = clip.capturedRegion();
+        const QRect sel = clip.selectionRect();
+        if (!region.isNull() && !sel.isEmpty()) {
+            // The selection is in viewport logical coordinates; translate it
+            // into document coordinates so the inserted image lands exactly
+            // where the user captured it on the page.
+            const QPointF docTopLeft = viewportToDocument(
+                QPointF(sel.topLeft()));
+            const QSizeF docSize(sel.width() / m_zoomLevel,
+                                 sel.height() / m_zoomLevel);
+            insertPreparedImage(region.toImage(), QByteArray(), QByteArray(),
+                                docTopLeft, docSize);
         }
-    });
+    }
 }
 
 void DocumentViewport::deleteSelectedObjects()
@@ -10248,26 +10264,20 @@ void DocumentViewport::copySelectedObjects()
         QGuiApplication::clipboard()->setText(plainText);
     }
     
-    // A single selected image is ALSO put on the system clipboard as pixels,
-    // so Ctrl+C on an image pastes it into other apps too; the internal
-    // object clipboard above still carries the full object for in-app paste.
-    // When both text and image are present, deliver them in one mime payload
-    // so the later format does not wipe the earlier one.
-    QImage singleImagePixels;
-    if (m_selectedObjects.size() == 1) {
-        if (auto* img = dynamic_cast<ImageObject*>(m_selectedObjects.first())) {
-            if (img->isLoaded() && !img->pixmap().isNull()) {
-                singleImagePixels = img->pixmap().toImage();
-            }
-        }
-    }
-    if (!plainText.isEmpty() && !singleImagePixels.isNull()) {
+    // A rendered image of the whole selection is ALSO put on the system
+    // clipboard as pixels, so Ctrl+C on objects pastes them into other apps
+    // too and across pages. The internal object clipboard above still carries
+    // the full objects for editable in-app paste. When both text and image are
+    // present, deliver them in one mime payload so the later format does not
+    // wipe the earlier one.
+    const QImage selectionPixels = renderSelectedObjectsToImage();
+    if (!plainText.isEmpty() && !selectionPixels.isNull()) {
         auto* mime = new QMimeData();
         mime->setText(plainText);
-        mime->setImageData(singleImagePixels);
+        mime->setImageData(selectionPixels);
         QGuiApplication::clipboard()->setMimeData(mime);
-    } else if (!singleImagePixels.isNull()) {
-        QGuiApplication::clipboard()->setImage(singleImagePixels);
+    } else if (!selectionPixels.isNull()) {
+        QGuiApplication::clipboard()->setImage(selectionPixels);
     }
     
     // Notify that object clipboard has content (for action bar paste button)
@@ -15176,7 +15186,9 @@ void DocumentViewport::handlePasteAction()
     // Paste behavior depends on current tool
     switch (m_currentTool) {
         case ToolType::Lasso:
-            if (s_clipboard.hasContent) {
+            // Phase 2F: also paste when only the SYSTEM clipboard has an image
+            // (cross-app / cross-page), not just internal strokes.
+            if (s_clipboard.hasContent || hasSystemClipboardImage()) {
                 pasteSelection();
             }
             break;
@@ -15247,6 +15259,156 @@ void DocumentViewport::copySelection()
     
     // Action Bar: Notify that stroke clipboard now has content
     emit strokeClipboardChanged(true);
+
+    // Phase 2F: ALSO export the selection to the SYSTEM clipboard as an image,
+    // so handwriting can be pasted into other apps and across pages. The
+    // internal stroke clipboard above still handles in-app stroke paste.
+    const QImage selectionImage = renderLassoSelectionToImage();
+    if (!selectionImage.isNull()) {
+        QGuiApplication::clipboard()->setImage(selectionImage);
+    }
+}
+
+QImage DocumentViewport::renderLassoSelectionToImage() const
+{
+    if (m_lassoSelection.selectedStrokes.isEmpty()) {
+        return QImage();
+    }
+
+    QTransform transform = buildSelectionTransform();
+
+    // Compute the transformed bounding box of all selected strokes.
+    QRectF bounds;
+    for (const VectorStroke& stroke : m_lassoSelection.selectedStrokes) {
+        for (const StrokePoint& pt : stroke.points) {
+            const QPointF p = transform.map(pt.pos);
+            if (bounds.isNull()) {
+                bounds = QRectF(p, p);
+            } else {
+                bounds = bounds.united(QRectF(p, p));
+            }
+        }
+    }
+    if (bounds.isEmpty()) {
+        return QImage();
+    }
+
+    // Padding so stroke thickness / soft edges are not clipped.
+    constexpr qreal EXPORT_PADDING = 12.0;
+    bounds.adjust(-EXPORT_PADDING, -EXPORT_PADDING,
+                  EXPORT_PADDING, EXPORT_PADDING);
+
+    // Render at 2x for crisp clipboard export (matches common clipboard DPI).
+    constexpr qreal EXPORT_SCALE = 2.0;
+    const int w = qCeil(bounds.width() * EXPORT_SCALE);
+    const int h = qCeil(bounds.height() * EXPORT_SCALE);
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) {
+        return QImage();  // absurdly large selection: skip export
+    }
+
+    QImage image(w, h, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::white);
+
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.scale(EXPORT_SCALE, EXPORT_SCALE);
+    painter.translate(-bounds.topLeft());
+
+    // Flatten each stroke with the live transform applied.
+    for (const VectorStroke& stroke : m_lassoSelection.selectedStrokes) {
+        VectorStroke transformedStroke = stroke;
+        transformStrokePoints(transformedStroke, transform);
+        VectorLayer::renderStroke(painter, transformedStroke);
+    }
+    painter.end();
+    return image;
+}
+
+QImage DocumentViewport::renderSelectedObjectsToImage() const
+{
+    if (m_selectedObjects.isEmpty() || !m_document) {
+        return QImage();
+    }
+
+    // Collect each object together with its page/tile origin in document
+    // coordinates (same lookup used by renderSelectedObjectsOnly).
+    struct ObjectEntry { InsertedObject* obj; QPointF origin; };
+    QVector<ObjectEntry> entries;
+    QRectF bounds;
+
+    for (InsertedObject* obj : m_selectedObjects) {
+        if (!obj || !obj->visible) continue;
+        if (obj->type() == QStringLiteral("ocr_text")) continue;
+        if (obj->type() == QStringLiteral("link")) continue;
+
+        QPointF origin;
+        bool found = false;
+        if (m_document->isEdgeless()) {
+            for (const auto& coord : m_document->allLoadedTileCoords()) {
+                Page* tile = m_document->getTile(coord.first, coord.second);
+                if (!tile) continue;
+                for (const auto& tileObj : tile->objects) {
+                    if (tileObj.get() == obj) {
+                        origin = QPointF(
+                            coord.first * Document::EDGELESS_TILE_SIZE,
+                            coord.second * Document::EDGELESS_TILE_SIZE);
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+        } else {
+            for (int i : m_document->loadedPageIndices()) {
+                Page* page = m_document->page(i);
+                if (!page) continue;
+                for (const auto& pageObj : page->objects) {
+                    if (pageObj.get() == obj) {
+                        origin = pagePosition(i);
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+        }
+        if (!found) continue;
+
+        const QRectF r(origin + obj->position, obj->size);
+        entries.append({obj, origin});
+        bounds = bounds.isNull() ? r : bounds.united(r);
+    }
+
+    if (entries.isEmpty() || bounds.isEmpty()) {
+        return QImage();
+    }
+
+    constexpr qreal EXPORT_PADDING = 12.0;
+    bounds.adjust(-EXPORT_PADDING, -EXPORT_PADDING,
+                  EXPORT_PADDING, EXPORT_PADDING);
+    constexpr qreal EXPORT_SCALE = 2.0;
+    const int w = qCeil(bounds.width() * EXPORT_SCALE);
+    const int h = qCeil(bounds.height() * EXPORT_SCALE);
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) {
+        return QImage();
+    }
+
+    QImage image(w, h, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::white);
+
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.scale(EXPORT_SCALE, EXPORT_SCALE);
+    painter.translate(-bounds.topLeft());
+
+    for (const ObjectEntry& entry : entries) {
+        painter.save();
+        painter.translate(entry.origin);
+        entry.obj->render(painter, 1.0);
+        painter.restore();
+    }
+    painter.end();
+    return image;
 }
 
 void DocumentViewport::cutSelection()
@@ -15262,9 +15424,36 @@ void DocumentViewport::cutSelection()
     deleteSelection();
 }
 
+bool DocumentViewport::hasSystemClipboardImage() const
+{
+    QClipboard* clipboard = QGuiApplication::clipboard();
+    if (!clipboard || !clipboard->mimeData()) {
+        return false;
+    }
+    return clipboard->mimeData()->hasImage();
+}
+
 void DocumentViewport::pasteSelection()
 {
-    if (!s_clipboard.hasContent || s_clipboard.strokes.isEmpty() || !m_document) {
+    if (!m_document) {
+        return;
+    }
+
+    // Phase 2F: Cross-app paste. If the SYSTEM clipboard holds an image
+    // (copied from another app or another page), insert it directly. This
+    // makes paste work across pages and across applications, not just for
+    // strokes copied inside this document.
+    QClipboard* clipboard = QGuiApplication::clipboard();
+    if (clipboard && clipboard->mimeData() && clipboard->mimeData()->hasImage()) {
+        // Prefer internal strokes when we have them (editable in-app paste);
+        // otherwise take the system image.
+        if (!s_clipboard.hasContent || s_clipboard.strokes.isEmpty()) {
+            insertImageFromClipboard();
+            return;
+        }
+    }
+
+    if (!s_clipboard.hasContent || s_clipboard.strokes.isEmpty()) {
         return;
     }
     

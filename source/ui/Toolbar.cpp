@@ -105,7 +105,7 @@ void Toolbar::setupUi()
     // tool alone. It is therefore an ActionButton outside m_toolGroup.
     m_screenshotButton = new ActionButton(this);
     m_screenshotButton->setThemedIcon("camera");
-    m_screenshotButton->setToolTip(tr("Screen Capture\nDrag a region on the screenshot; Enter / double-click confirms, Esc cancels"));
+    m_screenshotButton->setToolTip(tr("Screen Capture\nCaptures the current page view. Drag a region, then tap Confirm (or double-click / Enter); Cancel / Esc exits"));
     mainLayout->addWidget(m_screenshotButton);
 
     m_objectLinkButton = new ToolButton(this);

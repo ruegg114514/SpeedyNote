@@ -81,11 +81,67 @@ void ScreenClipWidget::paintEvent(QPaintEvent* event)
     painter.drawText(hintRect.translated(1, 1), Qt::AlignHCenter, hint);
     painter.setPen(Qt::white);
     painter.drawText(hintRect, Qt::AlignHCenter, hint);
+
+    // Tablet-friendly Confirm / Cancel buttons pinned to the bottom centre.
+    // Hit-tested in mousePressEvent so they work with touch taps too.
+    const QRect cancelRect = cancelButtonRect();
+    const QRect confirmRect = confirmButtonRect();
+    const bool canConfirm = hasValidSelection();
+
+    QFont btnFont = painter.font();
+    btnFont.setPointSizeF(12);
+    btnFont.setBold(true);
+    painter.setFont(btnFont);
+
+    // Cancel (left)
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(80, 80, 80, 225));
+    painter.drawRoundedRect(cancelRect, 10, 10);
+    painter.setPen(Qt::white);
+    painter.drawText(cancelRect, Qt::AlignCenter, tr("Cancel"));
+
+    // Confirm (right) - dimmed until a real region has been dragged.
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(canConfirm ? QColor(0, 120, 215, 235)
+                                : QColor(0, 120, 215, 110));
+    painter.drawRoundedRect(confirmRect, 10, 10);
+    painter.setPen(canConfirm ? Qt::white : QColor(255, 255, 255, 150));
+    painter.drawText(confirmRect, Qt::AlignCenter, tr("Confirm"));
+}
+
+QRect ScreenClipWidget::cancelButtonRect() const
+{
+    const int btnW = 110;
+    const int btnH = 46;
+    const int gap = 14;
+    const int totalW = btnW * 2 + gap;
+    const int left = (width() - totalW) / 2;
+    const int top = height() - btnH - 28;
+    return QRect(left, top, btnW, btnH);
+}
+
+QRect ScreenClipWidget::confirmButtonRect() const
+{
+    const QRect cancel = cancelButtonRect();
+    return QRect(cancel.right() + 14, cancel.top(),
+                 cancel.width(), cancel.height());
 }
 
 void ScreenClipWidget::mousePressEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::LeftButton) {
+        // Buttons take priority: a tap on them confirms/cancels instead of
+        // starting a new drag, which is what tablet users expect.
+        if (confirmButtonRect().contains(event->pos())) {
+            if (hasValidSelection()) {
+                accept();
+            }
+            return;
+        }
+        if (cancelButtonRect().contains(event->pos())) {
+            reject();
+            return;
+        }
         m_anchor = event->pos();
         m_selection = QRect(m_anchor, m_anchor);
         m_selecting = true;

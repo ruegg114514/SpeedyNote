@@ -1684,13 +1684,13 @@ public:
     void insertImageFromDialog();
     
     /**
-     * @brief Capture a screen region and insert it as an ImageObject.
+     * @brief Capture a region of the app's OWN content and insert it as an ImageObject.
      * 
-     * Grabs the screen under the cursor, shows a fullscreen region-selection
-     * overlay, and inserts the confirmed region at the viewport centre
-     * (device-pixel accurate). Emits screenCaptureAboutToStart() before the
-     * grab so the host window can hide (otherwise the app itself would appear
-     * in the shot) and screenCaptureFinished() when the overlay closes.
+     * Renders the current viewport (PDF pages, handwriting, objects - the
+     * canvas, without floating child widgets) into a pixmap, shows the region
+     * selection overlay over the viewport, and inserts the confirmed region
+     * as an ImageObject at the exact document position where it was captured.
+     * Never leaves the app or touches the desktop.
      */
     void captureScreenAndInsert();
     
@@ -2711,6 +2711,15 @@ public slots:
      * Action Bar: Called by LassoActionBar::pasteRequested.
      */
     void pasteLassoSelection();
+    
+    /**
+     * @brief True when the SYSTEM clipboard currently holds an image.
+     *
+     * Used by the paste shortcut to decide whether paste can proceed even
+     * when the internal stroke clipboard is empty (cross-app / cross-page
+     * paste of a screenshot or image copied in another application).
+     */
+    bool hasSystemClipboardImage() const;
     
     /**
      * @brief Delete current lasso selection.
@@ -4549,7 +4558,26 @@ private:
     bool prepareFreshImageForInsertion(ImageObject& imageObject);
     void insertPreparedImage(const QImage& image,
                              const QByteArray& encodedData = QByteArray(),
-                             const QByteArray& encodedFormat = QByteArray());
+                             const QByteArray& encodedFormat = QByteArray(),
+                             const QPointF& docPosition = QPointF(),
+                             const QSizeF& docSize = QSizeF());
+    
+    /**
+     * @brief Render the current lasso selection to a standalone image.
+     *
+     * Used for system-clipboard export (cross-app / cross-page paste). The
+     * strokes are flattened with the selection's live transform onto a white
+     * background. Null image if there is no selection.
+     */
+    QImage renderLassoSelectionToImage() const;
+
+    /**
+     * @brief Render all selected objects to one composite image.
+     *
+     * Used for system-clipboard export so a multi-object selection can be
+     * pasted into other applications. Null image if nothing is selected.
+     */
+    QImage renderSelectedObjectsToImage() const;
     
     /**
      * @brief Clear the current object selection.
