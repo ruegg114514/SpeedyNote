@@ -3922,6 +3922,33 @@ private:
     // synchronous getCachedPdfPage() instead (no blank pages).
     bool m_postPanGracePeriod = false;
 
+    // ===== Page background pattern cache (scroll perf) =====
+    // Grid / ruled-line backgrounds are re-rasterized line-by-line on every
+    // paint; during free scroll that is the hottest remaining cost after the
+    // ink and PDF caches. Cache the pattern per page (keyed by zoom + style +
+    // page size) and blit it 1:1. Cleared on zoom change and on scroll settle
+    // so memory is only spent while it earns its keep.
+    struct PageBgCacheKey {
+        qreal zoom = -1.0;
+        qreal dpr = 0.0;
+        Page::BackgroundType type = Page::BackgroundType::None;
+        QColor gridColor;
+        qreal gridSpacing = 0.0;
+        qreal lineSpacing = 0.0;
+        QSizeF pageSize;
+        bool operator==(const PageBgCacheKey& o) const {
+            return qFuzzyCompare(zoom, o.zoom) && qFuzzyCompare(dpr, o.dpr)
+                && type == o.type && gridColor == o.gridColor
+                && qFuzzyCompare(gridSpacing, o.gridSpacing)
+                && qFuzzyCompare(lineSpacing, o.lineSpacing)
+                && pageSize == o.pageSize;
+        }
+        bool operator!=(const PageBgCacheKey& o) const { return !(*this == o); }
+    };
+    QHash<int, QPixmap> m_pageBackgroundCache;      ///< pageIdx -> pattern pixmap
+    QHash<int, PageBgCacheKey> m_pageBackgroundKeys; ///< pageIdx -> build key
+    static constexpr int PAGE_BG_CACHE_MAX = 8;     ///< Cap so zoomed pages cannot balloon memory
+
     // ===== Side Notes Area (PDF annotation extension) =====
     QMap<int, qreal> m_sideNotesWidths;    ///< Per-page notes column width (pageIdx -> width). A page has a column iff present with width > 0.
     qreal m_sideNotesMinWidth = 40.0;      ///< Minimum column width (document units)
@@ -4302,7 +4329,14 @@ private:
     /**
      * @brief Invalidate page layout cache - call when pages added/removed/resized.
      */
-    void invalidatePageLayoutCache() { m_pageLayoutDirty = true; }
+    void invalidatePageLayoutCache() {
+        m_pageLayoutDirty = true;
+        // Page indices shift on insert/remove/reorder and on document/layout
+        // switches; drop the background pattern cache so a stale pageIdx ->
+        // pattern mapping is never blitted onto the wrong page.
+        m_pageBackgroundCache.clear();
+        m_pageBackgroundKeys.clear();
+    }
     
     /**
      * @brief Compute the page-transfer insertion index for a drop position (Plan D2).

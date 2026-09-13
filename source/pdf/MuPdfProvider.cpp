@@ -205,9 +205,9 @@ QVector<PdfOutlineItem> MuPdfProvider::convertOutline(fz_outline* ol) const
         item.title = cleaned.trimmed();
         item.isOpen = ol->is_open;
         
-        // Get destination page
-        if (ol->page.page >= 0) {
-            item.targetPage = ol->page.page;
+        // Get destination page (MuPDF 1.19+: fz_outline::page is a plain int)
+        if (ol->page >= 0) {
+            item.targetPage = ol->page;
         } else {
             item.targetPage = -1;
         }

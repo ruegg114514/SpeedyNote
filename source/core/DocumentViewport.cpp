@@ -1310,6 +1310,10 @@ void DocumentViewport::setZoomLevel(qreal zoom)
     qreal oldDpi = effectivePdfDpi();
     m_zoomLevel = zoom;
     qreal newDpi = effectivePdfDpi();
+
+    // Page background patterns are keyed by zoom - drop them all.
+    m_pageBackgroundCache.clear();
+    m_pageBackgroundKeys.clear();
     
     // Invalidate PDF cache if DPI changed significantly (Task 1.3.6)
     if (!qFuzzyCompare(oldDpi, newDpi)) {
@@ -1405,6 +1409,22 @@ void DocumentViewport::onScrollSettled()
     preloadPdfCache();
     preloadStrokeCaches();
     evictDistantTiles();
+
+    // Restore the focus tier immediately instead of waiting out the 150 ms
+    // suspend debounce: the scroll has stopped, so rebuilding the
+    // viewport-clipped focus cache on the next paint yields the sharp page in
+    // one repaint. Without this, the first settle paint rebuilds the full
+    // capped pixmap (blurry at high zoom) and the debounce fires a second
+    // rebuild 150 ms later - two expensive cache builds for nothing.
+    m_focusCacheSuspended = false;
+    if (m_focusRebuildTimer) {
+        m_focusRebuildTimer->stop();
+    }
+
+    // The background pattern cache exists to keep scroll frames cheap;
+    // scrolling is over, so release it and let the next scroll rebuild.
+    m_pageBackgroundCache.clear();
+    m_pageBackgroundKeys.clear();
 
     // Final clean repaint (matters in SP2, where painting draws cache-only
     // while scrolling and needs one repaint to show freshly rendered pages).
@@ -4872,6 +4892,7 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
                 if (m_strokePreloadTimer) {
                     m_strokePreloadTimer->start(0);
                 }
+            }
             }
         }
         
@@ -20464,7 +20485,17 @@ DocumentViewport::chooseRenderTier(const QSizeF& tileSize,
     if (outFocusRect) {
         *outFocusRect = tileLocalViewport.intersected(tileBounds);
     }
-    return m_focusCacheSuspended ? Tier::Direct : Tier::Focus;
+    if (m_focusCacheSuspended) {
+        // Scrolling/panning in flight: avoid the cache-free Direct tier,
+        // which re-rasterizes every visible stroke on every frame and is the
+        // dominant cost of a slow-feeling free scroll at high zoom. Use the
+        // capped whole-page pixmap instead - it blits in a single call and
+        // stays valid while zoom is unchanged. When the capped cache is
+        // missing or dirty, the renderPage() scroll gate below skips the
+        // layer and the settle handler rebuilds it once scrolling stops.
+        return Tier::Capped;
+    }
+    return Tier::Focus;
 }
 
 void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
@@ -20527,32 +20558,55 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
             break;
             
         case Page::BackgroundType::Grid:
-            {
-                // Draw grid lines
-                painter.setPen(QPen(page->gridColor, 1.0 / m_zoomLevel));  // Constant line width
-                qreal spacing = page->gridSpacing;
-                
-                // Vertical lines
-                for (qreal x = spacing; x < pageSize.width(); x += spacing) {
-                    painter.drawLine(QPointF(x, 0), QPointF(x, pageSize.height()));
-                }
-                
-                // Horizontal lines
-                for (qreal y = spacing; y < pageSize.height(); y += spacing) {
-                    painter.drawLine(QPointF(0, y), QPointF(pageSize.width(), y));
-                }
-            }
-            break;
-            
         case Page::BackgroundType::Lines:
             {
-                // Draw horizontal ruled lines
-                painter.setPen(QPen(page->gridColor, 1.0 / m_zoomLevel));  // Constant line width
-                qreal spacing = page->lineSpacing;
-                
-                for (qreal y = spacing; y < pageSize.height(); y += spacing) {
-                    painter.drawLine(QPointF(0, y), QPointF(pageSize.width(), y));
+                // Background pattern cache: grid/ruled lines are drawn
+                // line-by-line below, which dominates scroll-frame cost on
+                // lined pages. Cache the finished pattern per page and blit
+                // 1:1 while the key (zoom, dpr, style, size) is unchanged.
+                const qreal bgDpr = devicePixelRatioF();
+                const PageBgCacheKey key{ m_zoomLevel, bgDpr, page->backgroundType,
+                                          page->gridColor, page->gridSpacing,
+                                          page->lineSpacing, pageSize };
+                QPixmap cached = m_pageBackgroundCache.value(pageIndex);
+                if (cached.isNull() || m_pageBackgroundKeys.value(pageIndex) != key) {
+                    // Build the pattern at physical resolution; DPR = zoom*dpr
+                    // so logical page-local coordinates map 1:1 to the
+                    // viewport's scaled painter (pen width 1.0/zoom matches
+                    // the direct-draw path).
+                    const QSize physSize(
+                        qMax(1, qCeil(pageSize.width() * m_zoomLevel * bgDpr)),
+                        qMax(1, qCeil(pageSize.height() * m_zoomLevel * bgDpr)));
+                    cached = QPixmap(physSize);
+                    cached.setDevicePixelRatio(m_zoomLevel * bgDpr);
+                    cached.fill(paperColorForPage(page));
+                    {
+                        QPainter pp(&cached);
+                        pp.setRenderHint(QPainter::Antialiasing, true);
+                        pp.setPen(QPen(page->gridColor, 1.0 / m_zoomLevel));
+                        if (page->backgroundType == Page::BackgroundType::Grid) {
+                            for (qreal x = page->gridSpacing; x < pageSize.width(); x += page->gridSpacing) {
+                                pp.drawLine(QPointF(x, 0), QPointF(x, pageSize.height()));
+                            }
+                            for (qreal y = page->gridSpacing; y < pageSize.height(); y += page->gridSpacing) {
+                                pp.drawLine(QPointF(0, y), QPointF(pageSize.width(), y));
+                            }
+                        } else {
+                            for (qreal y = page->lineSpacing; y < pageSize.height(); y += page->lineSpacing) {
+                                pp.drawLine(QPointF(0, y), QPointF(pageSize.width(), y));
+                            }
+                        }
+                    }
+                    // Cap entries; on overflow drop everything (rebuilds are
+                    // cheap and only happen for pages actually visible).
+                    if (m_pageBackgroundCache.size() >= PAGE_BG_CACHE_MAX) {
+                        m_pageBackgroundCache.clear();
+                        m_pageBackgroundKeys.clear();
+                    }
+                    m_pageBackgroundCache.insert(pageIndex, cached);
+                    m_pageBackgroundKeys.insert(pageIndex, key);
                 }
+                painter.drawPixmap(QPointF(0, 0), cached);
             }
             break;
     }
@@ -20639,7 +20693,16 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
             // viewport clipping (fixes the previous "DPI cap bypassed when
             // something is selected" symptom). Both dispatchers manage their
             // own painter save/restore, so no extra wrapping needed here.
-            if (hasSelectionOnThisPage && layerIdx == m_lassoSelection.sourceLayerIndex) {
+            // SP: while free-scrolling, never synchronously rebuild a cold
+            // stroke cache inside paintEvent - a dense page can stall the
+            // frame for tens of ms. Blit when the cache already exists;
+            // otherwise skip this layer and let onScrollSettled()'s
+            // preloadStrokeCaches() fill it once scrolling stops. Objects
+            // with this affinity still draw below (they are cheap to paint).
+            if (m_scrollActive && !hasSelectionOnThisPage &&
+                !layer->isStrokeCacheValid()) {
+                // Ink layer skipped this frame (cold cache, scroll in flight).
+            } else if (hasSelectionOnThisPage && layerIdx == m_lassoSelection.sourceLayerIndex) {
                 layer->renderExcludingTiered(painter, excludeIds,
                                              pageSize, m_zoomLevel, dpr,
                                              tier, focusRect);

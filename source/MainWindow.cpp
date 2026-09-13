@@ -175,6 +175,17 @@ void setupLinuxSignalHandlers() {
 }
 #endif
 
+// ============================================================================
+// Multi-window: one-time-per-process init guard
+// ============================================================================
+// The MainWindow constructor performs two app-global initializations that must
+// happen exactly once per process: wiping the temp_session scratch directory
+// (a second window would delete another window's unsaved documents) and
+// binding the QLocalServer for the single-instance socket (the first window
+// owns it; re-binding would break file-open forwarding). Every later window
+// skips both.
+static bool s_firstWindowDone = false;
+
 MainWindow::MainWindow(QWidget *parent) 
     : QMainWindow(parent), localServer(nullptr) {
 
@@ -1316,23 +1327,32 @@ void MainWindow::setupUi() {
 
     setCentralWidget(container);
 
-    QString tempDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/temp_session";
-    QDir dir(tempDir);
+    // ---- App-global, one-time-per-process initialization ----
+    // A second MainWindow must NOT re-run these: wiping temp_session would
+    // destroy another window's unsaved documents, and re-binding the
+    // QLocalServer would steal the single-instance socket from the first
+    // window (breaking file-open forwarding to the running app).
+    if (!s_firstWindowDone) {
+        QString tempDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/temp_session";
+        QDir dir(tempDir);
 
-    // Remove all contents (but keep the directory itself)
-    if (dir.exists()) {
-        dir.removeRecursively();  // Careful: this wipes everything inside
+        // Remove all contents (but keep the directory itself)
+        if (dir.exists()) {
+            dir.removeRecursively();  // Careful: this wipes everything inside
+        }
+        QDir().mkpath(tempDir);  // Recreate clean directory
+
+        // Setup single instance server
+        setupSingleInstanceServer();
+
+        s_firstWindowDone = true;
     }
-    QDir().mkpath(tempDir);  // Recreate clean directory
 
     // NOTE: Do NOT call addNewTab() here!
     // When launched from Launcher, the FAB actions (createNewPaged, createNewEdgeless, etc.)
     // explicitly call the appropriate method to create a tab.
     // When launched with a file argument, openFileInNewTab() creates the tab.
     // Auto-creating a tab here would result in an unwanted extra tab.
-
-    // Setup single instance server
-    setupSingleInstanceServer();
 
     // REMOVED E.1: Layout functions removed - new components handle their own layout
     
@@ -1454,6 +1474,9 @@ void MainWindow::wireQActionDispatchers()
     wire("file.save_as",      [](MainWindow* w){ w->saveDocumentAs(); });
     wire("file.new_paged",    [](MainWindow* w){ w->addNewTab(); });
     wire("file.new_edgeless", [](MainWindow* w){ w->addNewEdgelessTab(); });
+    // MAC.8: New Window opens a second MainWindow; dispatch target is ignored
+    // because the action is inherently app-level (the window runs itself).
+    wire("file.new_window",   [](MainWindow*){ MainWindow::openNewWindow(); });
     wire("file.open_pdf",     [](MainWindow* w){ w->openPdfDocument(); });
     wire("file.open_notebook",[](MainWindow* w){ w->loadFolderDocument(); });
     wire("file.export",       [](MainWindow* w){
@@ -2103,6 +2126,7 @@ void MainWindow::setupManagedShortcuts()
     bindAction("file.save_as");
     bindAction("file.new_paged");
     bindAction("file.new_edgeless");
+    bindAction("file.new_window");
     bindAction("file.open_pdf");
     bindAction("file.open_notebook");
     bindAction("file.export");
@@ -2339,8 +2363,23 @@ MainWindow::~MainWindow() {
         localServer = nullptr;
     }
     
-    // Use static cleanup method for consistent cleanup
-    cleanupSharedResources();
+    // Multi-window: release the app-global single-instance resources (shared
+    // memory + server socket name) only when the LAST MainWindow goes away.
+    // If another window is still alive, detaching the shared memory would let
+    // a second OS process start and steal the single-instance guarantee.
+    bool otherWindowExists = false;
+    for (QWidget* widget : QApplication::topLevelWidgets()) {
+        if (auto* mw = qobject_cast<MainWindow*>(widget)) {
+            if (mw != this) {
+                otherWindowExists = true;
+                break;
+            }
+        }
+    }
+    if (!otherWindowExists) {
+        // Use static cleanup method for consistent cleanup
+        cleanupSharedResources();
+    }
 }
 
 // MW1.5: Kept as stubs - still called from many places
@@ -8170,7 +8209,12 @@ TabManager* MainWindow::tabManager() const
 // Phase P.1: Extracted from LauncherWindow
 MainWindow* MainWindow::findExistingMainWindow()
 {
-    // Find existing MainWindow among all top-level widgets
+    // Multi-window: prefer the most recently focused window so launcher /
+    // file-open actions land where the user is looking; fall back to the
+    // first MainWindow in the top-level list.
+    if (MainWindow* active = activeMainWindow()) {
+        return active;
+    }
     for (QWidget *widget : QApplication::topLevelWidgets()) {
         MainWindow *mainWindow = qobject_cast<MainWindow*>(widget);
         if (mainWindow) {
@@ -8178,6 +8222,34 @@ MainWindow* MainWindow::findExistingMainWindow()
         }
     }
     return nullptr;
+}
+
+// Multi-window: create and show a brand-new MainWindow in this process.
+MainWindow* MainWindow::openNewWindow()
+{
+    auto* w = new MainWindow();
+    w->setAttribute(Qt::WA_DeleteOnClose);
+
+    // Cascade from the active window (or the last found one) so the new
+    // window does not exactly overlap the existing one.
+    MainWindow* source = activeMainWindow();
+    if (!source) {
+        source = findExistingMainWindow();
+    }
+    if (source) {
+        w->resize(source->size());
+        w->move(source->pos() + QPoint(32, 32));
+    }
+
+    // Show first so the viewport has valid geometry, then start the window
+    // with one fresh paged notebook tab (mirroring Ctrl+N) so the new window
+    // is immediately usable. addNewTab()'s zoomToWidth needs a laid-out
+    // viewport, which only exists once the window is visible.
+    w->show();
+    w->raise();
+    w->activateWindow();
+    w->addNewTab();
+    return w;
 }
 
 // Phase P.1: Extracted from LauncherWindow
@@ -8715,7 +8787,17 @@ void MainWindow::showAddMenu() {
     }
     
     QMenu menu(this);
-    
+
+    // New Window: opens a second MainWindow in this process (multi-window).
+    QAction* newWindowAction = menu.addAction(tr("New Window"));
+    newWindowAction->setShortcut(ShortcutManager::instance()->keySequenceForAction("file.new_window"));
+    connect(newWindowAction, &QAction::triggered, this, []() {
+        MainWindow::openNewWindow();
+    });
+
+    // Separator
+    menu.addSeparator();
+
     // New Edgeless Canvas
     QAction* newEdgelessAction = menu.addAction(tr("New Edgeless Canvas"));
     newEdgelessAction->setShortcut(ShortcutManager::instance()->keySequenceForAction("file.new_edgeless"));
@@ -9402,43 +9484,60 @@ void MainWindow::saveSessionTabs()
 {
     QSettings settings("SpeedyNote", "App");
 
-    if (!m_splitViewManager || !m_documentManager || m_splitViewManager->totalTabCount() == 0) {
+    // Multi-window: aggregate every open MainWindow's tabs so closing one
+    // window while others remain does not wipe their tabs from the session.
+    QVector<MainWindow*> windows;
+    for (QWidget* widget : QApplication::topLevelWidgets()) {
+        if (auto* mw = qobject_cast<MainWindow*>(widget)) {
+            windows.append(mw);
+        }
+    }
+
+    QStringList paths;
+    for (MainWindow* mw : windows) {
+        if (!mw->m_splitViewManager || !mw->m_documentManager) continue;
+        mw->m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+            for (int i = 0; i < tm->tabCount(); ++i) {
+                Document* doc = tm->documentAt(i);
+                if (!doc) continue;
+
+                QString docPath = mw->m_documentManager->documentPath(doc);
+                if (!docPath.isEmpty() && !mw->m_documentManager->isUsingTempBundle(doc)) {
+                    paths.append(QFileInfo(docPath).absoluteFilePath());
+                } else if (!doc->pdfPath().isEmpty()) {
+                    paths.append(QFileInfo(doc->pdfPath()).absoluteFilePath());
+                }
+            }
+        });
+    }
+
+    if (paths.isEmpty()) {
         settings.remove("session/lastOpenTabs");
         settings.remove("session/activeTabIndex");
         return;
     }
 
-    QStringList paths;
-    m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
-        for (int i = 0; i < tm->tabCount(); ++i) {
-            Document* doc = tm->documentAt(i);
-            if (!doc) continue;
-
-            QString docPath = m_documentManager->documentPath(doc);
-            if (!docPath.isEmpty() && !m_documentManager->isUsingTempBundle(doc)) {
-                paths.append(QFileInfo(docPath).absoluteFilePath());
-            } else if (!doc->pdfPath().isEmpty()) {
-                paths.append(QFileInfo(doc->pdfPath()).absoluteFilePath());
+    // Active index: count every tab in the windows ahead of this one, then
+    // add this window's active pane index (same rule as the single-window
+    // implementation).
+    int globalActiveIndex = 0;
+    for (MainWindow* mw : windows) {
+        if (!mw->m_splitViewManager) continue;
+        if (mw == this) {
+            if (mw->m_splitViewManager->activePane() == SplitViewManager::Right
+                && mw->m_splitViewManager->rightTabManager()) {
+                globalActiveIndex += mw->m_splitViewManager->leftTabManager()->tabCount()
+                                   + mw->m_splitViewManager->rightTabManager()->currentIndex();
+            } else if (mw->m_splitViewManager->leftTabManager()) {
+                globalActiveIndex += mw->m_splitViewManager->leftTabManager()->currentIndex();
             }
+            break;
         }
-    });
-
-    if (paths.isEmpty()) {
-        settings.remove("session/lastOpenTabs");
-        settings.remove("session/activeTabIndex");
-    } else {
-        settings.setValue("session/lastOpenTabs", paths);
-
-        int globalActiveIndex = 0;
-        if (m_splitViewManager->activePane() == SplitViewManager::Right
-            && m_splitViewManager->rightTabManager()) {
-            globalActiveIndex = m_splitViewManager->leftTabManager()->tabCount()
-                              + m_splitViewManager->rightTabManager()->currentIndex();
-        } else if (m_splitViewManager->leftTabManager()) {
-            globalActiveIndex = m_splitViewManager->leftTabManager()->currentIndex();
-        }
-        settings.setValue("session/activeTabIndex", globalActiveIndex);
+        globalActiveIndex += mw->m_splitViewManager->totalTabCount();
     }
+
+    settings.setValue("session/lastOpenTabs", paths);
+    settings.setValue("session/activeTabIndex", globalActiveIndex);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
@@ -9732,12 +9831,18 @@ void MainWindow::onNewConnection()
         if (!command.isEmpty()) {
             // Use QTimer::singleShot to defer processing to avoid signal/slot conflicts
             QTimer::singleShot(0, this, [this, command]() {
+                // Multi-window: open in the most recently focused window so
+                // double-clicked files land where the user is looking.
+                MainWindow* target = MainWindow::activeMainWindow();
+                if (!target) {
+                    target = this;
+                }
                 // Bring window to front and focus (already on main thread)
-                raise();
-                activateWindow();
-                
+                target->raise();
+                target->activateWindow();
+
                 // REMOVED MW5.6: .spn format deprecated - only handle regular file opening
-                    openFileInNewTab(command);
+                    target->openFileInNewTab(command);
             });
         }
         
