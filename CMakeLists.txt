@@ -152,11 +152,15 @@ if(WIN32)
     endif()
     # Poppler removed - using MuPDF exclusively for PDF rendering
 
-    # Auto-enable Windows Ink OCR on 64-bit Qt6 Windows builds
+    # Auto-enable Windows Ink OCR on 64-bit Qt6 Windows builds. No FORCE: CI
+    # must be able to opt out with -DSPEEDYNOTE_ENABLE_WINDOWS_INK_OCR=OFF
+    # when the MSYS2 cppwinrt headers are incompatible with the installed
+    # clang (Windows.UI.Input.Inking.h parse failures).
     if(NOT USE_QT5 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
-        set(SPEEDYNOTE_ENABLE_WINDOWS_INK_OCR ON CACHE BOOL "" FORCE)
+        set(SPEEDYNOTE_ENABLE_WINDOWS_INK_OCR ON CACHE BOOL "")
         message(STATUS "Windows Ink OCR: ENABLED (64-bit Qt6 Windows)")
     else()
+        set(SPEEDYNOTE_ENABLE_WINDOWS_INK_OCR OFF CACHE BOOL "")
         message(STATUS "Windows Ink OCR: DISABLED (requires 64-bit Qt6)")
     endif()
 
