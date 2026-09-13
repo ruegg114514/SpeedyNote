@@ -109,7 +109,10 @@ jobs:
             "-DCMAKE_C_FLAGS_RELEASE=-g",
             "-DCMAKE_CXX_FLAGS_RELEASE=-g",
             "-DENABLE_DEBUG_OUTPUT=OFF",
-            "-DQT_PATH=$toolchainPath"
+            "-DQT_PATH=$toolchainPath",
+            # MSYS2 cppwinrt headers fail to parse under the current clang;
+            # keep the Windows build OCR-free until the package catches up.
+            "-DSPEEDYNOTE_ENABLE_WINDOWS_INK_OCR=OFF"
           )
           
           & cmake @cmakeArgs ..

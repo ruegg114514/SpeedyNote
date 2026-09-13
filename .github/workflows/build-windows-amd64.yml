@@ -109,7 +109,10 @@ jobs:
             "-DCMAKE_MAKE_PROGRAM=mingw32-make",
             "-DCMAKE_BUILD_TYPE=Release",
             "-DENABLE_DEBUG_OUTPUT=OFF",
-            "-DQT_PATH=$toolchainPath"
+            "-DQT_PATH=$toolchainPath",
+            # MSYS2 cppwinrt headers fail to parse under the current clang;
+            # keep the amd64 build OCR-free until the package catches up.
+            "-DSPEEDYNOTE_ENABLE_WINDOWS_INK_OCR=OFF"
           )
 
           & cmake @cmakeArgs ..
