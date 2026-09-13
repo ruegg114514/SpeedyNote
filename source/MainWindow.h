@@ -213,6 +213,19 @@ public:
      * Phase P.1: Extracted from LauncherWindow for reuse.
      */
     static MainWindow* findExistingMainWindow();
+
+    /**
+     * @brief Create and show a brand-new MainWindow in this process.
+     *
+     * Multi-window support: each MainWindow owns its own TabManager /
+     * SplitViewManager, so opening a second window is just creating another
+     * one. The new window is offset from the active window (falling back to a
+     * cascade when no active window exists), starts with one fresh paged
+     * notebook tab, and becomes the active window for shortcut dispatch.
+     *
+     * @return Pointer to the newly created MainWindow (owned via WA_DeleteOnClose).
+     */
+    static MainWindow* openNewWindow();
     
     /**
      * @brief Preserve window state when transitioning from another window.

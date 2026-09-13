@@ -139,6 +139,7 @@ void MacMenuBar::populateFileMenu()
     };
 
     // Group 1: New
+    add(m_fileMenu, "file.new_window");
     add(m_fileMenu, "file.new_paged");
     add(m_fileMenu, "file.new_edgeless");
     m_fileMenu->addSeparator();

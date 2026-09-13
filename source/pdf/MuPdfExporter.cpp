@@ -3019,25 +3019,25 @@ bool MuPdfExporter::writeMetadata()
                 pdf_dict_put_text_string(m_ctx, info, PDF_NAME(Title), titleBuf);
             }
             
-            // Copy Author
+            // Copy Author (MuPDF 1.19 has no PDF_ENUM_NAME_Author; use raw name)
             char authorBuf[256] = {0};
             if (fz_lookup_metadata(m_ctx, m_sourceDoc,
                                    "info:Author", authorBuf, sizeof(authorBuf)) > 0 && authorBuf[0]) {
-                pdf_dict_put_text_string(m_ctx, info, PDF_NAME(Author), authorBuf);
+                pdf_dict_puts_drop(m_ctx, info, "Author", pdf_new_text_string(m_ctx, authorBuf));
             }
             
             // Copy Subject
             char subjectBuf[512] = {0};
             if (fz_lookup_metadata(m_ctx, m_sourceDoc,
                                    "info:Subject", subjectBuf, sizeof(subjectBuf)) > 0 && subjectBuf[0]) {
-                pdf_dict_put_text_string(m_ctx, info, PDF_NAME(Subject), subjectBuf);
+                pdf_dict_puts_drop(m_ctx, info, "Subject", pdf_new_text_string(m_ctx, subjectBuf));
             }
             
             // Copy Keywords
             char keywordsBuf[1024] = {0};
             if (fz_lookup_metadata(m_ctx, m_sourceDoc,
                                    "info:Keywords", keywordsBuf, sizeof(keywordsBuf)) > 0 && keywordsBuf[0]) {
-                pdf_dict_put_text_string(m_ctx, info, PDF_NAME(Keywords), keywordsBuf);
+                pdf_dict_puts_drop(m_ctx, info, "Keywords", pdf_new_text_string(m_ctx, keywordsBuf));
             }
             
             // Copy Creator (original authoring application)
