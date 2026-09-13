@@ -20225,8 +20225,10 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
                 // 1:1 while the key (zoom, dpr, style, size) is unchanged.
                 const qreal bgDpr = devicePixelRatioF();
                 const PageBgCacheKey key{ m_zoomLevel, bgDpr, page->backgroundType,
-                                          page->gridColor, page->gridSpacing,
-                                          page->lineSpacing, pageSize };
+                                          page->gridColor,
+                                          static_cast<qreal>(page->gridSpacing),
+                                          static_cast<qreal>(page->lineSpacing),
+                                          pageSize };
                 QPixmap cached = m_pageBackgroundCache.value(pageIndex);
                 if (cached.isNull() || m_pageBackgroundKeys.value(pageIndex) != key) {
                     // Build the pattern at physical resolution; DPR = zoom*dpr
