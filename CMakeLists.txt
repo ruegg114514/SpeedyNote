@@ -910,6 +910,7 @@ set(UI_SOURCES
     source/ui/ToolbarButtons.cpp
     source/ui/NavigationBar.cpp
     source/ui/Toolbar.cpp
+    source/ui/ScreenClipWidget.cpp
     source/ui/StyleLoader.cpp
     source/ui/TabBar.cpp
     source/ui/SplitViewManager.cpp

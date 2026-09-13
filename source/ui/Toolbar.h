@@ -76,6 +76,7 @@ signals:
     void undoClicked();
     void redoClicked();
     void touchGestureModeChanged(int mode);
+    void screenshotRequested();
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -133,6 +134,7 @@ private:
     // Plain tool buttons (no subtoolbar)
     ToolButton *m_lassoButton;
     ToolButton *m_objectImageButton;
+    ActionButton *m_screenshotButton;
     /// The Link tool's controls float in the viewport (LinkObjectBar), so this
     /// button carries no subtoolbar of its own.
     ToolButton *m_objectLinkButton;

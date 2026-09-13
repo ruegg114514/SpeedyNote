@@ -1668,6 +1668,17 @@ public:
     void insertImageFromDialog();
     
     /**
+     * @brief Capture a screen region and insert it as an ImageObject.
+     * 
+     * Grabs the screen under the cursor, shows a fullscreen region-selection
+     * overlay, and inserts the confirmed region at the viewport centre
+     * (device-pixel accurate). Emits screenCaptureAboutToStart() before the
+     * grab so the host window can hide (otherwise the app itself would appear
+     * in the shot) and screenCaptureFinished() when the overlay closes.
+     */
+    void captureScreenAndInsert();
+    
+    /**
      * @brief Delete all currently selected objects.
      * 
      * Phase O2.5: Removes each selected object from its page/tile,
@@ -2719,6 +2730,20 @@ signals:
      * @brief Emitted when the document is modified.
      */
     void documentModified();
+
+    /**
+     * @brief Emitted right before a screen capture grabs the desktop.
+     *
+     * The host window connects this to hide() so the application's own UI
+     * does not appear inside the screenshot.
+     */
+    void screenCaptureAboutToStart();
+
+    /**
+     * @brief Emitted when the screen-capture overlay closes (confirmed or
+     * canceled). The host window re-shows itself on this.
+     */
+    void screenCaptureFinished();
     
     /**
      * @brief Emitted when a specific page's content changes (for targeted thumbnail refresh).
@@ -3888,6 +3913,11 @@ private:
     // guard, every leaked stylus press re-enters handlePointerPress_ObjectSelect
     // and opens another file dialog, stacking until the app crashes.
     bool m_objectInsertDialogActive = false;
+
+    // Re-entrancy guard for the screen-capture flow: the capture grabs the
+    // desktop and runs a modal overlay, so a second trigger while one is in
+    // flight (e.g. a queued shortcut) must be ignored.
+    bool m_screenCaptureActive = false;
 
     // ===== Stroke Drawing State (Task 2.2) =====
     VectorStroke m_currentStroke;             ///< Stroke currently being drawn
