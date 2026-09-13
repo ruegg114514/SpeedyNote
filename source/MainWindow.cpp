@@ -1195,6 +1195,17 @@ void MainWindow::setupUi() {
             vp->setObjectInsertMode(mode);
         }
     });
+    connect(m_toolbar, &Toolbar::screenshotRequested, this, [this]() {
+        DocumentViewport* vp = currentViewport();
+        if (!vp) return;
+        // Hide this window for the grab so the app's own UI is not part of
+        // the screenshot, then re-show it when the capture overlay closes.
+        connect(vp, &DocumentViewport::screenCaptureAboutToStart,
+                this, &MainWindow::hide, Qt::UniqueConnection);
+        connect(vp, &DocumentViewport::screenCaptureFinished,
+                this, &MainWindow::show, Qt::UniqueConnection);
+        vp->captureScreenAndInsert();
+    });
     connect(m_toolbar, &Toolbar::straightLineToggled, this, [this](bool enabled) {
         // Straight line mode toggle
         if (DocumentViewport* vp = currentViewport()) {

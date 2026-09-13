@@ -49,6 +49,8 @@
 #include <QClipboard>     // For clipboard access (O2.4)
 #include <QGuiApplication> // For clipboard access (O2.4)
 #include <QScreen>         // For refresh rate in the perf HUD context
+#include <QDialog>         // For the screen-capture overlay result
+#include "../ui/ScreenClipWidget.h"
 #include <QApplication>    // For focusWidget() - text input focus check
 #include <QLineEdit>       // For text input focus check
 #include <QTextEdit>       // For text input focus check
@@ -4245,6 +4247,24 @@ void DocumentViewport::populateObjectContextMenu(QMenu& menu)
     copyAction->setEnabled(hasSelection);
     connect(copyAction, &QAction::triggered,
             this, &DocumentViewport::handleCopyAction);
+
+    // A single selected image can also be put on the SYSTEM clipboard as
+    // pixels, so it pastes into other applications (and other notebooks) as
+    // a real image rather than only surviving inside SpeedyNote's object
+    // clipboard.
+    if (m_selectedObjects.size() == 1) {
+        auto* singleImage = dynamic_cast<ImageObject*>(m_selectedObjects.first());
+        if (singleImage && singleImage->isLoaded()
+            && !singleImage->pixmap().isNull()) {
+            QAction* copyImageAction = menu.addAction(tr("Copy Image"));
+            connect(copyImageAction, &QAction::triggered, this, [this]() {
+                if (m_selectedObjects.size() != 1) return;
+                auto* img = dynamic_cast<ImageObject*>(m_selectedObjects.first());
+                if (!img || img->pixmap().isNull()) return;
+                QGuiApplication::clipboard()->setImage(img->pixmap().toImage());
+            });
+        }
+    }
 
     QAction* pasteAction = menu.addAction(tr("Paste"));
     connect(pasteAction, &QAction::triggered,
@@ -9535,6 +9555,52 @@ void DocumentViewport::insertImageFromDialog()
     insertImageFromFile(filePath);
 }
 
+void DocumentViewport::captureScreenAndInsert()
+{
+    if (!m_document || m_screenCaptureActive) {
+        return;
+    }
+    m_screenCaptureActive = true;
+
+    // Let the host window hide itself before the grab so the app's own UI
+    // does not appear inside the screenshot.
+    emit screenCaptureAboutToStart();
+
+    // Wait a beat for the hide to be composited before grabbing; grabbing
+    // immediately can still catch the outgoing frame of the window.
+    QTimer::singleShot(300, this, [this]() {
+        QScreen* screen = QGuiApplication::screenAt(QCursor::pos());
+        if (!screen) {
+            screen = QGuiApplication::primaryScreen();
+        }
+        if (!screen) {
+            m_screenCaptureActive = false;
+            emit screenCaptureFinished();
+            return;
+        }
+
+        const QPixmap shot = screen->grabWindow(0);
+        if (shot.isNull()) {
+            m_screenCaptureActive = false;
+            emit screenCaptureFinished();
+            return;
+        }
+
+        ScreenClipWidget clip(shot);
+        clip.setGeometry(screen->geometry());
+        const int result = clip.exec();
+        m_screenCaptureActive = false;
+        emit screenCaptureFinished();
+
+        if (result == QDialog::Accepted) {
+            const QPixmap region = clip.capturedRegion();
+            if (!region.isNull()) {
+                insertPreparedImage(region.toImage());
+            }
+        }
+    });
+}
+
 void DocumentViewport::deleteSelectedObjects()
 {
     // Phase O2.5.2: Delete all selected objects
@@ -10160,6 +10226,28 @@ void DocumentViewport::copySelectedObjects()
     }
     if (!plainText.isEmpty()) {
         QGuiApplication::clipboard()->setText(plainText);
+    }
+    
+    // A single selected image is ALSO put on the system clipboard as pixels,
+    // so Ctrl+C on an image pastes it into other apps too; the internal
+    // object clipboard above still carries the full object for in-app paste.
+    // When both text and image are present, deliver them in one mime payload
+    // so the later format does not wipe the earlier one.
+    QImage singleImagePixels;
+    if (m_selectedObjects.size() == 1) {
+        if (auto* img = dynamic_cast<ImageObject*>(m_selectedObjects.first())) {
+            if (img->isLoaded() && !img->pixmap().isNull()) {
+                singleImagePixels = img->pixmap().toImage();
+            }
+        }
+    }
+    if (!plainText.isEmpty() && !singleImagePixels.isNull()) {
+        auto* mime = new QMimeData();
+        mime->setText(plainText);
+        mime->setImageData(singleImagePixels);
+        QGuiApplication::clipboard()->setMimeData(mime);
+    } else if (!singleImagePixels.isNull()) {
+        QGuiApplication::clipboard()->setImage(singleImagePixels);
     }
     
     // Notify that object clipboard has content (for action bar paste button)

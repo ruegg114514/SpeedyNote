@@ -100,6 +100,14 @@ void Toolbar::setupUi()
     m_toolGroup->addButton(m_objectImageButton);
     mainLayout->addWidget(m_objectImageButton);
 
+    // Screen capture is an action, not a tool state: it grabs the desktop,
+    // inserts the confirmed region as an image object, and leaves the current
+    // tool alone. It is therefore an ActionButton outside m_toolGroup.
+    m_screenshotButton = new ActionButton(this);
+    m_screenshotButton->setThemedIcon("camera");
+    m_screenshotButton->setToolTip(tr("Screen Capture\nDrag a region on the screenshot; Enter / double-click confirms, Esc cancels"));
+    mainLayout->addWidget(m_screenshotButton);
+
     m_objectLinkButton = new ToolButton(this);
     m_objectLinkButton->setThemedIcon("linkicon");
     m_objectLinkButton->setToolTip(tr("Link Object Tool (Ctrl+.)"));
@@ -124,7 +132,8 @@ void Toolbar::setupUi()
     m_page1Widgets = {
         m_penExpandable, m_markerExpandable, m_eraserExpandable,
         m_straightLineButton, m_lassoButton, m_objectImageButton,
-        m_objectLinkButton, m_objectTextButton, m_textExpandable
+        m_screenshotButton, m_objectLinkButton, m_objectTextButton,
+        m_textExpandable
     };
 
     // --- OCR (not in tool group, hover-to-expand) ---
@@ -220,6 +229,9 @@ void Toolbar::connectSignals()
         expandToolButton(ToolType::ObjectSelect);
         emit objectInsertModeSelected(DocumentViewport::ObjectInsertMode::Image);
         emit toolSelected(ToolType::ObjectSelect);
+    });
+    connect(m_screenshotButton, &QPushButton::clicked, this, [this]() {
+        emit screenshotRequested();
     });
     connect(m_objectLinkButton, &QPushButton::clicked, this, [this]() {
         setObjectInsertMode(DocumentViewport::ObjectInsertMode::Link);
