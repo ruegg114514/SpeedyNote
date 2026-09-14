@@ -9633,6 +9633,15 @@ void DocumentViewport::captureScreenAndInsert()
                                  sel.height() / m_zoomLevel);
             insertPreparedImage(region.toImage(), QByteArray(), QByteArray(),
                                 docTopLeft, docSize);
+
+            // Switch to the object-select tool so the newly inserted image is
+            // instantly draggable / resizable. insertPreparedImage() already
+            // selected the object, and entering ObjectSelect does NOT clear the
+            // current selection, so the user can move/scale the shot right away
+            // instead of being dropped back to the pen / hand tool.
+            if (m_currentTool != ToolType::ObjectSelect) {
+                setCurrentTool(ToolType::ObjectSelect);
+            }
         }
     }
 }
