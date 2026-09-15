@@ -100,6 +100,41 @@ public:
         }
         return false;
     }
+
+    /**
+     * @brief Remove every stroke whose ID is in @p ids in a single pass.
+     * @param ids IDs to remove (typically the hits from strokesAtPoint()).
+     * @return Union of the removed strokes' bounding boxes, or an empty rect
+     *         when nothing was removed.
+     *
+     * Bulk-eraser path: one O(n) scan strips all hits, then the caches are
+     * patched once over the union region instead of once per stroke. The
+     * caller collects undo copies from strokes() before calling if needed.
+     */
+    QRectF removeStrokesBulk(const QSet<QString>& ids) {
+        if (ids.isEmpty() || m_strokes.isEmpty()) {
+            return QRectF();
+        }
+        QRectF bounds;
+        bool any = false;
+        for (int i = static_cast<int>(m_strokes.size()) - 1; i >= 0; --i) {
+            if (ids.contains(m_strokes[i].id)) {
+                if (!any) {
+                    bounds = m_strokes[i].boundingBox;
+                    any = true;
+                } else {
+                    bounds = bounds.united(m_strokes[i].boundingBox);
+                }
+                m_strokes.removeAt(i);
+            }
+        }
+        if (any) {
+            // Must run AFTER the removals so the re-render pass only sees the
+            // surviving strokes overlapping the removed region.
+            patchCacheAfterRemovals(bounds);
+        }
+        return bounds;
+    }
     
     /**
      * @brief Get all strokes (const reference).

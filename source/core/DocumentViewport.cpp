@@ -1062,7 +1062,7 @@ void DocumentViewport::setPenMinStrokeWidth(qreal minWidth)
     // point.  Existing strokes already have their pressure values baked in.
 }
 
-qreal DocumentViewport::applyPenPressureFloor(qreal rawPressure) const
+qreal DocumentViewport::applyPenPressureFloor(qreal rawPressure, qreal baseThickness) const
 {
     // Marker uses a fixed pressure of 1.0; no floor needed and no division
     // concerns.  Callers still wrap marker handling with useFixedPressure,
@@ -1071,9 +1071,14 @@ qreal DocumentViewport::applyPenPressureFloor(qreal rawPressure) const
         return qBound(0.1, rawPressure, 1.0);
     }
 
-    const qreal base = m_currentStroke.baseThickness;
-    const qreal minP = (base > 0.0)
-        ? qBound(0.1, m_penMinStrokeWidth / base, 1.0)
+    // A caller may pass an explicit stroke thickness (the notes column uses
+    // m_sideNotesCurrentStroke, which lives outside m_currentStroke); negative
+    // means the caller is drawing on the main canvas, so use its stroke.
+    if (baseThickness < 0.0) {
+        baseThickness = m_currentStroke.baseThickness;
+    }
+    const qreal minP = (baseThickness > 0.0)
+        ? qBound(0.1, m_penMinStrokeWidth / baseThickness, 1.0)
         : 0.1;
     return qBound(minP, rawPressure, 1.0);
 }
@@ -6660,6 +6665,7 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
                 if (isErasing) {
                     // Eraser in notes area: erase notes strokes. Stay pointer-active
                     // so dragging keeps erasing over the column (move handler).
+                    beginEraserUndoBatch();
                     eraseNotesAt(pe.viewportPos);
                     m_pointerActive = true;
                     qreal eraserRadius = m_eraserSize * m_zoomLevel + 5;
@@ -6740,6 +6746,7 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
             m_pointerActive = true;
             update();
         } else {
+            beginEraserUndoBatch();
             eraseAt(pe);
             qreal eraserRadius = m_eraserSize * m_zoomLevel + 5;
             QRectF cursorRectF(pe.viewportPos.x() - eraserRadius, pe.viewportPos.y() - eraserRadius,
@@ -6804,7 +6811,11 @@ void DocumentViewport::handlePointerMove(const PointerEvent& pe)
     if (!m_document->isEdgeless()
         && (m_hardwareEraserActive || m_currentTool == ToolType::Eraser)) {
         if (notesPageAtViewport(pe.viewportPos) >= 0) {
-            eraseNotesAt(pe.viewportPos);
+            // Throttle hit tests to samples far enough apart - the eraser disc
+            // is large relative to per-event movement at tablet rates.
+            if (!shouldSkipEraserSample(pe.viewportPos)) {
+                eraseNotesAt(pe.viewportPos);
+            }
             qreal eraserRadius = m_eraserSize * m_zoomLevel + 5;
             QRectF cursorRectF(pe.viewportPos.x() - eraserRadius,
                                pe.viewportPos.y() - eraserRadius,
@@ -6845,6 +6856,13 @@ void DocumentViewport::handlePointerMove(const PointerEvent& pe)
     // Hardware eraser: use m_hardwareEraserActive because some tablets
     // don't consistently report pointerType() == Eraser in every move event
     bool isErasing = m_hardwareEraserActive || m_currentTool == ToolType::Eraser;
+    
+    // A gesture that only reveals itself as an eraser on move (driver quirk:
+    // the press was routed as a pen-down) still needs an open undo batch so
+    // its removals are committed together at release.
+    if (isErasing && !m_eraserUndoBatching) {
+        beginEraserUndoBatch();
+    }
     
     // Erasing works in edgeless mode even without a valid drawing page
     // (eraseAtEdgeless uses document coordinates, not page coordinates)
@@ -6902,7 +6920,14 @@ void DocumentViewport::handlePointerMove(const PointerEvent& pe)
             return;
         }
         
-        eraseAt(pe);
+        // Throttle hit tests to samples far enough apart (same rule as the
+        // notes-column eraser): the eraser disc overlaps heavily at tablet
+        // rates, so skipping close samples cuts eraseAt()'s hit tests, cache
+        // patches and undo accumulation with no visible gap. The cursor rects
+        // below still update every move, so the eraser ring stays smooth.
+        if (!shouldSkipEraserSample(pe.viewportPos)) {
+            eraseAt(pe);
+        }
         qreal eraserRadius = m_eraserSize * m_zoomLevel + 5;
         
         QRectF oldRectF(oldPos.x() - eraserRadius, oldPos.y() - eraserRadius,
@@ -6970,6 +6995,11 @@ void DocumentViewport::handlePointerMove(const PointerEvent& pe)
 void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
 {
     if (!m_document) return;
+
+    // The eraser gesture accumulated every removal into one undo entry; commit
+    // it now that the press-drag-release cycle is ending. No-op unless a batch
+    // is actually open, so every other tool path is unaffected.
+    commitEraserUndoBatch();
 
     // Palm rejection: if the press was voided (or never started) by a hand on
     // the touchscreen, just unlatch pointer state instead of finalizing a
@@ -18352,41 +18382,28 @@ void DocumentViewport::eraseAt(const PointerEvent& pe)
     
     if (hitIds.isEmpty()) return;
     
-    // Collect strokes for undo before removing
-    // Use a set for O(1) lookup instead of O(n) per ID
+    // Snapshot the hit strokes into the gesture undo batch BEFORE removal, then
+    // strip them all in a single pass. removeStrokesBulk() repairs the stroke
+    // cache once over the union of the removed bounding boxes, where the old
+    // per-stroke removeStroke() loop repatched the cache (and pushed a fresh
+    // deep-copied undo entry) for every stroke on every move event.
     QSet<QString> hitIdSet(hitIds.begin(), hitIds.end());
-    QVector<VectorStroke> removedStrokes;
-    removedStrokes.reserve(hitIds.size());
-    
+    int collected = 0;
     for (const VectorStroke& s : layer->strokes()) {
         if (hitIdSet.contains(s.id)) {
-            removedStrokes.append(s);
-            if (removedStrokes.size() == hitIds.size()) {
-                break;  // Found all strokes, no need to continue
+            UndoAction::StrokeSegment seg;
+            seg.pageIndex = pe.pageHit.pageIndex;
+            seg.stroke = s;
+            seg.fromNotes = false;
+            m_eraserUndoPending.segments.append(seg);
+            m_eraserUndoPending.layerIndex = page->activeLayerIndex;
+            m_eraserUndoPages.insert(pe.pageHit.pageIndex);
+            if (++collected == hitIds.size()) {
+                break;  // Found all hits; no need to walk the rest
             }
         }
     }
-    
-    // Remove strokes
-    for (const QString& id : hitIds) {
-        layer->removeStroke(id);
-    }
-    
-    // Stroke cache is incrementally patched by removeStroke()
-    
-    // Mark page dirty for lazy save (BUG FIX: was missing)
-    if (!removedStrokes.isEmpty()) {
-        m_document->markPageDirty(pe.pageHit.pageIndex);
-    }
-    
-    // Push undo action
-    if (removedStrokes.size() == 1) {
-        pushPageStrokeUndo(pe.pageHit.pageIndex, UndoAction::RemoveStroke, removedStrokes[0], page->activeLayerIndex);
-    } else if (removedStrokes.size() > 1) {
-        pushPageStrokesUndo(pe.pageHit.pageIndex, UndoAction::RemoveMultiple, removedStrokes, page->activeLayerIndex);
-    }
-    
-    emit documentModified();
+    layer->removeStrokesBulk(hitIdSet);
     
     // ========== OPTIMIZATION: Dirty Region Update for Eraser ==========
     // Calculate elliptical region around eraser position for targeted repaint
@@ -18397,6 +18414,11 @@ void DocumentViewport::eraseAt(const PointerEvent& pe)
     QRectF dirtyRectF(vpPos.x() - eraserRadius, vpPos.y() - eraserRadius,
                       eraserRadius * 2, eraserRadius * 2);
     update(QRegion(dirtyRectF.toAlignedRect(), QRegion::Ellipse));
+
+    // Record the sample the hit test actually ran at, so shouldSkipEraserSample
+    // can throttle the next move against it.
+    m_lastErasePos = pe.viewportPos;
+    m_lastErasePosValid = true;
 }
 
 void DocumentViewport::eraseAtEdgeless(QPointF viewportPos)
@@ -18416,9 +18438,11 @@ void DocumentViewport::eraseAtEdgeless(QPointF viewportPos)
     
     int tileSize = Document::EDGELESS_TILE_SIZE;
     
-    UndoAction undoAction;
-    undoAction.type = UndoAction::RemoveStroke;
-    undoAction.layerIndex = m_edgelessActiveLayerIndex;
+    // Accumulate removals into the gesture undo batch (pushed once at release)
+    // instead of pushing a fresh deep-copied undo entry on every move event.
+    if (m_eraserUndoPending.segments.isEmpty()) {
+        m_eraserUndoPending.layerIndex = m_edgelessActiveLayerIndex;
+    }
 
     // Scan only the tiles the eraser disc can actually reach. A fixed 3x3
     // neighbourhood scanned nine tiles' worth of strokes on every pointer move,
@@ -18442,30 +18466,25 @@ void DocumentViewport::eraseAtEdgeless(QPointF viewportPos)
             QVector<QString> hitIds = layer->strokesAtPoint(localPt, m_eraserSize);
             if (hitIds.isEmpty()) continue;
 
-            for (const QString& id : hitIds) {
-                for (const VectorStroke& stroke : layer->strokes()) {
-                    if (stroke.id == id) {
-                        UndoAction::StrokeSegment seg;
-                        seg.tileCoord = {tx, ty};
-                        seg.stroke = stroke;
-                        undoAction.segments.append(seg);
-                        break;
-                    }
+            // Snapshot the hit strokes (copy BEFORE removal) with a set lookup
+            // instead of the old O(hits x strokes) nested scan.
+            QSet<QString> hitIdSet(hitIds.begin(), hitIds.end());
+            for (const VectorStroke& stroke : layer->strokes()) {
+                if (hitIdSet.contains(stroke.id)) {
+                    UndoAction::StrokeSegment seg;
+                    seg.tileCoord = {tx, ty};
+                    seg.stroke = stroke;
+                    seg.fromNotes = false;
+                    m_eraserUndoPending.segments.append(seg);
                 }
             }
-            for (const QString& id : hitIds)
-                layer->removeStroke(id);
+            layer->removeStrokesBulk(hitIdSet);
             m_document->markTileDirty({tx, ty});
             m_document->removeTileIfEmpty(tx, ty);
         }
     }
 
-    if (!undoAction.segments.isEmpty()) {
-        markOcrDirtyTiles(undoAction);
-        pushUndoAction(undoAction);
-        emit strokesChanged();
-        emit documentModified();
-        
+    if (!m_eraserUndoPending.segments.isEmpty()) {
         // Dirty region update - use elliptical region to match circular eraser
         // Use toAlignedRect() to properly round floating-point to integer coords
         qreal eraserRadius = m_eraserSize * m_zoomLevel + 10;  // Add padding for stroke edges
@@ -18473,6 +18492,11 @@ void DocumentViewport::eraseAtEdgeless(QPointF viewportPos)
                           eraserRadius * 2, eraserRadius * 2);
         update(QRegion(dirtyRectF.toAlignedRect(), QRegion::Ellipse));
     }
+
+    // Record the sample the hit test actually ran at, so shouldSkipEraserSample
+    // can throttle the next move against it.
+    m_lastErasePos = viewportPos;
+    m_lastErasePosValid = true;
 }
 
 QPixmap DocumentViewport::grabOpaqueViewport()
@@ -21621,11 +21645,41 @@ void DocumentViewport::continueNotesStroke(const PointerEvent& pe)
     QPointF docPt = viewportToDocument(pe.viewportPos);
     QPointF notesLocal = docPt - notesOrigin;
 
-    // Add point
+    // Marker uses fixed pressure (1.0); Pen applies the active preset's
+    // min-width floor (baked into pressure). The floor must use the NOTES
+    // stroke's thickness - m_currentStroke belongs to the main canvas and may
+    // be stale or empty while writing in the column.
     bool useFixedPressure = (m_currentTool == ToolType::Marker);
+    qreal effectivePressure = useFixedPressure ? 1.0
+        : applyPenPressureFloor(pe.pressure, m_sideNotesCurrentStroke.baseThickness);
+
+    // ========== OPTIMIZATION: Point Decimation ==========
+    // Mirror addPointToStroke()'s zoom-aware decimation. Without it every raw
+    // tablet sample (120-360Hz) is appended, so a fast stroke accumulates
+    // thousands of points; the in-progress stroke is re-vectorized every frame,
+    // which is what made fast writing in the notes column stutter. The
+    // threshold is MIN_SCREEN_DISTANCE screen pixels mapped to document space,
+    // so decimation granularity stays constant on screen at any zoom.
+    if (!m_sideNotesCurrentStroke.points.isEmpty()) {
+        const QPointF& lastPos = m_sideNotesCurrentStroke.points.last().pos;
+        qreal dx = notesLocal.x() - lastPos.x();
+        qreal dy = notesLocal.y() - lastPos.y();
+        qreal distSq = dx * dx + dy * dy;
+
+        qreal docThreshold = MIN_SCREEN_DISTANCE / m_zoomLevel;
+        if (distSq < docThreshold * docThreshold) {
+            // Point too close - but update pressure peak if higher.
+            if (effectivePressure > m_sideNotesCurrentStroke.points.last().pressure) {
+                m_sideNotesCurrentStroke.points.last().pressure = effectivePressure;
+            }
+            return;  // Skip this point
+        }
+    }
+
+    // Add point
     StrokePoint pt;
     pt.pos = notesLocal;
-    pt.pressure = useFixedPressure ? 1.0 : pe.pressure;
+    pt.pressure = effectivePressure;
     pt.timestamp = pe.timestamp;
     m_sideNotesCurrentStroke.points.append(pt);
 
@@ -21679,21 +21733,15 @@ void DocumentViewport::endNotesStroke()
 
 void DocumentViewport::drawNotesStroke(QPainter& painter, const VectorStroke& stroke)
 {
-    if (stroke.points.size() < 2) return;
+    if (stroke.points.isEmpty()) return;
 
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(stroke.color);
-
-    for (int i = 1; i < stroke.points.size(); ++i) {
-        const StrokePoint& p0 = stroke.points[i - 1];
-        const StrokePoint& p1 = stroke.points[i];
-
-        qreal width = stroke.baseThickness * p1.pressure;
-        if (width < 0.5) width = 0.5;
-
-        painter.setPen(QPen(stroke.color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        painter.drawLine(p0.pos, p1.pos);
-    }
+    // Reuse the shared variable-width stroke renderer instead of the old
+    // per-segment QPen+drawLine loop. It builds one Catmull-Rom smoothed
+    // outline polygon and fills it in a single painter setup (plus round end
+    // caps), so the in-progress notes stroke - re-vectorized every frame while
+    // writing - costs O(points) cheap operations instead of a QPen allocation
+    // per segment. It also matches the visual quality of the main canvas.
+    VectorLayer::renderStroke(painter, stroke);
 }
 
 void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageIdx)
@@ -21727,9 +21775,10 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
         const QVector<VectorStroke>& strokes = notesIt.value();
         mix(quint64(strokes.size()) + 0x100000000ull);  // non-empty marker
         for (const VectorStroke& s : strokes) {
-            quint64 h = 1469598103934665603ull;
-            for (QChar c : s.id) { h ^= quint64(c.unicode()); h *= 1099511628211ull; }
-            mix(h);
+            // qHash() is a single optimized string hash; the old per-character
+            // FNV loop cost 36 hash steps per stroke on every paint (input-rate
+            // while writing). Detection power is unchanged.
+            mix(quint64(qHash(s.id)));
             mix(quint64(s.points.size()));
             mix(quant(s.color.rgba()));
             mix(quant(s.baseThickness));
@@ -21921,6 +21970,16 @@ void DocumentViewport::drawNotesColumnOverflow(QPainter& painter, Page* page, in
     for (const VectorStroke& stroke : strokes) {
         if (stroke.points.size() < 2) continue;
 
+        // Fast path: committed notes strokes carry a valid bounding box in
+        // notes-local coordinates. When it lies entirely inside the column
+        // slab no segment can escape, so skip the point scan. Without this the
+        // overflow pass re-walked every point of every stroke on every paint
+        // (once per cache hit while writing / erasing in the column).
+        if (!stroke.boundingBox.isEmpty()) {
+            const QRectF slab(0, 0, notesW, page->size.height());
+            if (slab.contains(stroke.boundingBox)) continue;
+        }
+
         for (int i = 1; i < stroke.points.size(); ++i) {
             const StrokePoint& p0 = stroke.points[i - 1];
             const StrokePoint& p1 = stroke.points[i];
@@ -22012,6 +22071,84 @@ void DocumentViewport::renderObjectsOverNotes(QPainter& painter, Page* page, int
     painter.restore();
 }
 
+// ===== Eraser gesture throttling + undo batching (perf) =====
+
+bool DocumentViewport::shouldSkipEraserSample(const QPointF& viewportPos)
+{
+    if (!m_lastErasePosValid) {
+        return false;  // First sample of the gesture must run the hit test
+    }
+    const qreal dx = viewportPos.x() - m_lastErasePos.x();
+    const qreal dy = viewportPos.y() - m_lastErasePos.y();
+    const qreal distSq = dx * dx + dy * dy;
+
+    // Skip when the eraser moved less than ~1/4 of its on-screen radius from
+    // the last sample that ran a hit test. The eraser disc overlaps heavily
+    // within that distance, so no visible gap appears, while tablet move
+    // streams (120-360Hz) mean several samples land inside it per event.
+    // This cuts eraseAt()/eraseNotesAt() call rate (and their hit tests,
+    // cache patches and undo accumulation) by ~4-16x on fast drags.
+    const qreal screenRadius = m_eraserSize * m_zoomLevel;
+    const qreal threshold = qMax(4.0, screenRadius * 0.25);
+    return distSq < threshold * threshold;
+}
+
+void DocumentViewport::beginEraserUndoBatch()
+{
+    // A batch left open by a tool switch or an aborted gesture is committed
+    // first so its accumulated removals are never lost.
+    commitEraserUndoBatch();
+
+    m_eraserUndoBatching = true;
+    m_eraserUndoPending = UndoAction();
+    m_eraserUndoPending.type = UndoAction::RemoveStroke;  // upgraded at commit if multiple
+    m_eraserUndoPending.layerIndex = 0;                   // notes default; per-segment overrides
+    m_eraserUndoPages.clear();
+    m_lastErasePosValid = false;
+}
+
+void DocumentViewport::commitEraserUndoBatch()
+{
+    if (!m_eraserUndoBatching) {
+        return;
+    }
+    m_eraserUndoBatching = false;
+    m_lastErasePosValid = false;
+
+    if (m_eraserUndoPending.segments.isEmpty()) {
+        m_eraserUndoPending = UndoAction();
+        m_eraserUndoPages.clear();
+        return;
+    }
+
+    // One undo entry for the whole gesture: RemoveMultiple when more than one
+    // stroke was wiped, so a single Ctrl+Z restores everything the drag erased.
+    if (m_eraserUndoPending.segments.size() > 1) {
+        m_eraserUndoPending.type = UndoAction::RemoveMultiple;
+    }
+    pushUndoAction(m_eraserUndoPending);
+
+    // Notes / paged-page bookkeeping once per touched page, not per move.
+    if (m_document && !m_document->isEdgeless()) {
+        for (int pageIdx : m_eraserUndoPages) {
+            if (pageIdx >= 0 && pageIdx < m_document->pageCount()) {
+                m_document->markPageDirty(pageIdx);
+                emit pageModified(pageIdx);
+                m_ocrDirtyPages.insert(pageIdx);
+            }
+        }
+    }
+
+    // Edgeless OCR bookkeeping (no-op in paged mode; guards internally).
+    markOcrDirtyTiles(m_eraserUndoPending);
+
+    emit strokesChanged();
+    emit documentModified();
+
+    m_eraserUndoPending = UndoAction();
+    m_eraserUndoPages.clear();
+}
+
 void DocumentViewport::eraseNotesAt(const QPointF& viewportPos)
 {
     if (!m_document) return;
@@ -22033,18 +22170,51 @@ void DocumentViewport::eraseNotesAt(const QPointF& viewportPos)
         if (!notesRect.contains(docPt)) continue;
 
         // Check strokes for this page
-        if (!m_sideNotesStrokes.contains(i)) continue;
+        if (!m_sideNotesStrokes.contains(i)) break;
 
         QPointF notesLocal = docPt - notesOrigin;
         QVector<VectorStroke>& strokes = m_sideNotesStrokes[i];
         bool changed = false;
-        QVector<VectorStroke> removedStrokes;
+
+        // Eraser disc in notes-local coordinates. Committed notes strokes carry
+        // a valid boundingBox, so a stroke whose box cannot touch the disc is
+        // skipped without walking its points (the per-point scan was the hot
+        // path while dragging the eraser across a dense column).
+        const QRectF eraserDisc(notesLocal.x() - eraserRadius,
+                                notesLocal.y() - eraserRadius,
+                                eraserRadius * 2, eraserRadius * 2);
 
         for (int s = strokes.size() - 1; s >= 0; --s) {
-            for (const StrokePoint& pt : strokes[s].points) {
+            const VectorStroke& stroke = strokes[s];
+            if (!stroke.boundingBox.isEmpty()
+                && !stroke.boundingBox.intersects(eraserDisc)) {
+                continue;  // Bounding-box rejection: cannot be under the disc
+            }
+            for (const StrokePoint& pt : stroke.points) {
                 QPointF diff = pt.pos - notesLocal;
                 if (diff.x() * diff.x() + diff.y() * diff.y() < eraserRadius * eraserRadius) {
-                    removedStrokes.append(strokes[s]);
+                    // Accumulate into the gesture undo batch (copy BEFORE
+                    // removal); the batch is pushed once at release so a fast
+                    // drag no longer deep-copies strokes into a fresh undo
+                    // entry on every move event.
+                    UndoAction::StrokeSegment seg;
+                    seg.pageIndex = i;
+                    seg.stroke = strokes[s];
+                    seg.fromNotes = true;
+                    m_eraserUndoPending.segments.append(seg);
+                    // Claim layer 0 for the action only while the batch holds
+                    // notes segments alone; a mixed main-canvas + notes drag
+                    // keeps the layer index set by the page-side eraser (undo
+                    // routes notes segments by fromNotes, so this only affects
+                    // the page-side segments' layer lookup).
+                    bool allNotes = true;
+                    for (const auto& pend : m_eraserUndoPending.segments) {
+                        if (!pend.fromNotes) { allNotes = false; break; }
+                    }
+                    if (allNotes) {
+                        m_eraserUndoPending.layerIndex = 0;  // notes strokes live outside any layer
+                    }
+                    m_eraserUndoPages.insert(i);
                     strokes.removeAt(s);
                     changed = true;
                     break;
@@ -22052,35 +22222,24 @@ void DocumentViewport::eraseNotesAt(const QPointF& viewportPos)
             }
         }
 
-        if (changed) {
-            if (strokes.isEmpty()) {
-                m_sideNotesStrokes.remove(i);
-            }
-            // Push a single undo entry for the strokes erased at this position, so
-            // Ctrl+Z restores the notes-column content that this wipe removed.
-            if (!removedStrokes.isEmpty()) {
-                UndoAction ua;
-                ua.type = removedStrokes.size() > 1
-                    ? UndoAction::RemoveMultiple : UndoAction::RemoveStroke;
-                ua.layerIndex = 0; // notes strokes live outside any layer
-                for (const VectorStroke& s : removedStrokes) {
-                    UndoAction::StrokeSegment seg;
-                    seg.pageIndex = i;
-                    seg.stroke = s;
-                    seg.fromNotes = true;
-                    ua.segments.append(seg);
-                }
-                pushUndoAction(ua);
-                emit strokesChanged();
-                if (m_document && !m_document->isEdgeless())
-                    m_document->markPageDirty(i);
-            }
-            emit documentModified();
+        if (changed && strokes.isEmpty()) {
+            m_sideNotesStrokes.remove(i);
         }
         break;  // Only erase from the first matching page
     }
 
-    update();
+    // Partial refresh: repaint only the eraser disc (plus a pad for stroke
+    // edges) instead of the whole viewport, which was the per-move cost that
+    // made fast erasing in the notes column stutter.
+    const qreal radiusPx = eraserRadius * m_zoomLevel + 10;
+    QRectF dirtyRectF(viewportPos.x() - radiusPx, viewportPos.y() - radiusPx,
+                      radiusPx * 2, radiusPx * 2);
+    update(QRegion(dirtyRectF.toAlignedRect(), QRegion::Ellipse));
+
+    // Record the sample the hit test actually ran at, so shouldSkipEraserSample
+    // can throttle the next move against it.
+    m_lastErasePos = viewportPos;
+    m_lastErasePosValid = true;
 }
 
 void DocumentViewport::saveSideNotes()

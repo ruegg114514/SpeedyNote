@@ -38,6 +38,7 @@ enum class TouchGestureMode {
 #include <QStack>
 #include <QMap>
 #include <QSet>
+#include <set>
 
 class QContextMenuEvent;
 class QMenu;
@@ -3999,6 +4000,18 @@ private:
     bool m_pointerInViewport = false;   ///< True when pointer is hovering inside viewport (for eraser cursor)
     QTimer* m_tabletHoverTimer = nullptr; ///< Timer to detect when tablet stylus leaves (no events = left)
 
+    // Eraser gesture throttling: last position an erase hit test actually ran
+    // at. Move samples closer than ~1/4 of the eraser radius are skipped
+    // (see shouldSkipEraserSample).
+    QPointF m_lastErasePos;             ///< Last position eraseAt() ran at (viewport coords)
+    bool m_lastErasePosValid = false;   ///< False until the first erase of a gesture
+
+    // Eraser undo batching: one undo entry per press-drag-release instead of
+    // one per move. Accumulated removals are pushed at commitEraserUndoBatch().
+    bool m_eraserUndoBatching = false;  ///< True between begin/commit of an eraser gesture
+    UndoAction m_eraserUndoPending;     ///< Accumulated removals for the gesture
+    std::set<int> m_eraserUndoPages;    ///< Pages touched (paged mode), for commit-time signals
+
     // Re-entrancy guard for modal dialogs opened from canvas press handlers.
     // On ChromeOS Crostini and KDE Plasma 6 Wayland, QTabletEvents leak into
     // the modal QFileDialog's nested event loop (the modal grab does not
@@ -5062,10 +5075,12 @@ private:
      * their raw pressure unchanged — they already use a fixed pressure of 1.0.
      *
      * @param rawPressure Original pressure from the pointer device.
+     * @param baseThickness Stroke thickness to compute the floor against.
+     *        Negative means "use m_currentStroke" (the main-canvas stroke).
      * @return Pressure value clamped to `[minP, 1.0]` where `minP` reflects
      *         the current preset's minimum width, or `rawPressure` for markers.
      */
-    qreal applyPenPressureFloor(qreal rawPressure) const;
+    qreal applyPenPressureFloor(qreal rawPressure, qreal baseThickness = -1.0) const;
     
     // ===== Incremental Stroke Rendering (Task 2.3) =====
     
@@ -5126,6 +5141,40 @@ private:
      * 8 neighboring tiles for cross-tile stroke segments.
      */
     void eraseAtEdgeless(QPointF viewportPos);
+
+    // ===== Eraser gesture throttling + undo batching (perf) =====
+
+    /**
+     * @brief Whether this move sample can be skipped for erasing.
+     * @param viewportPos Current eraser position in viewport coordinates.
+     * @return True when the eraser has not moved far enough from the last
+     *         erased sample to need another hit test.
+     *
+     * Tablets stream move events at 120-360Hz while the eraser disc is large
+     * relative to the per-event movement, so consecutive samples overlap
+     * heavily. Skipping samples closer than a fraction of the eraser radius
+     * cuts eraseAt() call rate (and its hit tests / cache patches) by 4-16x
+     * with no visible gap in the erasing.
+     */
+    bool shouldSkipEraserSample(const QPointF& viewportPos);
+
+    /**
+     * @brief Start accumulating one undo action for an eraser gesture.
+     *
+     * Eraser drags previously pushed an undo entry (with deep stroke copies)
+     * on every move event that removed strokes. This batches all removals of
+     * a single press-drag-release into one undo entry, pushed once at
+     * commitEraserUndoBatch() - release, tool switch, or gesture abort.
+     */
+    void beginEraserUndoBatch();
+
+    /**
+     * @brief Push the accumulated eraser removals as a single undo entry.
+     *
+     * No-op when the batch is empty or not open. Emits pageModified /
+     * strokesChanged / documentModified once, not per move.
+     */
+    void commitEraserUndoBatch();
     
     /**
      * @brief Draw the eraser cursor circle at the current pointer position.
