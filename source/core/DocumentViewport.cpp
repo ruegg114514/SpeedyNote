@@ -9229,8 +9229,18 @@ void DocumentViewport::updateObjectDrag(const QPointF& totalDelta)
             
             if (targetPage >= 0) {
                 QRectF localRect = freeGroupRect.translated(-pagePosition(targetPage));
+                QSizeF targetPageSize = m_document->pageSizeAt(targetPage);
+                // Extend the right boundary by the side-notes column width so a
+                // drag may carry the selection past the page/notes divider into
+                // the notes column (mirrors clampObjectPositionToPage). Without
+                // this the selection sticks at the divider and cannot enter the
+                // notes column.
+                if (!targetPageSize.isEmpty()) {
+                    targetPageSize.setWidth(
+                        targetPageSize.width() + sideNotesWidthFor(targetPage));
+                }
                 correction = ObjectConstraints::correctionToPage(
-                    localRect, m_document->pageSizeAt(targetPage));
+                    localRect, targetPageSize);
             }
         }
         
