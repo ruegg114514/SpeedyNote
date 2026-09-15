@@ -2329,8 +2329,31 @@ QPointF DocumentViewport::clampObjectPositionToPage(int pageIndex, QPointF pageP
     if (pageIndex < 0 || pageIndex >= m_document->pageCount()) {
         return pagePos;
     }
+
+    const QSizeF pageSize = m_document->pageSizeAt(pageIndex);
+    // If this page has side notes, extend the allowed right boundary
+    // so objects can overflow into the notes column
+    qreal notesW = sideNotesWidthFor(pageIndex);
+    const qreal maxRight = pageSize.width() + notesW;
     
-    return ObjectConstraints::clampPosition(pagePos, size, m_document->pageSizeAt(pageIndex));
+    // Clamp Y normally, but X can go into the notes column
+    const qreal clampedY = ObjectConstraints::clampAxis(
+        pagePos.y(), size.height(), pageSize.height());
+
+    qreal clampedX;
+    if (notesW <= 0.0) {
+        // No notes column - original behavior (clamp to page body width)
+        clampedX = ObjectConstraints::clampAxis(
+            pagePos.x(), size.width(), pageSize.width());
+    } else {
+        // With notes column: X can extend up to (page width + notes width).
+        // The notes column belongs to this page, so objects placed here
+        // stay with this page (owned by the page), just drawn after notes.
+        clampedX = ObjectConstraints::clampAxis(
+            pagePos.x(), size.width(), maxRight);
+    }
+
+    return QPointF(clampedX, clampedY);
 }
 
 QVector<int> DocumentViewport::loadedPagesNear(const QPointF& docPoint, int excludePageIndex) const
@@ -21806,6 +21829,9 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
         // column edges.
         drawNotesColumnOverflow(painter, page, pageIdx);
         painter.drawPixmap(QPointF(page->size.width(), 0), cacheIt->pixmap);
+        // Re-draw objects that spill into the notes column on top of the column
+        // background, so images/objects placed in the notes area stay visible.
+        renderObjectsOverNotes(painter, page, pageIdx);
         return;
     }
 
@@ -21819,6 +21845,7 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
     const int cap = VectorLayer::MAX_STROKE_CACHE_DIM;
     if (phys.width() > cap || phys.height() > cap) {
         renderLocal(painter, page->size.width());
+        renderObjectsOverNotes(painter, page, pageIdx);
         return;
     }
     QPixmap px(phys);
@@ -21837,6 +21864,11 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
         drawNotesColumnOverflow(painter, page, pageIdx);
     }
     painter.drawPixmap(QPointF(page->size.width(), 0), px);
+    // Objects that spill into the notes column must be re-drawn on top of the
+    // column background (see renderObjectsOverNotes for the full explanation).
+    if (!lassoEditingNotes) {
+        renderObjectsOverNotes(painter, page, pageIdx);
+    }
     if (!lassoEditingNotes) {
         // Bound memory: cached note columns are only needed while the page is near
         // the viewport. Evict entries whose pages have scrolled away (pageRect uses
@@ -21919,6 +21951,54 @@ void DocumentViewport::drawNotesColumnOverflow(QPainter& painter, Page* page, in
         }
     }
 
+    painter.restore();
+}
+
+void DocumentViewport::renderObjectsOverNotes(QPainter& painter, Page* page, int pageIdx)
+{
+    const qreal pageW = page->size.width();
+    const qreal notesW = sideNotesWidthFor(pageIdx);
+    if (notesW <= 0.0) {
+        return;  // no side notes column - nothing to do
+    }
+
+    // We walk all affinity layers because objects can live under any layer (affinity
+    // matches active layer number). Render in z-order so top objects are on top.
+    auto& objMap = page->objectsByAffinity;
+    // Clip to the notes column (page-local): only the portion of each object that
+    // spills into the column is overlaid here. This keeps the part of the object
+    // that sits on the page body at its original z-order (interleaved with the
+    // stroke layers from the main render pass) instead of re-lifting it above
+    // every stroke.
+    painter.save();
+    painter.setClipRect(QRectF(pageW, 0, notesW, page->size.height()));
+    for (auto& pair : objMap) {
+        std::vector<InsertedObject*> objs = pair.second;
+        // Sort objects by zOrder within this affinity layer (same as renderObjectsWithAffinity).
+        std::sort(objs.begin(), objs.end(),
+                  [](InsertedObject* a, InsertedObject* b) {
+                      return a->zOrder < b->zOrder;
+                  });
+        for (InsertedObject* obj : objs) {
+            if (!obj || !obj->visible) {
+                continue;
+            }
+
+            // If ANY part of the object's bounding rect is inside the notes
+            // column (right of pageW), we need to render the overlapping portion
+            // here (on top of the column background and strokes). The object is
+            // already rendered during the main page render loop, but that render
+            // is done BEFORE the column's background is drawn, so the column would
+            // cover the overlapping portion. Re-rendering the object after the
+            // column draws (clipped to the column) puts the overlapping pixels
+            // back on top without disturbing the object's z-order on the body.
+            const QRectF objRect(obj->position, obj->size);
+            if (objRect.right() > pageW) {
+                // At least some of the object overlaps the notes column - re-render.
+                obj->render(painter, 1.0);
+            }
+        }
+    }
     painter.restore();
 }
 

@@ -5043,6 +5043,11 @@ private:
     // page but before the column pixmap blit so swept ink stays on top of the
     // page content instead of being clipped out by the column-sized cache.
     void drawNotesColumnOverflow(QPainter& painter, Page* page, int pageIdx);
+    // Renders page objects whose (page-local) rect overlaps the side-notes
+    // column ON TOP of the column, so an image placed in the notes area is
+    // visible instead of being hidden by the column's white background.
+    // Painter must already be translated to the page's top-left corner.
+    void renderObjectsOverNotes(QPainter& painter, Page* page, int pageIdx);
     int notesDividerPageAtViewport(const QPointF& vpPos) const;
     int notesPageAtViewport(const QPointF& vpPos) const;
     void eraseNotesAt(const QPointF& viewportPos);
