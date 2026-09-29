@@ -555,12 +555,19 @@ void Page::render(QPainter& painter, const QPixmap* pdfBackground, qreal zoom) c
 void Page::renderBackground(QPainter& painter, const QPixmap* pdfBackground, qreal zoom) const
 {
     QRectF pageRect(0, 0, size.width() * zoom, size.height() * zoom);
+    // Backgrounds cover the page BODY only.  When the sheet is wider than the
+    // body (a notes column on the right) the background must not stretch into
+    // that strip.  Named bodyRectZoomed because bodyRect() is a member.
+    const QRectF bodyRectZoomed(
+        0, 0,
+        (bodyWidth > 0.0 && bodyWidth < size.width() ? bodyWidth : size.width()) * zoom,
+        size.height() * zoom);
     
     // Handle PDF and Custom backgrounds specially (they need pixmaps)
     if (backgroundType == BackgroundType::PDF) {
         painter.fillRect(pageRect, backgroundColor);
         if (pdfBackground && !pdfBackground->isNull()) {
-            painter.drawPixmap(pageRect.toRect(), *pdfBackground);
+            painter.drawPixmap(bodyRectZoomed.toRect(), *pdfBackground);
         }
         return;
     }
@@ -568,16 +575,20 @@ void Page::renderBackground(QPainter& painter, const QPixmap* pdfBackground, qre
     if (backgroundType == BackgroundType::Custom) {
         painter.fillRect(pageRect, backgroundColor);
         if (!customBackground.isNull()) {
-            painter.drawPixmap(pageRect.toRect(), customBackground);
+            painter.drawPixmap(bodyRectZoomed.toRect(), customBackground);
         }
         return;
     }
+    
+    // None/Grid/Lines: the whole sheet gets the paper colour, then the pattern
+    // itself covers the body only, so a notes strip stays plain paper.
+    painter.fillRect(pageRect, backgroundColor);
     
     // For None/Grid/Lines, use the shared helper
     // Note: spacing is scaled by zoom since we're drawing in zoomed coordinates
     renderBackgroundPattern(
         painter,
-        pageRect,
+        bodyRectZoomed,
         backgroundColor,
         backgroundType,
         gridColor,
@@ -721,6 +732,11 @@ QJsonObject Page::toJson() const
     obj["pageIndex"] = pageIndex;
     obj["width"] = size.width();
     obj["height"] = size.height();
+    // Written only when a notes column exists, so notebooks without one stay
+    // byte-identical on disk.
+    if (notesWidth() > 0.0) {
+        obj["bodyWidth"] = bodyWidth;
+    }
     
     // Background
     obj["backgroundType"] = static_cast<int>(backgroundType);
@@ -784,6 +800,7 @@ std::unique_ptr<Page> Page::fromJson(const QJsonObject& obj)
     page->pageIndex = obj["pageIndex"].toInt(0);
     // Default to US Letter at 96 DPI (consistent with Document::defaultPageSize)
     page->size = QSizeF(obj["width"].toDouble(816), obj["height"].toDouble(1056));
+    page->bodyWidth = obj["bodyWidth"].toDouble(0.0);
     
     // Background
     page->backgroundType = static_cast<BackgroundType>(obj["backgroundType"].toInt(0));

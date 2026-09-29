@@ -20,6 +20,7 @@
 #include "../ocr/OcrTextBlock.h"
 
 #include <QSizeF>
+#include <QRectF>
 #include <QColor>
 #include <QPixmap>
 #include <QJsonObject>
@@ -44,6 +45,7 @@ public:
     QString uuid;               ///< Unique identifier for LinkObject position links (Phase C.0.1)
     int pageIndex = 0;          ///< Index of this page in the document (0-based)
     QSizeF size;                ///< Page dimensions in logical pixels
+    qreal bodyWidth = 0.0;      ///< Body (background) width. 0 = no notes column; see notesWidth()
     bool modified = false;      ///< True if page has unsaved changes
     
     // ===== Background =====
@@ -132,6 +134,38 @@ public:
     // Page is movable
     Page(Page&&) = default;
     Page& operator=(Page&&) = default;
+    
+    // ===== Page Geometry (body vs. notes column) =====
+    
+    /**
+     * @brief Width of the notes column in document units (0 = no notes column).
+     *
+     * The page sheet is Page::size.  When a page carries a notes column on its
+     * right, that sheet is wider than its body: `bodyWidth` marks where the body
+     * ends and the notes strip begins.  A stale or out-of-range bodyWidth
+     * degrades to "no notes column" rather than yielding a negative width, so a
+     * page can never render a malformed column.
+     */
+    qreal notesWidth() const {
+        return (bodyWidth > 0.0 && bodyWidth < size.width())
+                   ? size.width() - bodyWidth
+                   : 0.0;
+    }
+    
+    /**
+     * @brief Rectangle the background occupies, in page-local coordinates.
+     *
+     * Backgrounds (PDF, custom image, grid, ruled lines) are painted inside this
+     * rect, so widening a page for a notes column can never stretch them.  It
+     * equals the full page rect while the page has no notes column - which is
+     * every page that predates this field.
+     */
+    QRectF bodyRect() const {
+        const qreal w = (bodyWidth > 0.0 && bodyWidth < size.width())
+                            ? bodyWidth
+                            : size.width();
+        return QRectF(0.0, 0.0, w, size.height());
+    }
     
     // ===== Layer Management =====
     

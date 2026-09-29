@@ -20588,6 +20588,14 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
     QSizeF pageSize = page->size;
     QRectF pageRect(0, 0, pageSize.width(), pageSize.height());
     
+    // Backgrounds (PDF, custom image, grid, ruled lines) cover the page BODY
+    // only: a page widened to carry a notes column must not stretch its
+    // background across the extra strip.  Equal to pageRect while the page has
+    // no notes column (bodyWidth == 0), so this is a no-op until the notes
+    // column becomes real page geometry.
+    const QRectF bodyRect = page->bodyRect();
+    const QSizeF bodySize = bodyRect.size();
+    
     // 1. Fill with page background color
     painter.fillRect(pageRect, paperColorForPage(page));
     
@@ -20625,7 +20633,7 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
                     
                     if (!pdfPixmap.isNull()) {
                         // Scale pixmap to fit page rect
-                        painter.drawPixmap(pageRect.toRect(), pdfPixmap);
+                        painter.drawPixmap(bodyRect.toRect(), pdfPixmap);
                     }
                 }
             }
@@ -20634,7 +20642,7 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
         case Page::BackgroundType::Custom:
             // Draw custom background image
             if (!page->customBackground.isNull()) {
-                painter.drawPixmap(pageRect.toRect(), page->customBackground);
+                painter.drawPixmap(bodyRect.toRect(), page->customBackground);
             }
             break;
             
@@ -20650,16 +20658,18 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
                                           page->gridColor,
                                           static_cast<qreal>(page->gridSpacing),
                                           static_cast<qreal>(page->lineSpacing),
-                                          pageSize };
+                                          bodySize };
                 QPixmap cached = m_pageBackgroundCache.value(pageIndex);
                 if (cached.isNull() || m_pageBackgroundKeys.value(pageIndex) != key) {
                     // Build the pattern at physical resolution; DPR = zoom*dpr
                     // so logical page-local coordinates map 1:1 to the
                     // viewport's scaled painter (pen width 1.0/zoom matches
                     // the direct-draw path).
+                    // Sized to the BODY, not the sheet: the pattern must not
+                    // run under a notes column.  Identical while bodyWidth == 0.
                     const QSize physSize(
-                        qMax(1, qCeil(pageSize.width() * m_zoomLevel * bgDpr)),
-                        qMax(1, qCeil(pageSize.height() * m_zoomLevel * bgDpr)));
+                        qMax(1, qCeil(bodySize.width() * m_zoomLevel * bgDpr)),
+                        qMax(1, qCeil(bodySize.height() * m_zoomLevel * bgDpr)));
                     cached = QPixmap(physSize);
                     cached.setDevicePixelRatio(m_zoomLevel * bgDpr);
                     cached.fill(paperColorForPage(page));
@@ -20668,15 +20678,15 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
                         pp.setRenderHint(QPainter::Antialiasing, true);
                         pp.setPen(QPen(page->gridColor, 1.0 / m_zoomLevel));
                         if (page->backgroundType == Page::BackgroundType::Grid) {
-                            for (qreal x = page->gridSpacing; x < pageSize.width(); x += page->gridSpacing) {
-                                pp.drawLine(QPointF(x, 0), QPointF(x, pageSize.height()));
+                            for (qreal x = page->gridSpacing; x < bodySize.width(); x += page->gridSpacing) {
+                                pp.drawLine(QPointF(x, 0), QPointF(x, bodySize.height()));
                             }
-                            for (qreal y = page->gridSpacing; y < pageSize.height(); y += page->gridSpacing) {
-                                pp.drawLine(QPointF(0, y), QPointF(pageSize.width(), y));
+                            for (qreal y = page->gridSpacing; y < bodySize.height(); y += page->gridSpacing) {
+                                pp.drawLine(QPointF(0, y), QPointF(bodySize.width(), y));
                             }
                         } else {
-                            for (qreal y = page->lineSpacing; y < pageSize.height(); y += page->lineSpacing) {
-                                pp.drawLine(QPointF(0, y), QPointF(pageSize.width(), y));
+                            for (qreal y = page->lineSpacing; y < bodySize.height(); y += page->lineSpacing) {
+                                pp.drawLine(QPointF(0, y), QPointF(bodySize.width(), y));
                             }
                         }
                     }
