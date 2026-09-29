@@ -1434,6 +1434,8 @@ void DocumentViewport::onScrollSettled()
 
     // Final clean repaint (matters in SP2, where painting draws cache-only
     // while scrolling and needs one repaint to show freshly rendered pages).
+    // Same repaint covers any completion deferred while the scroll was live.
+    m_pdfReadyRepaintPending = false;
     update();
 }
 
@@ -5217,7 +5219,9 @@ void DocumentViewport::endZoomGesture()
     emit panChanged(m_panOffset);
     emitScrollFractions();
     
-    // Trigger full re-render at new DPI
+    // Trigger full re-render at new DPI. Also covers any page whose completion
+    // was deferred while the gesture was live (see m_pdfReadyRepaintPending).
+    m_pdfReadyRepaintPending = false;
     update();
     
     // Check if auto-layout should switch modes (zoom level changed)
@@ -5354,6 +5358,9 @@ void DocumentViewport::endPanGesture()
     // Trigger repaint. With m_scrollActive=false and grace period active,
     // the full render path uses getCachedPdfPage() which renders synchronously
     // for any cache misses → no blank flash.
+    // This repaint also covers any page whose completion was deferred while the
+    // gesture was live, so the pending marker can just be cleared.
+    m_pdfReadyRepaintPending = false;
     update();
 
     // Evict distant tiles if in edgeless mode
@@ -5835,8 +5842,19 @@ void DocumentViewport::doAsyncPdfPreload(const QRectF* viewRectOverride)
     // pool then saturates the CPU and starves the main-thread paint that the
     // inertia glide depends on. Un-launched pages are retried on the next
     // throttle tick as the in-flight watchers finish.
+    //
+    // While a finger is actually dragging or the view is scrolling, drop to a
+    // single in-flight render. Measured on a low-end Windows tablet during a
+    // drag: paintEvent was 7.9ms but the frame period 28.5ms, i.e. ~20ms per
+    // frame was spent outside our paint code - and two concurrent muPDF renders
+    // on a 2-4 core device is the cheapest explanation for that. One render still
+    // keeps the visible strip fed (no blank-flash regression); full concurrency
+    // returns as soon as the gesture ends and the settle preload catches up.
+    const bool gestureLive = m_gesture.isActive() || isScrolling();
+    const int maxConcurrent = gestureLive ? 1 : PDF_PRELOAD_MAX_CONCURRENT;
+
     for (const PreloadItem& item : pagesToPreload) {
-        if (m_activePdfWatchers.size() >= PDF_PRELOAD_MAX_CONCURRENT) {
+        if (m_activePdfWatchers.size() >= maxConcurrent) {
             break;
         }
         const QString sourceId = item.sourceId;
@@ -5922,8 +5940,38 @@ void DocumentViewport::doAsyncPdfPreload(const QRectF* viewRectOverride)
             m_pdfCache.append(entry);
             m_cachedDpi = dpi;
             
-            // Trigger repaint to show newly cached page
-            update();
+            // Trigger repaint to show the newly cached page.
+            //
+            // NOT during a live viewport gesture or a scroll. A full-viewport
+            // re-composite costs ~18ms on a device that manages ~120 Mpix/s
+            // (measured on a low-end Windows tablet: Compose paint 17.7ms avg),
+            // and the preload throttle fires a batch every 150ms, so a drag
+            // carried a steady stream of these - measured as a 7.1 fps stream of
+            // full composites running on top of 35 fps drag frames whose own
+            // paint was only 7.9ms. Deferring costs nothing visually: the page
+            // still lands in the cache, the pan strip render picks it up if it
+            // moves into the newly exposed band, and every gesture end path
+            // already repaints everything (endPanGesture / endZoomGesture /
+            // onScrollSettled) - the same trade-off the inertia preload throttle
+            // already makes.
+            if (m_gesture.isActive() || isScrolling()) {
+                if (!m_pdfReadyRepaintPending) {
+                    m_pdfReadyRepaintPending = true;
+                    // Safety net: if the gesture/scroll state is torn down without
+                    // going through endPanGesture()/endZoomGesture()/
+                    // onScrollSettled() (all of which flush this marker), make sure
+                    // a repaint still happens once the viewport is idle again.
+                    QTimer::singleShot(PDF_READY_REPAINT_FLUSH_MS, this, [this]() {
+                        if (m_pdfReadyRepaintPending && !m_gesture.isActive()
+                            && !isScrolling()) {
+                            m_pdfReadyRepaintPending = false;
+                            update();
+                        }
+                    });
+                }
+            } else {
+                update();
+            }
         });
         
         // Background thread: render PDF to QImage (thread-safe)
@@ -20221,9 +20269,23 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
             // otherwise skip this layer and let onScrollSettled()'s
             // preloadStrokeCaches() fill it once scrolling stops. Objects
             // with this affinity still draw below (they are cheap to paint).
-            if (m_scrollActive && !hasSelectionOnThisPage &&
+            //
+            // The same rule has to cover a live viewport gesture, which is NOT
+            // m_scrollActive (endPanGesture clears that flag). A pinch changes
+            // the zoom, which silently invalidates every layer cache (the cache
+            // key is size/zoom/dpr), and the full re-render that endZoomGesture
+            // posts gets coalesced away the moment the finger starts dragging -
+            // so the rebuilds landed inside the glide's strip frames instead.
+            // Measured on a low-end Windows tablet: panning with warm caches
+            // 7.9ms/frame (p95 11.8, max 12.1); the same glide started right
+            // after a pinch/zoom change 54.7ms/frame average with a 349.5ms max
+            // - the same range as a whole-page stroke re-rasterisation. Skipping
+            // here moves that cost to the gesture-end repaint (endPanGesture ->
+            // update()), off the interaction path.
+            const bool cheapFrameInFlight = m_scrollActive || m_gesture.isActive();
+            if (cheapFrameInFlight && !hasSelectionOnThisPage &&
                 !layer->isStrokeCacheValid()) {
-                // Ink layer skipped this frame (cold cache, scroll in flight).
+                // Ink layer skipped this frame (cold cache, scroll/gesture in flight).
             } else if (hasSelectionOnThisPage && layerIdx == m_lassoSelection.sourceLayerIndex) {
                 layer->renderExcludingTiered(painter, excludeIds,
                                              pageSize, m_zoomLevel, dpr,

@@ -3890,6 +3890,16 @@ private:
     static constexpr int PDF_PRELOAD_MAX_CONCURRENT = 2;
     qint64 m_lastGesturePreloadMs = 0;   ///< Timestamp of the last gesture-time preload
 
+    /// A background PDF page finished rendering while a gesture/scroll was live,
+    /// so its repaint was deferred instead of being injected into the drag as a
+    /// full-viewport re-composite (~18ms per page on a low-end tablet, and the
+    /// preload throttle fires a batch every 150ms). Cleared by the gesture-end /
+    /// settle paths, which repaint everything anyway. The fallback timer only
+    /// looks at it once the viewport is idle again, so it can never inject a
+    /// composite into a running gesture.
+    bool m_pdfReadyRepaintPending = false;
+    static constexpr int PDF_READY_REPAINT_FLUSH_MS = 500;
+
     // ===== Scroll-activity gate (SP1) =====
     // The immediate-pan route (wheel/touchpad/scroll-bar) marks itself active on
     // every event and restarts m_scrollSettleTimer; when it fires we run the
