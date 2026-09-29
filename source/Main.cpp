@@ -1277,31 +1277,15 @@ int main(int argc, char* argv[])
     IOSInboxWatcher inboxWatcher;
 #endif
 
-    // ========== Session Restore ==========
+    // ========== Session Restore: removed ==========
+    // A cold start no longer asks whether to reopen the tabs from last time.
+    // It goes straight to the Launcher, or to the file named on the command
+    // line. Any session an older build left behind is cleared here so the
+    // prompt cannot resurface from stale settings.
     QSettings sessionSettings("SpeedyNote", "App");
-    QStringList sessionTabs = sessionSettings.value("session/lastOpenTabs").toStringList();
-    int sessionActiveIndex = sessionSettings.value("session/activeTabIndex", 0).toInt();
-
-    // Clear immediately so a crash during restore doesn't loop
     sessionSettings.remove("session/lastOpenTabs");
     sessionSettings.remove("session/activeTabIndex");
     sessionSettings.sync();
-
-    // Filter out files that no longer exist
-    sessionTabs.erase(std::remove_if(sessionTabs.begin(), sessionTabs.end(),
-        [](const QString& p) { return !QFileInfo::exists(p); }), sessionTabs.end());
-
-    // If launching with a file argument, remove it from session list to avoid duplicate
-    bool inputFileWasInSession = false;
-    if (!inputFile.isEmpty() && !sessionTabs.isEmpty()) {
-        QString normalizedInput = QFileInfo(inputFile).absoluteFilePath();
-        int sizeBefore = sessionTabs.size();
-        sessionTabs.erase(std::remove_if(sessionTabs.begin(), sessionTabs.end(),
-            [&normalizedInput](const QString& p) {
-                return QFileInfo(p).absoluteFilePath() == normalizedInput;
-            }), sessionTabs.end());
-        inputFileWasInSession = (sessionTabs.size() < sizeBefore);
-    }
 
     // ========== Launch Application ==========
     // Always create the Launcher upfront. On macOS this also show()s it
@@ -1332,17 +1316,6 @@ int main(int argc, char* argv[])
         (void)l;
     };
 
-    // Parent for the session-restore prompt in the no-file branch.
-    // On macOS the launcher is visible (priming pass), so we get a real
-    // sheet/window-modal dialog. On other platforms the launcher is
-    // hidden, so a hidden parent would weaken modality - keep nullptr
-    // (preserves the original application-modal behavior).
-#ifdef Q_OS_MACOS
-    QWidget* sessionPromptParent = launcher;
-#else
-    QWidget* sessionPromptParent = nullptr;
-#endif
-
     if (!inputFile.isEmpty()) {
         // File argument provided - open in MainWindow.
         auto* w = new MainWindow();
@@ -1350,48 +1323,9 @@ int main(int argc, char* argv[])
         showMainWindowAtColdStart(w, launcher);
         w->openFileInNewTab(inputFile);
 
-        if (!sessionTabs.isEmpty()) {
-            auto reply = QMessageBox::question(w,
-                QObject::tr("Restore Previous Session"),
-                QObject::tr("You had %1 other tab(s) open last time. Restore them?")
-                    .arg(sessionTabs.size()),
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-            if (reply == QMessageBox::Yes) {
-                for (const QString& path : sessionTabs)
-                    w->openFileInNewTab(path);
-                int adjustedIndex = inputFileWasInSession
-                    ? sessionActiveIndex : sessionActiveIndex + 1;
-                if (adjustedIndex >= 0 && adjustedIndex < w->tabCount())
-                    w->switchToTabIndex(adjustedIndex);
-            }
-        }
-
         registerMainWindowWithPlatform(w);
-    } else if (!sessionTabs.isEmpty()) {
-        // No file, but previous session exists - ask to restore.
-        auto reply = QMessageBox::question(sessionPromptParent,
-            QObject::tr("Restore Previous Session"),
-            QObject::tr("You had %1 tab(s) open last time. Restore them?")
-                .arg(sessionTabs.size()),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-
-        if (reply == QMessageBox::Yes) {
-            auto* w = new MainWindow();
-            w->setAttribute(Qt::WA_DeleteOnClose);
-            showMainWindowAtColdStart(w, launcher);
-            for (const QString& path : sessionTabs)
-                w->openFileInNewTab(path);
-            if (sessionActiveIndex >= 0 && sessionActiveIndex < w->tabCount())
-                w->switchToTabIndex(sessionActiveIndex);
-
-            registerMainWindowWithPlatform(w);
-        } else {
-            // User declined - land on the Launcher.
-            showLauncherAtColdStart(launcher);
-            registerLauncherWithPlatform(launcher);
-        }
     } else {
-        // No file, no session - land on the Launcher.
+        // No file argument - land on the Launcher and let the user pick.
         showLauncherAtColdStart(launcher);
         registerLauncherWithPlatform(launcher);
     }

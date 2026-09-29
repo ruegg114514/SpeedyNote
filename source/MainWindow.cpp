@@ -9476,66 +9476,6 @@ void MainWindow::dropEvent(QDropEvent *event)
 
 #endif // !Q_OS_ANDROID && !Q_OS_IOS
 
-void MainWindow::saveSessionTabs()
-{
-    QSettings settings("SpeedyNote", "App");
-
-    // Multi-window: aggregate every open MainWindow's tabs so closing one
-    // window while others remain does not wipe their tabs from the session.
-    QVector<MainWindow*> windows;
-    for (QWidget* widget : QApplication::topLevelWidgets()) {
-        if (auto* mw = qobject_cast<MainWindow*>(widget)) {
-            windows.append(mw);
-        }
-    }
-
-    QStringList paths;
-    for (MainWindow* mw : windows) {
-        if (!mw->m_splitViewManager || !mw->m_documentManager) continue;
-        mw->m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
-            for (int i = 0; i < tm->tabCount(); ++i) {
-                Document* doc = tm->documentAt(i);
-                if (!doc) continue;
-
-                QString docPath = mw->m_documentManager->documentPath(doc);
-                if (!docPath.isEmpty() && !mw->m_documentManager->isUsingTempBundle(doc)) {
-                    paths.append(QFileInfo(docPath).absoluteFilePath());
-                } else if (!doc->pdfPath().isEmpty()) {
-                    paths.append(QFileInfo(doc->pdfPath()).absoluteFilePath());
-                }
-            }
-        });
-    }
-
-    if (paths.isEmpty()) {
-        settings.remove("session/lastOpenTabs");
-        settings.remove("session/activeTabIndex");
-        return;
-    }
-
-    // Active index: count every tab in the windows ahead of this one, then
-    // add this window's active pane index (same rule as the single-window
-    // implementation).
-    int globalActiveIndex = 0;
-    for (MainWindow* mw : windows) {
-        if (!mw->m_splitViewManager) continue;
-        if (mw == this) {
-            if (mw->m_splitViewManager->activePane() == SplitViewManager::Right
-                && mw->m_splitViewManager->rightTabManager()) {
-                globalActiveIndex += mw->m_splitViewManager->leftTabManager()->tabCount()
-                                   + mw->m_splitViewManager->rightTabManager()->currentIndex();
-            } else if (mw->m_splitViewManager->leftTabManager()) {
-                globalActiveIndex += mw->m_splitViewManager->leftTabManager()->currentIndex();
-            }
-            break;
-        }
-        globalActiveIndex += mw->m_splitViewManager->totalTabCount();
-    }
-
-    settings.setValue("session/lastOpenTabs", paths);
-    settings.setValue("session/activeTabIndex", globalActiveIndex);
-}
-
 void MainWindow::closeEvent(QCloseEvent *event) {
     // ========== CHECK FOR UNSAVED DOCUMENTS ==========
     // Per-tab: silently persist ephemeral view state (edgeless last_position /
@@ -9643,9 +9583,6 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         // REMOVED MW7.4: Save bookmarks removed - bookmark implementation deleted
         // saveBookmarks();
     
-    // Save session tabs for restore on next launch
-    saveSessionTabs();
-
     // Flush NotebookLibrary to disk before exiting
     // This ensures any pending addToRecent() calls are persisted, even if
     // the debounced save timer hasn't fired yet. Critical for new documents

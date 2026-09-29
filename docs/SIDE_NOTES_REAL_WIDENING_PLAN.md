@@ -1,7 +1,7 @@
 # 笔记栏重构方案：从「平行结构」改为「页面的一部分」
 
 > 分支：`work-palm`
-> 状态：阶段 0/1/2a/2b 已落地，阶段 3（删掉平行结构）待做
+> 状态：阶段 0/1/2a/2b/3a 已落地，阶段 3b（删撤销与 lasso 的死分支）待做
 > 一句话：**把笔记栏从"页面旁边的另一个东西"改成"页面本身变宽多出来的那一块"。**
 
 ---
@@ -290,16 +290,34 @@ QRectF bodyRect() const { return QRectF(0, 0, bodyWidth > 0.0 ? bodyWidth : size
   按 `bodyWidth == 0` 识别后加宽一次；迁移完恢复文档的 modified 标志，
   免得打开旧笔记本就显示"有未保存改动"
 
+**已完成（3a）**：笔记笔画成为普通页面内容，笔记专用管线删除。
+
+- 笔记笔画存进页面自己的 `VectorLayer`，用**页面局部坐标**，因此删掉了：
+  press 里的落笔路由劫持、`startNotesStroke`/`continueNotesStroke`/`endNotesStroke`
+  与独立的"正在画"渲染、`drawNotesColumn`/`drawNotesColumnOverflow`/
+  `renderObjectsOverNotes` 与列专用像素缓存、`eraseNotesAt`
+- 落笔/擦除/lasso 现在都走常规路径 —— 页面矩形已覆盖笔记栏，不再需要特判
+- `side_notes.json` 只剩逐页栏宽（笔画随页面 JSON 走）
+- 迁移合并成一件事：加宽页面 **并**把旧笔画 `+body` 平移后 `layer->addStroke()`
+  进页面活动图层；幂等靠 `bodyWidth == 0` 判定
+
 **仍待做**：
 
-1. **`side_notes.json` / 平行结构本身**（阶段 3）—— 笔记笔画仍存在
-   `m_sideNotesStrokes`，没进页面图层，所以 `fromNotes` 的 undo 分流、
-   `m_lassoNotesPage` 平行索引、`side_notes.json` 持久化都还在。删掉它们才是最终形态。
+1. **阶段 3b：删除撤销与 lasso 的死分支** —— `fromNotes` 的 undo 分流、
+   `m_lassoNotesPage` 平行索引都只读 `m_sideNotesStrokes`，而已经没有任何代码写它，
+   所以是死代码但无害。删它们要动 undo 与 lasso，是最需要实机验证的部分，故单独提交。
 2. **导出的笔记笔画** —— `renderModifiedPage` 一直不含笔记笔画（2b 之前就如此，
-   不是回归）；现在页面加宽了，笔记条会以空白纸导出。应把笔记笔画按边界偏移
+   不是回归）；现在页面加宽了，笔记条会以空白纸导出。应把笔画按边界偏移
    追加进页面内容流。`notesOnly` 导出路径不受影响。
 3. **尚未拍板的 UX**（4.7）：`zoomToFit` 按整页还是按正文、缩略图比例、
    新建页是否继承栏宽。
+
+### 另：启动"恢复上次标签"提示已移除
+
+冷启动原来会读 `session/lastOpenTabs` 并弹「Restore Previous Session?」
+（带命令行文件时一次、不带时又一次）。现在直接进 Launcher（或打开命令行指定的文件），
+不再提问；旧版遗留的 session 键在启动时清掉；`MainWindow::saveSessionTabs()`
+及其声明与调用点一并删除。
 
 ### 阶段 2 的入口
 
