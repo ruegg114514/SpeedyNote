@@ -1388,7 +1388,19 @@ Page* Document::page(int index)
     // Use find() instead of [] to avoid inserting nullptr if something went wrong
     // (defensive programming - loadPageFromDisk should have inserted it)
     it = m_loadedPages.find(uuid);
-    return it != m_loadedPages.end() ? it->second.get() : nullptr;
+    if (it == m_loadedPages.end()) {
+        return nullptr;
+    }
+
+    // First touch after a load: the page's own JSON is the authority on its
+    // body/notes split, so mirror it into the layout index now. This is what
+    // lets the index lag in exactly one direction - a bundle written before the
+    // split was indexed carries no bodyWidth until its pages are touched, and
+    // the notes-column migration touches every page that has a column. Doing it
+    // here rather than on every page() call keeps the hot paths free of a map
+    // lookup.
+    indexPageGeometry(uuid, *it->second);
+    return it->second.get();
 }
 
 const Page* Document::page(int index) const
@@ -1464,12 +1476,34 @@ QSizeF Document::pageSizeAt(int index) const
     QString uuid = m_pageOrder[index];
     auto it = m_pageMetadata.find(uuid);
     if (it != m_pageMetadata.end()) {
-        return it->second;
+        return it->second.size;
     }
     
     // Fallback: load the page and get its size
     const Page* p = page(index);
     return p ? p->size : QSizeF();
+}
+
+qreal Document::pageBodyWidthAt(int index) const
+{
+    if (index < 0 || index >= m_pageOrder.size()) {
+        return 0.0;
+    }
+
+    // Metadata only, deliberately: the whole point is to answer without loading
+    // the page, for consumers that lay out many pages at once. A page that has
+    // never been touched therefore reports "no column" if its bundle predates
+    // this field, which is the safe direction - the frame falls back to the
+    // sheet and the content is drawn uniformly inside it.
+    auto it = m_pageMetadata.find(m_pageOrder[index]);
+    return it != m_pageMetadata.end() ? it->second.bodyWidth : 0.0;
+}
+
+void Document::indexPageGeometry(const QString& uuid, const Page& page)
+{
+    PageGeometry& geo = m_pageMetadata[uuid];
+    geo.size = page.size;
+    geo.bodyWidth = page.bodyWidth;
 }
 
 void Document::setPageSize(int index, const QSizeF& size)
@@ -1478,9 +1512,11 @@ void Document::setPageSize(int index, const QSizeF& size)
         return;
     }
     
-    // Update the layout metadata so pageSizeAt() returns the new size
+    // Update the layout metadata so pageSizeAt() returns the new size. Only the
+    // size moves here: the body/notes split is setPageMetrics()'s business, and a
+    // plain resize must not silently drop a page's notes column.
     QString uuid = m_pageOrder[index];
-    m_pageMetadata[uuid] = size;
+    m_pageMetadata[uuid].size = size;
     
     // Update the actual page object if it is loaded in memory
     Page* p = page(index);
@@ -1512,8 +1548,33 @@ void Document::setPageMetrics(int index, qreal bodyWidth, qreal notesWidth)
     // object without a second lookup.
     if (Page* p = page(index)) {
         p->bodyWidth = hasColumn ? bodyWidth : 0.0;
+        indexPageGeometry(m_pageOrder[index], *p);
     }
     markModified();
+}
+
+void Document::inheritNotesColumnFrom(int sourceIndex, Page* dest)
+{
+    if (!dest) return;
+    if (sourceIndex < 0 || sourceIndex >= m_pageOrder.size()) return;
+
+    const Page* src = page(sourceIndex);   // loads and caches if needed
+    if (!src) return;
+
+    const qreal notes = src->notesWidth();
+    if (notes <= 0.0) return;              // neighbour has no column: nothing to inherit
+
+    // The body stays the configured default page size; only the column is
+    // carried over, so the new sheet reads as "a normal page, plus a column"
+    // instead of inheriting the neighbour's particular page size.
+    const qreal body = dest->size.width();
+    if (body <= 0.0) return;
+
+    // Written directly rather than through setPageSize(): the page is not in
+    // the page order yet, so the caller's own metadata write has to see this
+    // size, not the pre-inheritance one.
+    dest->bodyWidth = body;
+    dest->size = QSizeF(body + notes, dest->size.height());
 }
 
 bool Document::loadPageFromDisk(int index) const
@@ -1545,10 +1606,15 @@ bool Document::loadPageFromDisk(int index) const
             const QString pageSourceId = (srcIt != m_pagePdfSource.end()) ? srcIt->second : QString();
             page->pdfSourceId = pageSourceId;
             
-            // Get size from metadata
+            // Get the size and the body/notes split from metadata. The split
+            // matters as much as the size here: stretching a widened page's PDF
+            // across the whole sheet instead of its body is precisely what the
+            // split exists to prevent, and this path has no page JSON to read it
+            // from.
             auto sizeIt = m_pageMetadata.find(uuid);
             if (sizeIt != m_pageMetadata.end()) {
-                page->size = sizeIt->second;
+                page->size = sizeIt->second.size;
+                page->bodyWidth = sizeIt->second.bodyWidth;
             } else {
                 // Fallback to PDF page size if available (from the page's own source).
                 // Bounds-check against the provider using the resolved (mini-PDF) index,
@@ -1593,11 +1659,14 @@ bool Document::loadPageFromDisk(int index) const
             page->gridColor = defaultGridColor;
             page->gridSpacing = defaultGridSpacing;
             page->lineSpacing = defaultLineSpacing;
+            // Same as the PDF synthesis above: the index carries both the sheet
+            // size and the body/notes split, and there is no page JSON here.
             auto sizeIt = m_pageMetadata.find(uuid);
-            QSizeF size = (sizeIt != m_pageMetadata.end())
-                        ? sizeIt->second : defaultPageSize;
-            if (size.isEmpty()) size = defaultPageSize;
-            page->size = size;
+            if (sizeIt != m_pageMetadata.end()) {
+                page->size = sizeIt->second.size;
+                page->bodyWidth = sizeIt->second.bodyWidth;
+            }
+            if (page->size.isEmpty()) page->size = defaultPageSize;
             m_loadedPages[uuid] = std::move(page);
             return true;
         }
@@ -1704,7 +1773,7 @@ bool Document::savePage(int index)
     m_dirtyPages.erase(uuid);
     
     // Update metadata
-    m_pageMetadata[uuid] = it->second->size;
+    indexPageGeometry(uuid, *it->second);
     
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "Saved page" << index << "(" << uuid.left(8) << ") to disk";
@@ -1808,13 +1877,16 @@ Page* Document::addPage()
 {
     auto newPage = createDefaultPage();
     Page* pagePtr = newPage.get();
+
+    // A page appended to the end follows the last page's notes column.
+    inheritNotesColumnFrom(m_pageOrder.size() - 1, pagePtr);
     
     // Use page's own UUID (generated in Page constructor)
     QString uuid = newPage->uuid;
     
     // Add to page order and metadata
     m_pageOrder.append(uuid);
-    m_pageMetadata[uuid] = newPage->size;
+    indexPageGeometry(uuid, *pagePtr);
     
     // Store in loaded pages
     m_loadedPages[uuid] = std::move(newPage);
@@ -1842,13 +1914,17 @@ Page* Document::insertPage(int index)
     
     auto newPage = createDefaultPage();
     Page* pagePtr = newPage.get();
+
+    // A new page follows its predecessor's notes column; inserted at the very
+    // front it has no predecessor, so it follows the page that comes after it.
+    inheritNotesColumnFrom(index > 0 ? index - 1 : 0, pagePtr);
     
     // Use page's own UUID (generated in Page constructor)
     QString uuid = newPage->uuid;
     
     // Insert into page order
     m_pageOrder.insert(index, uuid);
-    m_pageMetadata[uuid] = newPage->size;
+    indexPageGeometry(uuid, *pagePtr);
     
     // Store in loaded pages
     m_loadedPages[uuid] = std::move(newPage);
@@ -1898,7 +1974,7 @@ Page* Document::addPageForPdf(int pdfPageIndex)
     Page* pagePtr = newPage.get();
     
     m_pageOrder.append(uuid);
-    m_pageMetadata[uuid] = newPage->size;
+    indexPageGeometry(uuid, *pagePtr);
     m_pagePdfIndex[uuid] = pdfPageIndex;  // Track PDF page mapping
     m_loadedPages[uuid] = std::move(newPage);
     m_dirtyPages.insert(uuid);
@@ -1973,7 +2049,7 @@ bool Document::restorePageFromSnapshot(int index, const QJsonObject& pageJson)
     m_pageOrder.insert(index, uuid);
 
     // Restore metadata + PDF-source mappings from the page's own fields.
-    m_pageMetadata[uuid] = page->size;
+    indexPageGeometry(uuid, *page);
     if (page->pdfPageNumber >= 0) {
         m_pagePdfIndex[uuid] = page->pdfPageNumber;
         if (!page->pdfSourceId.isEmpty()) {
@@ -2504,7 +2580,7 @@ void Document::ensureMinimumPages()
     // Use lazy loading mode from the start
     QString uuid = newPage->uuid;
     m_pageOrder.append(uuid);
-    m_pageMetadata[uuid] = newPage->size;
+    indexPageGeometry(uuid, *newPage);
     m_loadedPages[uuid] = std::move(newPage);
     m_dirtyPages.insert(uuid);
     invalidateUuidCache();
@@ -3258,7 +3334,7 @@ int Document::loadPagesFromJson(const QJsonArray& pagesArray)
             // Use lazy loading structures
             QString uuid = page->uuid;
             m_pageOrder.append(uuid);
-            m_pageMetadata[uuid] = page->size;
+            indexPageGeometry(uuid, *page);
             if (page->backgroundType == Page::BackgroundType::PDF) {
                 m_pagePdfIndex[uuid] = page->pdfPageNumber;
                 if (!page->pdfSourceId.isEmpty()) {
@@ -4753,10 +4829,17 @@ bool Document::saveBundle(const QString& path, bool finalize)
         
         // Write page_metadata to manifest (includes pdf_page for pristine PDF page synthesis)
         QJsonObject pageMetadataObj;
-        for (const auto& [uuid, size] : m_pageMetadata) {
+        for (const auto& [uuid, geo] : m_pageMetadata) {
             QJsonObject metaObj;
-            metaObj["width"] = size.width();
-            metaObj["height"] = size.height();
+            metaObj["width"] = geo.size.width();
+            metaObj["height"] = geo.size.height();
+            // The body/notes split, so a consumer that must not load the page
+            // (thumbnail layout) can tell which width the content occupies.
+            // 0 = no notes column, and the key is absent in bundles written
+            // before this field existed.
+            if (geo.bodyWidth > 0.0) {
+                metaObj["body_width"] = geo.bodyWidth;
+            }
             
             // Include PDF page index if this is a PDF page
             auto pdfIt = m_pagePdfIndex.find(uuid);
@@ -5144,7 +5227,9 @@ std::unique_ptr<Document> Document::loadBundle(const QString& path)
                     QJsonObject metaObj = it.value().toObject();
                     QSizeF size(metaObj["width"].toDouble(595.0), 
                                metaObj["height"].toDouble(842.0));
-                    doc->m_pageMetadata[uuid] = size;
+                    doc->m_pageMetadata[uuid].size = size;
+                    doc->m_pageMetadata[uuid].bodyWidth =
+                        metaObj["body_width"].toDouble(0.0);
                     
                     // Parse PDF page index for pristine page synthesis
                     if (metaObj.contains("pdf_page")) {
@@ -5162,7 +5247,7 @@ std::unique_ptr<Document> Document::loadBundle(const QString& path)
                 // Fallback: assign default size to pages missing metadata
                 for (const QString& uuid : doc->m_pageOrder) {
                     if (doc->m_pageMetadata.find(uuid) == doc->m_pageMetadata.end()) {
-                        doc->m_pageMetadata[uuid] = QSizeF(595.0, 842.0); // A4 default
+                        doc->m_pageMetadata[uuid].size = QSizeF(595.0, 842.0); // A4 default
                     }
                 }
             }

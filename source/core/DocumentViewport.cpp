@@ -1836,7 +1836,15 @@ void DocumentViewport::zoomToFit()
         return;
     }
     
-    QSizeF pageSize = page->size;
+    // Fit the page's BODY, not the whole sheet. A page widened for a notes
+    // column is wider than its content, so fitting the sheet would silently
+    // shrink the body - and the PDF drawn into it - the moment a column is
+    // opened. Fitting the body keeps "fit" meaning the same thing whether or
+    // not a column exists; the column simply extends past the right edge, where
+    // scrolling reaches it. bodyRect() equals the sheet while there is no
+    // column, so documents without one are unaffected.
+    const QRectF body = page->bodyRect();
+    QSizeF pageSize = body.size();
     
     // Guard against zero-size pages
     if (pageSize.width() <= 0 || pageSize.height() <= 0) {
@@ -1844,7 +1852,7 @@ void DocumentViewport::zoomToFit()
         return;
     }
     
-    // Calculate zoom to fit page in viewport with some margin
+    // Calculate zoom to fit the body in the viewport with some margin
     qreal marginFraction = 0.05;  // 5% margin on each side
     qreal availWidth = width() * (1.0 - 2 * marginFraction);
     qreal availHeight = height() * (1.0 - 2 * marginFraction);
@@ -1856,12 +1864,12 @@ void DocumentViewport::zoomToFit()
     qreal newZoom = qMin(zoomX, zoomY);
     newZoom = qBound(MIN_ZOOM, newZoom, MAX_ZOOM);
     
-    // Set zoom and center on current page
+    // Set zoom and center on the body of the current page
     setZoomLevel(newZoom);
     
-    // Center the page in viewport
+    // Center the body in the viewport (the body shares the sheet's top-left)
     QPointF pagePos = pagePosition(m_currentPageIndex);
-    QPointF pageCenter = pagePos + QPointF(pageSize.width() / 2, pageSize.height() / 2);
+    QPointF pageCenter = pagePos + body.center();
     
     // Calculate pan offset to center the page
     qreal viewWidth = width() / m_zoomLevel;
@@ -1887,7 +1895,12 @@ void DocumentViewport::zoomToWidth()
         return;
     }
     
-    QSizeF pageSize = page->size;
+    // Width means BODY width - see zoomToFit() for why. This is the one that
+    // matters most in practice, because setDocument() runs it automatically when
+    // a document opens: sizing off the sheet would make the text of every page
+    // smaller than before purely because a notes column happens to be open.
+    const QRectF body = page->bodyRect();
+    QSizeF pageSize = body.size();
     
     // Guard against zero-width pages
     if (pageSize.width() <= 0) {
@@ -1895,7 +1908,7 @@ void DocumentViewport::zoomToWidth()
         return;
     }
     
-    // Calculate zoom to fit page width with some margin
+    // Calculate zoom to fit the body width with some margin
     qreal marginFraction = 0.02;  // 2% margin on each side
     qreal availWidth = width() * (1.0 - 2 * marginFraction);
     
@@ -1905,10 +1918,10 @@ void DocumentViewport::zoomToWidth()
     // Set zoom and adjust pan to keep current page visible
     setZoomLevel(newZoom);
     
-    // Center horizontally on current page
+    // Center the body horizontally on the current page
     QPointF pagePos = pagePosition(m_currentPageIndex);
     qreal viewWidth = width() / m_zoomLevel;
-    m_panOffset.setX(pagePos.x() + pageSize.width() / 2 - viewWidth / 2);
+    m_panOffset.setX(pagePos.x() + body.width() / 2 - viewWidth / 2);
     
     clampPanOffset();
     update();

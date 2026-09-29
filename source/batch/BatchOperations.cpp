@@ -442,6 +442,7 @@ BatchResult exportPdfBatch(const QStringList& bundlePaths,
         pdfOpts.preserveOutline = options.preserveOutline;
         pdfOpts.annotationsOnly = options.annotationsOnly;
         pdfOpts.notesOnly = options.notesOnly;
+        pdfOpts.cropToBody = options.cropToBody;
         pdfOpts.darkModeBackground = options.darkModeBackground;
         pdfOpts.darkenStrokes = options.darkenStrokes;
         pdfOpts.skipImageMasking = options.skipImageMasking;

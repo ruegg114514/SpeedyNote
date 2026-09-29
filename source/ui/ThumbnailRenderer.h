@@ -117,6 +117,14 @@ private:
         /// Equals pageSize.width() when the page has no notes column -
         /// see Page::bodyRect().
         qreal bodyWidth = 0.0;
+        /// Width the thumbnail FRAME represents, taken from the document's layout
+        /// index rather than from the page. The cell is sized from the same index
+        /// (PageThumbnailModel::PageAspectRatioRole) and the delegate draws the
+        /// pixmap into that cell, so a disagreement would stretch the image;
+        /// reading one source makes that impossible. Equal to bodyWidth in the
+        /// normal case, and falls back to pageSize.width() when the index does
+        /// not know the split yet.
+        qreal frameWidth = 0.0;
         
         // Background settings
         Page::BackgroundType backgroundType = Page::BackgroundType::None;

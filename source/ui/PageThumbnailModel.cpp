@@ -76,10 +76,17 @@ QVariant PageThumbnailModel::data(const QModelIndex& index, int role) const
             return canDragPage(pageIndex);
             
         case PageAspectRatioRole: {
-            // Return the actual page's aspect ratio (height/width)
+            // Aspect ratio (height/width) of the page's BODY. Thumbnails frame
+            // the body, so this has to match what ThumbnailRenderer draws into
+            // the cell; both read the layout index, which answers without loading
+            // a page - the view asks for this while laying out the whole strip.
             QSizeF pageSize = m_document->pageSizeAt(pageIndex);
             if (pageSize.isEmpty()) {
                 pageSize = QSizeF(612, 792);  // Default US Letter
+            }
+            const qreal bodyW = m_document->pageBodyWidthAt(pageIndex);
+            if (bodyW > 0.0 && bodyW < pageSize.width()) {
+                return pageSize.height() / bodyW;
             }
             return pageSize.height() / pageSize.width();
         }

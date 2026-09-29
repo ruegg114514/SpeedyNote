@@ -1,7 +1,7 @@
 # 笔记栏重构方案：从「平行结构」改为「页面的一部分」
 
 > 分支：`work-palm`
-> 状态：阶段 0/1/2a/2b/3a/3b 全部落地，平行结构已清零；只余 4 项 UX 拍板
+> 状态：阶段 0/1/2a/2b/3a/3b 全部落地，平行结构已清零；4 项 UX 已拍板并实现
 > 一句话：**把笔记栏从"页面旁边的另一个东西"改成"页面本身变宽多出来的那一块"。**
 
 ---
@@ -329,12 +329,40 @@ QRectF bodyRect() const { return QRectF(0, 0, bodyWidth > 0.0 ? bodyWidth : size
 `loadSideNotesFromDisk()` 填充）：加宽前的文档墨迹还在 `side_notes.json` 里，
 CLI / 批量导出这种不经过 `DocumentViewport` 的路径仍要能出图。
 
-**仍待做**（只剩需要你拍板的 UX，见 4.7）：
+**已完成：4 项 UX 拍板**（全部选"按正文"，即正文才是"页"）
 
-1. `zoomToFit` / 适应宽度按整页还是按正文
-2. 加宽页的缩略图比例
-3. 新建页是否继承上一页的栏宽
-4. 导出加"裁切到正文 / 保留笔记栏"选项（现在默认整页，含笔记栏）
+1. **`zoomToFit` / `zoomToWidth` 按正文**。一旦页面可以比内容宽，"页有多宽"就必须
+   指正文 —— 否则一开笔记栏，每页正文（连同里面的 PDF）立刻缩小。
+   `zoomToWidth` 更关键，因为 `setDocument()` 打开文档时会自动调它。
+   居中锚点也跟着改成正文中心。`bodyRect()` 在没有笔记栏时等于整页，所以无笔记栏
+   的文档行为不变。
+2. **缩略图按正文**。这一项牵出了一个必须补的缺口：缩略图**格子高度**由
+   `PageThumbnailModel::PageAspectRatioRole` 决定，而视图在铺满整个缩略图条时会
+   对它求值，所以它**不能加载页面**；同时 delegate 用
+   `drawPixmap(rect, pixmap)` 把位图画进格子，位图长宽比与格子不一致就会被**拉伸**。
+   也就是说"框"和"位图"必须读同一个、且不需要加载页面的值。
+   → 把正文宽加进了**布局索引**：`m_pageMetadata` 的值从 `QSizeF` 改为
+   `Document::PageGeometry { size, bodyWidth }`，`pageSizeAt()` 仍返回 size，
+   新增 `pageBodyWidthAt()` 返回 bodyWidth；manifest 里多写一个 `body_width`
+   （老包没有这个键 → 回退到整页，安全方向）；`page()` 在**每次加载后**把该页
+   自己的几何镜像回索引（只此一处，避免热路径多一次 map 查找）。
+   背景仍用**已加载页面**的 `bodyWidth`（权威值），所以索引万一滞后，最坏结果是
+   内容在一个略宽的框里等比缩小、右边留白，**不会变形**。
+   顺带修掉一个真 bug：两条"页面 JSON 缺失 → 合成页面"的路径此前只从索引取 size、
+   **丢掉了 bodyWidth**，会让被加宽的纯 PDF 页把 PDF 拉伸铺满整页。
+3. **新建页继承栏宽**。`Document::inheritNotesColumnFrom(source, dest)`：只继承
+   **分割**（正文保持配置里的默认页宽，栏宽取自邻居），页面内容依然是空的。
+   `addPage()` 取最后一页，`insertPage(index)` 取前驱（插到最前则取后继）。
+   ⚠️ 边界：**从 PDF 导入的页不继承**（`insertPageWithPdf` 继续用 PDF 自己的页面尺寸），
+   因为那不是"新建页"，且导入语义是"照搬源 PDF 几何"。
+4. **导出加"裁切到正文"**。`PdfExportOptions::cropToBody`，UI 勾选框
+   （与"只导出笔记栏"互斥，二者是相反的请求）、CLI `--crop-to-body`
+   （顺带把漏写进帮助文本的 `--notes-only` 补上）、批量导出路径。
+   实现在 `outputWidthSn()` 一处收口：裁切时输出页宽 = 正文宽，落在笔记栏里的墨迹
+   自然被 mediabox 裁掉 —— 正是 `renderNotesColumnPage()` 对正文所做操作的镜像。
+   同时**堵住一个几何不一致**：graft（字节复制源 PDF 页）保留的是源页自己的页面框，
+   也就是正文宽，承载不了笔记条；所以**有笔记栏且不裁切**的页必须改为渲染，
+   否则同一份导出会按"该页有没有墨迹"混出正文宽与整页宽两种页面。
 
 ### 另：启动"恢复上次标签"提示已移除
 
@@ -343,15 +371,18 @@ CLI / 批量导出这种不经过 `DocumentViewport` 的路径仍要能出图。
 不再提问；旧版遗留的 session 键在启动时清掉；`MainWindow::saveSessionTabs()`
 及其声明与调用点一并删除。
 
-### 阶段 2 的入口
-
-`Document::setPageBodyWidth(int index, qreal bodyWidth)` 尚未添加（阶段 0 不加未使用的 API）。
-阶段 2 第一步就是加它：写 `Page::bodyWidth`、`markPageDirty`、同步 `pageSizeAt`、
-置 `m_pageLayoutDirty`。之后把 toggle 从"建 overlay"改成"加宽页面 + 设 bodyWidth"即可。
-
 ### 协作备注：本地副本与远程一致性
 
-改动前后都核对过：本地工作副本与远程 `work-palm` HEAD 的
-`Page.h` / `Page.cpp` / `DocumentViewport.cpp` **逐字节一致**。
+改动前后都核对过本地工作副本与远程 `work-palm` HEAD 逐字节一致。
 如果以后再出现"锚点全不命中"，先核对这一点 —— 最容易的坑是把
 Git blob API 返回的 JSON wrapper 当成文件内容（它是 base64，不是明文）。
+
+**验证手法（本机没有 `.git`，所以这几步是必须的）**：
+
+- 用 `git/trees/<ref>?recursive=1` + `git/blobs/<sha>` 拉远程文件，
+  `difflib.unified_diff` 出完整 diff 存盘再读 —— 唯一能 review 自己改动的手段。
+- **大括号计数**（`tr -cd '{' | wc -c` 对比 `}`）能极低成本发现结构性错误，
+  但必须**跟远程基线比**而不是看绝对值（有些文件天生不平衡，例如多行 QSS 字符串）。
+- 大括号计数**抓不到类型错误**：本轮 `m_pageMetadata` 的值类型从 `QSizeF` 换成了
+  struct，两处 `sizeIt->second` 的直接赋值就会编译失败 —— 是靠**按标识符全量 grep
+  再逐处判定读/写**找出来的，不是靠计数。改类型之后这一步不能省。

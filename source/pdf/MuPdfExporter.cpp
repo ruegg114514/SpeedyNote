@@ -847,6 +847,13 @@ PdfExportResult MuPdfExporter::exportPdf(const PdfExportOptions& options)
                 if (m_options.darkModeBackground) {
                     // Dark mode export requires color rewriting, can't byte-copy
                     pageSuccess = renderModifiedPage(pageIndex);
+                } else if (currentPage->notesWidth() > 0.0 && !m_options.cropToBody) {
+                    // A graft keeps the SOURCE PDF's own page box, which is the
+                    // body width - it has no way to carry the notes strip. So a
+                    // page with a column has to be rendered instead, or a single
+                    // export would mix body-width and sheet-width pages depending
+                    // on whether that page happened to have ink on it.
+                    pageSuccess = renderModifiedPage(pageIndex);
                 } else {
                     pageSuccess = graftPage(pageIndex);
                 }
@@ -1331,8 +1338,12 @@ bool MuPdfExporter::renderModifiedPage(int pageIndex)
     
     QSizeF pageSize = page->size;
     
-    // Convert page size from SpeedyNote units (96 DPI) to PDF points (72 DPI)
-    float widthPt = pageSize.width() * SN_TO_PDF_SCALE;
+    // Convert page size from SpeedyNote units (96 DPI) to PDF points (72 DPI).
+    // The width honours cropToBody: when the caller asked for the notes column
+    // to be dropped the box IS the body, and the ink that lived in the column
+    // then falls outside the box and is clipped - the mirror image of what
+    // renderNotesColumnPage() does to the body.
+    float widthPt = outputWidthSn(page) * SN_TO_PDF_SCALE;
     float heightPt = pageSize.height() * SN_TO_PDF_SCALE;
     
     // For annotations-only mode, skip PDF background entirely but keep page dimensions
@@ -1728,8 +1739,11 @@ bool MuPdfExporter::renderBlankPage(int pageIndex)
     
     QSizeF pageSize = page->size;
     
-    // Convert page size from SpeedyNote units (96 DPI) to PDF points (72 DPI)
-    float widthPt = pageSize.width() * SN_TO_PDF_SCALE;
+    // Convert page size from SpeedyNote units (96 DPI) to PDF points (72 DPI),
+    // honouring cropToBody - see renderModifiedPage(). The background pattern is
+    // built against this width, so a cropped blank page gets a body-wide grid
+    // rather than a grid that runs under the removed column.
+    float widthPt = outputWidthSn(page) * SN_TO_PDF_SCALE;
     float heightPt = pageSize.height() * SN_TO_PDF_SCALE;
     
     // Build background content stream (color, grid, lines)
@@ -2067,6 +2081,17 @@ bool MuPdfExporter::loadSideNotesFromDisk()
     }
 
     return !m_sideNotesWidths.isEmpty();
+}
+
+qreal MuPdfExporter::outputWidthSn(const Page* page) const
+{
+    if (!page) return 0.0;
+    // notesWidth() > 0 implies 0 < bodyWidth < size.width(), so the body width
+    // is always a usable page box when a column is present.
+    if (m_options.cropToBody && page->notesWidth() > 0.0) {
+        return page->bodyWidth;
+    }
+    return page->size.width();
 }
 
 bool MuPdfExporter::renderNotesColumnPage(int pageIndex)

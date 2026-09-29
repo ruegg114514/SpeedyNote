@@ -1507,6 +1507,18 @@ public:
      * Used for layout calculations without loading full page content.
      */
     QSizeF pageSizeAt(int index) const;
+
+    /**
+     * @brief Get a page's BODY width without loading it.
+     * @param index 0-based page index.
+     * @return Body width from the layout index, or 0 when the page has no notes
+     *         column (or the index is out of range). See Page::bodyWidth.
+     *
+     * Companion to pageSizeAt(), which returns the SHEET - body plus column.
+     * Exists for consumers that lay out many pages at once and must not load
+     * any: the thumbnail strip sizes each cell from it.
+     */
+    qreal pageBodyWidthAt(int index) const;
     
     /**
      * @brief Update a page's size and sync the layout metadata.
@@ -1535,6 +1547,25 @@ public:
      *                   in which case the total width is bodyWidth.
      */
     void setPageMetrics(int index, qreal bodyWidth, qreal notesWidth);
+
+    /**
+     * @brief Adopt the notes column of @p sourceIndex on a brand-new page.
+     *
+     * A new page inherits its neighbour's notes column, so adding a page to a
+     * notebook whose pages carry one does not drop a column-less sheet into the
+     * middle of them - which would make the sheet width jump by a column as the
+     * reader scrolls past it.
+     *
+     * Only the SPLIT is inherited. The new page keeps the configured default
+     * page size as its BODY and stays empty, so no content, background or column
+     * ink is carried over. Call before the page is registered in the page
+     * order/metadata, so that the widened size is what gets recorded.
+     *
+     * @param sourceIndex Page to copy the column width from. Out of range is a
+     *                    no-op, which is what an empty document yields.
+     * @param dest        Freshly created page; ignored when null.
+     */
+    void inheritNotesColumnFrom(int sourceIndex, Page* dest);
     
     // ===== UUID→Index Lookup (Phase C.0.2) =====
     
@@ -1987,9 +2018,20 @@ private:
     /// Pages are loaded on-demand from pages/{uuid}.json files.
     QStringList m_pageOrder;
     
-    /// Minimal metadata for layout calculations without loading full pages.
-    /// Key: page UUID, Value: page size (width, height).
-    std::map<QString, QSizeF> m_pageMetadata;
+    /// Mirror a page's geometry into the layout index (see m_pageMetadata).
+    /// Call wherever a page is registered, loaded or its size / body split
+    /// changes, so the index stays usable as a stand-in for the page itself.
+    void indexPageGeometry(const QString& uuid, const Page& page);
+
+    /// Minimal geometry for layout calculations without loading full pages.
+    /// Key: page UUID. Kept in step by indexPageGeometry() and setPageSize();
+    /// the only field that can lag is bodyWidth, and page() refreshes it on
+    /// every load (see the comment there).
+    struct PageGeometry {
+        QSizeF size;            ///< Sheet size (body + notes column)
+        qreal bodyWidth = 0.0;  ///< 0 = no notes column; see Page::bodyWidth
+    };
+    std::map<QString, PageGeometry> m_pageMetadata;
     
     /// PDF page index for each page (for pristine PDF page synthesis).
     /// Key: page UUID, Value: PDF page index (0-based).

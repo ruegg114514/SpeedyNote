@@ -257,6 +257,11 @@ QWidget* BatchExportDialog::createPdfTab()
     m_notesOnlyCheckbox->setToolTip(
         tr("Export only the side notes column of the selected pages, "
            "each column as its own page sized to the column."));
+    m_cropToBodyCheckbox =
+        new QCheckBox(tr("Crop to page body (drop notes column)"), optionsGroup);
+    m_cropToBodyCheckbox->setToolTip(
+        tr("Export every page at its body width, dropping the side notes "
+           "column. Pages that have no column are unaffected."));
     m_annotationsOnlyCheckbox =
         new QCheckBox(tr("Annotations only (blank background)"), optionsGroup);
     m_darkModeBgCheckbox =
@@ -270,6 +275,7 @@ QWidget* BatchExportDialog::createPdfTab()
     m_includeMetadataCheckbox->setChecked(true);
     m_includeOutlineCheckbox->setChecked(true);
     optionsLayout->addWidget(m_notesOnlyCheckbox);
+    optionsLayout->addWidget(m_cropToBodyCheckbox);
     optionsLayout->addWidget(m_annotationsOnlyCheckbox);
     optionsLayout->addWidget(m_darkModeBgCheckbox);
     optionsLayout->addWidget(m_darkenStrokesCheckbox);
@@ -281,9 +287,18 @@ QWidget* BatchExportDialog::createPdfTab()
         if (checked) {
             m_annotationsOnlyCheckbox->setChecked(false);
             m_darkModeBgCheckbox->setChecked(false);
+            m_cropToBodyCheckbox->setChecked(false);
         }
         m_annotationsOnlyCheckbox->setEnabled(!checked);
         m_darkModeBgCheckbox->setEnabled(!checked);
+        m_cropToBodyCheckbox->setEnabled(!checked);
+    });
+    // Cropping drops the notes column, so it is the exact opposite request of
+    // notes-only and the two cannot both be on. Unlike notes-only it composes
+    // with the background options: those only decide what the body looks like.
+    connect(m_cropToBodyCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
+        if (checked) m_notesOnlyCheckbox->setChecked(false);
+        m_notesOnlyCheckbox->setEnabled(!checked);
     });
     connect(m_annotationsOnlyCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
         if (checked) m_notesOnlyCheckbox->setChecked(false);
@@ -360,9 +375,12 @@ void BatchExportDialog::loadSettings()
         settings.value(QStringLiteral("annotationsOnly"), false).toBool());
     m_darkModeBgCheckbox->setChecked(
         settings.value(QStringLiteral("darkModeBackground"), false).toBool());
+    m_cropToBodyCheckbox->setChecked(
+        settings.value(QStringLiteral("cropToBody"), false).toBool());
     // Loaded after the background options so that, if a stale session left
     // both notes-only and dark-background on, notes-only wins (they are
-    // mutually exclusive in the UI).
+    // mutually exclusive in the UI). Same reason it is loaded after the crop
+    // checkbox above.
     m_notesOnlyCheckbox->setChecked(
         settings.value(QStringLiteral("notesOnly"), false).toBool());
     m_darkenStrokesCheckbox->setChecked(
@@ -410,6 +428,7 @@ void BatchExportDialog::saveSettings() const
     settings.setValue(QStringLiteral("dpi"), dpi());
     settings.setValue(QStringLiteral("annotationsOnly"), annotationsOnly());
     settings.setValue(QStringLiteral("notesOnly"), notesOnly());
+    settings.setValue(QStringLiteral("cropToBody"), cropToBody());
     settings.setValue(QStringLiteral("darkModeBackground"), darkModeBackground());
     settings.setValue(QStringLiteral("darkenStrokes"), darkenStrokes());
     settings.setValue(QStringLiteral("includeMetadata"), includeMetadata());
@@ -552,6 +571,11 @@ bool BatchExportDialog::annotationsOnly() const
 bool BatchExportDialog::notesOnly() const
 {
     return m_notesOnlyCheckbox->isChecked();
+}
+
+bool BatchExportDialog::cropToBody() const
+{
+    return m_cropToBodyCheckbox->isChecked();
 }
 
 bool BatchExportDialog::darkModeBackground() const

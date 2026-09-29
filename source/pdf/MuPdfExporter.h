@@ -43,6 +43,9 @@ struct PdfExportOptions {
     bool darkenStrokes = false;      ///< Darken light-coloured strokes for printing (L>0.5 -> 1-L)
     bool skipImageMasking = false;   ///< Bypass image-region detection (invert everything)
     bool notesOnly = false;          ///< Export only the side-notes column per page (page body excluded)
+    bool cropToBody = false;         ///< Crop every page to its BODY, dropping the side-notes
+                                     ///< column (see Page::bodyRect()). The opposite request of
+                                     ///< notesOnly, with which it is mutually exclusive.
 };
 
 /**
@@ -330,6 +333,17 @@ private:
      * @return true if successful
      */
     bool renderNotesColumnPage(int pageIndex);
+
+    /**
+     * @brief Output page width in SpeedyNote units, honouring cropToBody.
+     *
+     * Returns the body width when the export is cropping the notes column away,
+     * else the full sheet width. Used for the output page box so that one export
+     * never mixes page widths: without it a page that can be grafted comes out
+     * body-sized (a graft keeps the source PDF's own page box) while a page that
+     * has to be rendered comes out sheet-sized.
+     */
+    qreal outputWidthSn(const Page* page) const;
     
     // ===== Vector Stroke Conversion =====
     

@@ -1687,6 +1687,7 @@ void Launcher::showExportDialog(const QStringList& bundlePaths, bool preferSnbx)
     options.pageRange = dialog.pageRange();
     options.annotationsOnly = dialog.annotationsOnly();
     options.notesOnly = dialog.notesOnly();
+    options.cropToBody = dialog.cropToBody();
     options.darkModeBackground = dialog.darkModeBackground();
     options.darkenStrokes = dialog.darkenStrokes();
     options.skipImageMasking = QSettings("SpeedyNote", "App")

@@ -238,9 +238,27 @@ ThumbnailRenderer::ThumbnailSnapshot ThumbnailRenderer::createSnapshot(
     // Backgrounds cover the page BODY only, so a page widened for a notes
     // column never stretches its PDF across the extra strip.
     snapshot.bodyWidth = page->bodyWidth;
+
+    // Thumbnails frame the BODY, matching what "fit" and page width now mean: a
+    // page widened for a notes column is wider than its content, so measuring off
+    // the sheet would shrink every page's body in the thumbnail strip the moment
+    // one column is opened. The column falls outside the frame. Body width equals
+    // the sheet width while there is no column, so thumbnails of column-less
+    // documents are unchanged.
+    //
+    // The width comes from the document's layout INDEX rather than from the page:
+    // the cell is sized by PageThumbnailModel::PageAspectRatioRole, which must
+    // answer without loading pages and therefore reads the same index, and a
+    // pixmap whose aspect disagreed with its cell would be stretched when drawn.
+    // The background below keeps using the loaded page, which is the authority,
+    // so a stale index can only scale the content uniformly inside a wider frame.
+    const qreal indexed = doc->pageBodyWidthAt(pageIndex);
+    snapshot.frameWidth = (indexed > 0.0 && indexed < pageSize.width())
+                              ? indexed
+                              : pageSize.width();
     
     // Calculate thumbnail dimensions
-    qreal aspectRatio = pageSize.height() / pageSize.width();
+    qreal aspectRatio = pageSize.height() / snapshot.frameWidth;
     int thumbnailWidth = width;
     int thumbnailHeight = static_cast<int>(width * aspectRatio);
     
@@ -258,7 +276,7 @@ ThumbnailRenderer::ThumbnailSnapshot ThumbnailRenderer::createSnapshot(
             snapshot.pdfSourceId = page->pdfSourceId;
             snapshot.pdfSourcePath = doc->pdfPathForSource(page->pdfSourceId);
             snapshot.pdfDarkMode = pdfDarkMode;
-            qreal pdfDpi = (thumbnailWidth * dpr) / (pageSize.width() / 72.0);
+            qreal pdfDpi = (thumbnailWidth * dpr) / (snapshot.frameWidth / 72.0);
             snapshot.pdfDpi = qMin(pdfDpi, 96.0);
         }
     }
@@ -294,7 +312,7 @@ ThumbnailRenderer::ThumbnailSnapshot ThumbnailRenderer::createSnapshot(
                     objPainter.setRenderHint(QPainter::Antialiasing, true);
                     objPainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
                     
-                    qreal scaleX = static_cast<qreal>(thumbnailWidth) / pageSize.width();
+                    qreal scaleX = static_cast<qreal>(thumbnailWidth) / snapshot.frameWidth;
                     qreal scaleY = static_cast<qreal>(thumbnailHeight) / pageSize.height();
                     qreal scale = qMin(scaleX, scaleY);
                     objPainter.scale(scale, scale);
@@ -325,7 +343,11 @@ QPixmap ThumbnailRenderer::renderFromSnapshot(const ThumbnailSnapshot& snapshot)
     }
     
     // Calculate thumbnail dimensions
-    qreal aspectRatio = pageSize.height() / pageSize.width();
+    // Same framing rule as createSnapshot(): the frame comes from the layout
+    // index, so the pixmap and the cell that holds it agree.
+    const qreal frameW = snapshot.frameWidth > 0.0 ? snapshot.frameWidth
+                                                  : pageSize.width();
+    qreal aspectRatio = pageSize.height() / frameW;
     int thumbnailWidth = width;
     int thumbnailHeight = static_cast<int>(width * aspectRatio);
     
@@ -371,23 +393,22 @@ QPixmap ThumbnailRenderer::renderFromSnapshot(const ThumbnailSnapshot& snapshot)
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     
-    qreal scaleX = static_cast<qreal>(thumbnailWidth) / pageSize.width();
+    qreal scaleX = static_cast<qreal>(thumbnailWidth) / frameW;
     qreal scaleY = static_cast<qreal>(thumbnailHeight) / pageSize.height();
     qreal scale = qMin(scaleX, scaleY);
     
     painter.scale(scale, scale);
     
-    // 1. Render background
-    QRectF pageRect(0, 0, pageSize.width(), pageSize.height());
-    // The background occupies the BODY only.  Equal to pageRect while the
-    // page has no notes column (bodyWidth == 0); the strip right of the body
-    // stays paper-coloured from the fill() above.
-    const QRectF bodyRect(
-        0, 0,
+    // 1. Render background over the body, using the loaded page's own value.
+    // Normally the frame IS the body, so this covers the whole thumbnail and any
+    // ink in the notes column is drawn past the right edge and clipped by the
+    // pixmap; with a stale index the content is simply drawn smaller than the
+    // frame and the remainder stays paper-coloured.
+    const qreal bodyDrawW =
         (snapshot.bodyWidth > 0.0 && snapshot.bodyWidth < pageSize.width())
             ? snapshot.bodyWidth
-            : pageSize.width(),
-        pageSize.height());
+            : pageSize.width();
+    const QRectF bodyRect(0, 0, bodyDrawW, pageSize.height());
     
     if (!pdfBackground.isNull()) {
         painter.drawPixmap(bodyRect.toRect(), pdfBackground);

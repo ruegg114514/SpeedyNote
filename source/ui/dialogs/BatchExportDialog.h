@@ -49,6 +49,7 @@ public:
     QString pageRange() const;
     bool annotationsOnly() const;
     bool notesOnly() const;
+    bool cropToBody() const;
     bool darkModeBackground() const;
     bool darkenStrokes() const;
     bool includeMetadata() const;
@@ -103,6 +104,7 @@ private:
 
     QCheckBox* m_annotationsOnlyCheckbox = nullptr;
     QCheckBox* m_notesOnlyCheckbox = nullptr;
+    QCheckBox* m_cropToBodyCheckbox = nullptr;
     QCheckBox* m_darkModeBgCheckbox = nullptr;
     QCheckBox* m_darkenStrokesCheckbox = nullptr;
     QCheckBox* m_includeMetadataCheckbox = nullptr;

@@ -146,6 +146,10 @@ void setupParser(QCommandLineParser& parser, Command cmd)
                 QCoreApplication::translate("CLI", "Export only the side notes column of each page")));
 
             parser.addOption(QCommandLineOption(
+                QStringLiteral("crop-to-body"),
+                QCoreApplication::translate("CLI", "Crop every page to its body, dropping the side notes column")));
+
+            parser.addOption(QCommandLineOption(
                 QStringLiteral("dark-background"),
                 QCoreApplication::translate("CLI", "Apply dark mode lightness inversion to PDF backgrounds")));
 
@@ -347,6 +351,8 @@ void showHelp(const QCommandLineParser& parser, Command cmd)
             "                          Common values: 96 (screen), 150 (draft), 300 (print)\n"
             "  --pages <RANGE>         Page range, e.g., \"1-10,15,20-25\"\n"
             "  --annotations-only      Export strokes only (blank background, no PDF/grid)\n"
+            "  --notes-only            Export only the side notes column of each page\n"
+            "  --crop-to-body          Crop every page to its body, dropping the notes column\n"
             "  --dark-background      Apply dark mode lightness inversion to PDF backgrounds\n"
             "  --darken-strokes       Darken light-coloured strokes for printing\n"
             "  --skip-image-masking   Bypass image detection, invert entire page\n"

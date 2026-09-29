@@ -3536,6 +3536,7 @@ void MainWindow::showExportDialog()
         options.preserveOutline = dialog.includeOutline();
         options.annotationsOnly = dialog.annotationsOnly();
         options.notesOnly = dialog.notesOnly();
+        options.cropToBody = dialog.cropToBody();
         options.darkModeBackground = dialog.darkModeBackground();
         options.darkenStrokes = dialog.darkenStrokes();
         options.skipImageMasking = QSettings("SpeedyNote", "App")
