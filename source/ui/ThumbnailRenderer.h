@@ -113,6 +113,10 @@ private:
         int width = 0;
         qreal dpr = 1.0;
         QSizeF pageSize;
+        /// Width of the page BODY (the region the background covers).
+        /// Equals pageSize.width() when the page has no notes column -
+        /// see Page::bodyRect().
+        qreal bodyWidth = 0.0;
         
         // Background settings
         Page::BackgroundType backgroundType = Page::BackgroundType::None;

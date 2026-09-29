@@ -235,6 +235,9 @@ ThumbnailRenderer::ThumbnailSnapshot ThumbnailRenderer::createSnapshot(
     snapshot.gridColor = page->gridColor;
     snapshot.gridSpacing = page->gridSpacing;
     snapshot.lineSpacing = page->lineSpacing;
+    // Backgrounds cover the page BODY only, so a page widened for a notes
+    // column never stretches its PDF across the extra strip.
+    snapshot.bodyWidth = page->bodyWidth;
     
     // Calculate thumbnail dimensions
     qreal aspectRatio = pageSize.height() / pageSize.width();
@@ -376,13 +379,22 @@ QPixmap ThumbnailRenderer::renderFromSnapshot(const ThumbnailSnapshot& snapshot)
     
     // 1. Render background
     QRectF pageRect(0, 0, pageSize.width(), pageSize.height());
+    // The background occupies the BODY only.  Equal to pageRect while the
+    // page has no notes column (bodyWidth == 0); the strip right of the body
+    // stays paper-coloured from the fill() above.
+    const QRectF bodyRect(
+        0, 0,
+        (snapshot.bodyWidth > 0.0 && snapshot.bodyWidth < pageSize.width())
+            ? snapshot.bodyWidth
+            : pageSize.width(),
+        pageSize.height());
     
     if (!pdfBackground.isNull()) {
-        painter.drawPixmap(pageRect.toRect(), pdfBackground);
+        painter.drawPixmap(bodyRect.toRect(), pdfBackground);
     } else {
         Page::renderBackgroundPattern(
             painter,
-            pageRect,
+            bodyRect,
             snapshot.backgroundColor,
             snapshot.backgroundType,
             snapshot.gridColor,
