@@ -1,7 +1,7 @@
 # 笔记栏重构方案：从「平行结构」改为「页面的一部分」
 
 > 分支：`work-palm`
-> 状态：阶段 0+1 已落地，阶段 2 待做
+> 状态：阶段 0+1+2a 已落地，阶段 2b（页面真实加宽）待做
 > 一句话：**把笔记栏从"页面旁边的另一个东西"改成"页面本身变宽多出来的那一块"。**
 
 ---
@@ -266,16 +266,34 @@ QRectF bodyRect() const { return QRectF(0, 0, bodyWidth > 0.0 ? bodyWidth : size
 `renderBackgroundPattern`（None 分支）与 PDF/Custom 之外的路径：整页底色由新增的
 `painter.fillRect(pageRect, backgroundColor)` 负责，图案只覆盖 body，笔记条保持素纸色。
 
-### 阶段 2 必须一并处理的两个延迟点
+### 阶段 2 的推进情况
 
-阶段 0+1 里**故意没碰**这两个位置 —— 它们只在 `bodyWidth > 0` 时才会出错，
-而现阶段 `bodyWidth` 恒为 0，所以留着是安全的。阶段 2 打开真实加宽时必须一起改：
+**已完成（2a）**：缩略图路径的 `bodyWidth` 支持。
 
-1. **`source/ui/ThumbnailRenderer.cpp:381`** —— PDF 背景按 `pageRect` 铺满缩略图。
-   `ThumbnailSnapshot` 里没有 `bodyWidth`，需要给快照结构体加字段并在抓取处填值，
-   然后渲染时改用 body 矩形。
-2. **`source/pdf/MuPdfExporter.cpp`** —— 导出路径同样需要把源 PDF 放进 body 区域，
-   而不是页面的整张矩形。同时决定 `裁切到正文 / 保留笔记栏` 选项（见 4.7 第 4 条）。
+- `ThumbnailSnapshot` 新增 `bodyWidth` 字段，由主线程抓取时从 `page->bodyWidth` 填入
+- `renderFromSnapshot` 的背景绘制（PDF 位图 + Grid/Lines 图案）改用 body 矩形
+- `bodyWidth` 恒为 0 时 body 矩形就是整页矩形，缩略图逐像素不变
+
+**仍待做（2b）**：
+
+1. **`source/pdf/MuPdfExporter.cpp`** —— 导出路径要把源 PDF 放进 body 区域，
+   而不是页面的整张矩形；顺带定 `裁切到正文 / 保留笔记栏` 选项（4.7 第 4 条）。
+2. **`DocumentViewport` 的笔记栏几何全部要改锚点** —— 这是 2b 的主体：
+   - `notesPageAtViewport` / `notesDividerPageAtViewport`：分隔线从
+     `pos.x + page->size.width()` 改为 `pos.x + page->bodyWidth()`
+   - `startNotesStroke` / `continueNotesStroke`：落笔原点从"页面右边缘之外"
+     改为页面局部（`pagePosition`），使笔迹落在 `[bodyWidth, size.width())` 内
+   - `drawNotesColumn` / `drawNotesColumnOverflow`：绘制原点与裁剪矩形同步改；
+     列缓存可并入页面级缓存
+   - `notesDividerPageAtViewport` 的拖动：改为改 `bodyWidth` 并写回页尺寸
+   - `ensurePageLayoutCache` 里 `+ sideNotesWidthFor(i)` 的三处加法要**删掉** ——
+     `pageSizeAt()` 已经包含笔记栏宽度，再加一次会重复计算
+   - `clampObjectPositionToPage` 的 `pageSize.width() + notesW` 简化为整页宽度
+3. **`Document::setPageMetrics(int index, qreal bodyWidth, qreal notesWidth)`** —— 2b 的入口：
+   同时写 `Page::bodyWidth` 与页总宽（总宽 = bodyWidth + notesWidth），
+   经 `setPageSize` 同步布局元数据，再 `markPageDirty` + 置 `m_pageLayoutDirty`。
+4. **`side_notes.json` 迁移** —— 老文档里有宽度但没有加宽页尺寸，
+   打开时要按 `pageWidths` 把对应的页加宽，并把旧笔画整体 X 平移 `+bodyWidth`。
 
 ### 阶段 2 的入口
 
