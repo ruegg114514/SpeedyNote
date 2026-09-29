@@ -39,7 +39,12 @@
 #include <QHash>
 #include <QSet>
 #include <QColor>
+#include <QFrame>
+#include <QScrollArea>
 #include <algorithm>
+#include <vector>
+
+#include "core/PalmRejectionSettings.h"
 
 // Android/iOS keyboard fix (BUG-A001)
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
@@ -166,9 +171,7 @@ ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
 
     createThemeTab();
     createLanguageTab();
-#ifdef Q_OS_LINUX
     createStylusTab();
-#endif
     createCacheTab();
     createAboutTab();
     
@@ -2028,62 +2031,171 @@ void ControlPanelDialog::createLanguageTab() {
 }
 
 
-// ===== Stylus Tab (Linux Only) =====
+// ===== Anti-mistouch (palm rejection) =====
+//
+// Every guard listed here used to be a `static constexpr` compiled into the
+// input code, so a user could neither disable one nor tune how long it waits.
+// They are now values in PalmRejectionSettings: each row below is the enable
+// switch plus the timing it uses, and every change applies immediately and is
+// persisted.
+//
+// The axis-lock breakout distance is deliberately not exposed - it is a
+// fine-tuning constant that only interacts with the axis lock row above it.
 
-#ifdef Q_OS_LINUX
 void ControlPanelDialog::createStylusTab() {
     stylusTab = new QWidget(this);
-    QVBoxLayout *layout = new QVBoxLayout(stylusTab);
-    
-    // Palm rejection section
-    QLabel *palmRejectionSectionLabel = new QLabel(tr("Palm Rejection"), stylusTab);
-    palmRejectionSectionLabel->setStyleSheet("font-weight: bold; font-size: 14px;");
-    layout->addWidget(palmRejectionSectionLabel);
-    
-    palmRejectionCheckbox = new QCheckBox(tr("Disable touch gestures when stylus is active"), stylusTab);
-    palmRejectionCheckbox->setChecked(mainWindowRef->isPalmRejectionEnabled());
-    layout->addWidget(palmRejectionCheckbox);
-    
-    // Delay spinbox row
-    QHBoxLayout *palmDelayLayout = new QHBoxLayout();
-    QLabel *palmDelayLabel = new QLabel(tr("Restore delay:"), stylusTab);
-    palmRejectionDelaySpinBox = new QSpinBox(stylusTab);
-    palmRejectionDelaySpinBox->setRange(0, 5000);
-    palmRejectionDelaySpinBox->setSingleStep(100);
-    palmRejectionDelaySpinBox->setSuffix(" ms");
-    palmRejectionDelaySpinBox->setValue(mainWindowRef->getPalmRejectionDelay());
-    palmRejectionDelaySpinBox->setEnabled(palmRejectionCheckbox->isChecked());
-    palmDelayLayout->addWidget(palmDelayLabel);
-    palmDelayLayout->addWidget(palmRejectionDelaySpinBox);
-    palmDelayLayout->addStretch();
-    layout->addLayout(palmDelayLayout);
-    
-    QLabel *palmRejectionNote = new QLabel(
-        tr("When enabled, touch gestures are temporarily disabled while the stylus is "
-           "hovering or touching the screen. After the stylus leaves, touch gestures are "
-           "restored after the specified delay.\n\n"
-           "This helps prevent accidental palm touches while writing. "
-           "Only affects Y-Axis Only and Full touch gesture modes."), stylusTab);
-    palmRejectionNote->setWordWrap(true);
-    palmRejectionNote->setStyleSheet("color: gray; font-size: 10px;");
-    layout->addWidget(palmRejectionNote);
-    
-    // Connect checkbox to enable/disable delay spinbox
-    connect(palmRejectionCheckbox, &QCheckBox::toggled, palmRejectionDelaySpinBox, &QSpinBox::setEnabled);
-    
-    // Apply settings immediately when changed
-    connect(palmRejectionCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
-        mainWindowRef->setPalmRejectionEnabled(checked);
+    QVBoxLayout *outer = new QVBoxLayout(stylusTab);
+    outer->setContentsMargins(0, 0, 0, 0);
+
+    // The guard list is longer than the dialog, so it scrolls.
+    QScrollArea *scroll = new QScrollArea(stylusTab);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    outer->addWidget(scroll);
+
+    QWidget *content = new QWidget(scroll);
+    scroll->setWidget(content);
+    QVBoxLayout *layout = new QVBoxLayout(content);
+
+    PalmRejectionSettings& pr = PalmRejectionSettings::instance();
+
+    QLabel *intro = new QLabel(
+        tr("Guards that stop a resting hand from panning, zooming or drawing. "
+           "Switch a guard off to disable it completely, or tune its value. "
+           "Changes apply immediately."), content);
+    intro->setWordWrap(true);
+    intro->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(intro);
+
+    // Widgets are collected so the reset button can push the defaults back into
+    // the UI without rebuilding the tab.
+    std::vector<QCheckBox*> boxes;
+    std::vector<QSpinBox*>  spins;
+    std::vector<bool*>      flags;
+    std::vector<int*>       values;
+
+    auto addSection = [&](const QString& text) {
+        QLabel *head = new QLabel(text, content);
+        head->setStyleSheet("font-weight: bold; margin-top: 12px;");
+        layout->addWidget(head);
+    };
+
+    auto addGuard = [&](const QString& title, const QString& hint,
+                        bool* flag, int* value,
+                        int lo, int hi, int step, const QString& suffix,
+                        const QString& valueLabel) {
+        QCheckBox *box = new QCheckBox(title, content);
+        box->setChecked(*flag);
+        box->setToolTip(hint);
+        layout->addWidget(box);
+
+        QHBoxLayout *row = new QHBoxLayout();
+        QLabel *label = new QLabel(valueLabel, content);
+        label->setMinimumWidth(150);
+        QSpinBox *spin = new QSpinBox(content);
+        spin->setRange(lo, hi);
+        spin->setSingleStep(step);
+        spin->setSuffix(suffix);
+        spin->setValue(*value);
+        spin->setEnabled(*flag);
+        spin->setToolTip(hint);
+        row->addWidget(label);
+        row->addWidget(spin);
+        row->addStretch();
+        layout->addLayout(row);
+
+        connect(box, &QCheckBox::toggled, this, [this, flag, spin](bool on) {
+            *flag = on;
+            spin->setEnabled(on);
+            PalmRejectionSettings::instance().save();
+            if (mainWindowRef) mainWindowRef->applyPalmRejectionSettings();
+        });
+        connect(spin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+                [this, value](int v) {
+            *value = v;
+            PalmRejectionSettings::instance().save();
+            if (mainWindowRef) mainWindowRef->applyPalmRejectionSettings();
+        });
+
+        boxes.push_back(box);
+        spins.push_back(spin);
+        flags.push_back(flag);
+        values.push_back(value);
+    };
+
+    addSection(tr("Stylus vs. touch"));
+    addGuard(tr("Ignore touch while the stylus is in range"),
+             tr("Forces touch gestures off while the pen hovers or presses, and restores "
+                "them once it leaves. The strongest guard, and the only one that is off "
+                "by default."),
+             &pr.stylusSuppressEnabled, &pr.stylusRestoreDelayMs,
+             0, 5000, 100, tr(" ms"), tr("Restore delay:"));
+    addGuard(tr("Delay each gesture so the stylus can veto it"),
+             tr("A palm lands as an ordinary touch before the pen is noticed. The gesture "
+                "waits this long before starting; if the pen appears inside the window the "
+                "gesture is cancelled outright. 0 = start immediately."),
+             &pr.gestureGraceEnabled, &pr.gestureGraceMs,
+             0, 1000, 10, tr(" ms"), tr("Grace window:"));
+    addGuard(tr("Release touch after the stylus stops reporting"),
+             tr("Restarted by every pen event. On expiry the pen has been silent this long "
+                "and touch is released - the safety net for drivers that never send "
+                "TabletRelease."),
+             &pr.stylusGuardEnabled, &pr.stylusGuardMs,
+             0, 2000, 25, tr(" ms"), tr("Silence allowed:"));
+    addGuard(tr("Release touch after the stylus stops hovering"),
+             tr("Restarted by every tablet event. On expiry the pen counts as gone. This is "
+                "the main release path on Windows/Wacom, whose drivers often omit "
+                "TabletLeaveProximity."),
+             &pr.stylusProximityEnabled, &pr.stylusProximityMs,
+             0, 2000, 25, tr(" ms"), tr("Proximity timeout:"));
+
+    addSection(tr("Resting hand"));
+    addGuard(tr("Treat a multi-point contact as a resting hand"),
+             tr("This many simultaneous touch points is a hand on the glass, not fingers: "
+                "any in-flight stroke is cancelled and pen input is refused until the hand "
+                "lifts."),
+             &pr.palmContactEnabled, &pr.palmContactPoints,
+             2, 10, 1, QString(), tr("Touch points:"));
+    addGuard(tr("Ignore touch briefly after a gesture is rejected"),
+             tr("Stops the hand settling back down from immediately starting a pan. Also "
+                "covers stale touch state after sleep/wake."),
+             &pr.touchCooldownEnabled, &pr.touchCooldownMs,
+             0, 2000, 50, tr(" ms"), tr("Cooldown:"));
+
+    addSection(tr("Gesture stabilisation"));
+    addGuard(tr("Lock a one-finger drag to one axis"),
+             tr("Stops a slightly diagonal swipe from scrolling and drifting at the same "
+                "time."),
+             &pr.scrollAxisLockEnabled, &pr.scrollLockDecidePx,
+             0, 200, 2, tr(" px"), tr("Decide after:"));
+    addGuard(tr("Require a clear two-finger movement before zooming"),
+             tr("Finger distance must change by this much before zoom engages, so a "
+                "two-finger pan does not jitter the zoom level."),
+             &pr.zoomDeadZoneEnabled, &pr.zoomActivationPercent,
+             1, 100, 1, tr(" %"), tr("Distance change:"));
+    addGuard(tr("Recognise a short multi-finger press as a tap"),
+             tr("A press longer than this counts as a gesture instead of a tap."),
+             &pr.tapDetectionEnabled, &pr.tapMaxDurationMs,
+             50, 2000, 25, tr(" ms"), tr("Max tap:"));
+
+    QPushButton *resetButton = new QPushButton(tr("Reset anti-mistouch to defaults"), content);
+    layout->addWidget(resetButton);
+    connect(resetButton, &QPushButton::clicked, this,
+            [this, boxes, spins, flags, values]() {
+        PalmRejectionSettings::instance().resetToDefaults();
+        // The vectors alias the (now reset) settings, so reading through them
+        // pushes the defaults back into the widgets.
+        for (std::size_t i = 0; i < boxes.size(); ++i) {
+            boxes[i]->setChecked(*flags[i]);
+            spins[i]->setEnabled(*flags[i]);
+            spins[i]->setValue(*values[i]);
+        }
+        if (mainWindowRef) mainWindowRef->applyPalmRejectionSettings();
     });
-    
-    connect(palmRejectionDelaySpinBox, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
-        mainWindowRef->setPalmRejectionDelay(value);
-    });
-    
+
     layout->addStretch();
-    tabWidget->addTab(stylusTab, tr("Stylus"));
+    tabWidget->addTab(stylusTab, tr("Palm Rejection"));
 }
-#endif
 
 /*
 // ===== Compatibility Tab =====

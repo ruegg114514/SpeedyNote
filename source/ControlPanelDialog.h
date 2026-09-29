@@ -125,13 +125,12 @@ private:
     void onOpenConfigFolder();
     void updateShortcutDisplay(QTreeWidgetItem* item, const QString& actionId);
 
-#ifdef Q_OS_LINUX
-    // === Stylus tab (Linux only) ===
+    // === Anti-mistouch (palm rejection) tab ===
+    // One switch + one value per guard, all backed by PalmRejectionSettings.
+    // Available on every platform: the guards themselves are in the shared
+    // input code, not Linux-only.
     QWidget *stylusTab;
-    QCheckBox *palmRejectionCheckbox;
-    QSpinBox *palmRejectionDelaySpinBox;
     void createStylusTab();
-#endif
 };
 
 #endif // CONTROLPANELDIALOG_H

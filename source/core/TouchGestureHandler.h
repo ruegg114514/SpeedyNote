@@ -137,7 +137,8 @@ private:
     // cancelActiveGesture() and the touch never moves the canvas at all.
     bool m_activationPending = false;        ///< TouchBegin seen, gesture not yet activated
     QTimer* m_activationTimer = nullptr;     ///< Fires when the grace period expires
-    static constexpr int ACTIVATION_GRACE_MS = 100;  ///< Window for the stylus to veto the gesture
+    // The window length is PalmRejectionSettings::gestureGraceMs, and the guard
+    // can be switched off entirely - see core/PalmRejectionSettings.h.
 
     // ===== Single-finger Pan Tracking =====
     bool m_panActive = false;                ///< Whether a touch pan is in progress
@@ -150,13 +151,12 @@ private:
     bool m_zoomActivated = false;            ///< Whether zoom threshold has been exceeded
     qreal m_smoothedScale = 1.0;             ///< Exponentially smoothed scale factor
     
-    // Zoom dead zone: don't zoom until finger distance changes by this percentage
-    // This prevents zoom "shaking" during pan-only 2-finger gestures
-    static constexpr qreal ZOOM_ACTIVATION_THRESHOLD = 0.1;  ///< 10% change required to activate
-    
-    // Scale dead zone: treat scale values within this range of 1.0 as exactly 1.0
-    // This prevents zoom jitter from small finger distance variations
-    static constexpr qreal ZOOM_SCALE_DEAD_ZONE = 0.007;  ///< 0.7% dead zone
+    // Both zoom dead zones are configurable at runtime and fold into
+    // PalmRejectionSettings::zoomDeadZoneEnabled:
+    //   - zoomActivationFraction() - finger-distance change needed before zoom
+    //     engages, which stops zoom "shaking" during a pan-only 2-finger gesture
+    //   - zoomScaleDeadZone()      - scale delta below which the pinch scale
+    //     counts as 1.0, which stops jitter from small distance variations
     
     // Zoom smoothing: exponential moving average factor (0-1)
     // Higher = more responsive but jittery, Lower = smoother but laggy
@@ -184,7 +184,8 @@ private:
     // ===== 3-Finger Tap Detection =====
     QElapsedTimer m_threeFingerTimer;        ///< Timer for 3-finger tap detection
     bool m_threeFingerTimerActive = false;   ///< Whether 3-finger timer is running
-    static constexpr qint64 TAP_MAX_DURATION_MS = 300;  ///< Max duration for tap detection
+    // Max tap duration is PalmRejectionSettings::tapMaxDurationMs, and the whole
+    // tap detector can be switched off - see core/PalmRejectionSettings.h.
     
     // ===== Helper Methods =====
     

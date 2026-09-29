@@ -3069,7 +3069,7 @@ protected:
 
     /// Recompute palm-contact state from the latest touch event. Returns true
     /// when the current total down-touch count qualifies as palm contact
-    /// (>= PALM_REJECT_TOUCH_POINTS), which voids any in-flight stroke and
+    /// (>= the configured count), which voids any in-flight stroke and
     /// suppresses pen input until the hand lifts.
     bool updatePalmRejection(class QTouchEvent* touchEvent);
 
@@ -3140,8 +3140,9 @@ private:
     /// concurrently down on the touchscreen (a palm / fingers resting on the
     /// glass), pen input is treated as invalid - any in-flight stroke is
     /// cancelled and new pen strokes are refused until the hand lifts.
-    static constexpr int PALM_REJECT_TOUCH_POINTS = 3;
-    /// True while palm contact (>= PALM_REJECT_TOUCH_POINTS down touches) is
+    // Threshold and on/off switch are user settings:
+    // PalmRejectionSettings::palmContactPoints / palmContactEnabled.
+    /// True while palm contact (>= the configured count of down touches) is
     /// active on the touchscreen.
     bool m_palmContactActive = false;
     /// Current down touch-point count across the active touch sequence.
@@ -3149,7 +3150,7 @@ private:
 
     /// Pen-activity watchdog. Restarted on EVERY tablet event (press, move,
     /// release, hover). When it expires, the pen has stopped producing any
-    /// event for STYLUS_ACTIVITY_GUARD_MS - i.e. it has truly left the
+    /// event for the configured activity guard - i.e. it has truly left the
     /// digitizer, even if the driver never sent TabletRelease or
     /// TabletLeaveProximity (a known Windows Wacom quirk). Clears the
     /// per-sequence touch latch and cancels any in-flight touch gesture so a
@@ -3160,7 +3161,7 @@ private:
     /// below (and TabletLeaveProximity), which clear it only once the pen is
     /// truly gone.
     QTimer* m_stylusActivityGuard = nullptr;
-    static constexpr int STYLUS_ACTIVITY_GUARD_MS = 200;
+    // Interval is PalmRejectionSettings::stylusGuardMs (0 switches it off).
 
     /// THE single "pen present" state. True while the stylus is inside the
     /// digitizer's proximity range - whether it is hovering or pressing is
@@ -3187,7 +3188,7 @@ private:
     /// writing (drivers that DO send TabletLeaveProximity unlock instantly;
     /// this timeout only matters on broken drivers).
     QTimer* m_stylusProximityTimer = nullptr;
-    static constexpr int STYLUS_PROXIMITY_TIMEOUT_MS = 200;
+    // Interval is PalmRejectionSettings::stylusProximityMs (0 switches it off).
     /// Latched rejection for the CURRENT touch sequence: once a sequence has
     /// been identified as palm (e.g. it was already panning when the pen
     /// entered proximity), it stays rejected until every finger lifts,
@@ -3227,7 +3228,7 @@ private:
     // This prevents crashes from stale touch state after sleep/wake
     QElapsedTimer m_touchCooldownTimer;
     bool m_touchCooldownActive = false;
-    static constexpr qint64 TOUCH_COOLDOWN_MS = 300;
+    // Duration is PalmRejectionSettings::touchCooldownMs (0 switches it off).
 
     /// True while the touch sequence in flight began on a child widget. Only
     /// TouchBegin carries a position we can hit-test, so the routing decision
@@ -4168,9 +4169,10 @@ private:
     /// Accumulated travel before committing.  Enough to sample the gesture's real
     /// direction rather than its opening jitter, but every pixel of it is a
     /// window where both axes still pass, so it cannot grow far.
-    static constexpr qreal SCROLL_LOCK_DECIDE_PX = 10.0;
+    // Distance is PalmRejectionSettings::scrollLockDecidePx.
     /// Consistent cross-axis travel needed to release the lock mid-gesture.
-    static constexpr qreal SCROLL_LOCK_BREAKOUT_PX = 36.0;
+    // Distance is PalmRejectionSettings::scrollLockBreakoutPx (not exposed in
+    // the settings UI - it only interacts with the axis lock above).
     /// A sideways push only counts toward release once it exceeds this fraction
     /// of the same event's along-axis motion, i.e. steeper than ~31 degrees off
     /// the locked axis.  Below it the motion reads as drift, and letting it

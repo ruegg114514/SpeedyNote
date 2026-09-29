@@ -4,6 +4,7 @@
 #include "core/DocumentViewport.h"  // Phase 3.1: New viewport architecture
 #include "core/Document.h"          // Phase 3.1: Document class
 #include "core/Page.h"              // Phase P.4.6: For thumbnail rendering
+#include "core/PalmRejectionSettings.h"  // Anti-mistouch guards (configurable)
 #include "layers/VectorLayer.h"     // Phase P.4.6: For thumbnail rendering
 #include <QPainter>                 // Phase P.4.6: For thumbnail rendering
 #include "ui/sidebars/LayerPanel.h" // Phase S1: Moved to sidebars folder
@@ -692,9 +693,11 @@ MainWindow::MainWindow(QWidget *parent)
 
     // toggleFullscreen(); // ✅ Toggle fullscreen to adjust layout
 
-#ifdef Q_OS_LINUX
     // Palm rejection: install application-wide event filter to catch tablet proximity events.
     // This intercepts TabletEnterProximity/TabletLeaveProximity before any widget processes them.
+    // Built on every platform; the guard itself is a setting that defaults to
+    // off, so platforms that never had it behave exactly as before until the
+    // user turns it on.
     m_palmRejectionTimer = new QTimer(this);
     m_palmRejectionTimer->setSingleShot(true);
     connect(m_palmRejectionTimer, &QTimer::timeout, this, [this]() {
@@ -706,7 +709,6 @@ MainWindow::MainWindow(QWidget *parent)
             }
         }
     });
-#endif
     
     qApp->installEventFilter(this);
     
@@ -5152,9 +5154,9 @@ void MainWindow::goToNextPage() {
 
 
 bool MainWindow::eventFilter(QObject *obj, QEvent *event) {
-#ifdef Q_OS_LINUX
     // Palm rejection: catch tablet proximity events at application level.
     // These fire once when stylus enters/leaves the tablet's detection range.
+    // Both handlers no-op while the guard is switched off.
     if (event->type() == QEvent::TabletEnterProximity) {
         onStylusProximityEnter();
         return false;  // Don't consume - let DocumentViewport handle it too
@@ -5163,7 +5165,6 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event) {
         onStylusProximityLeave();
         return false;  // Don't consume
     }
-#endif
 
     // Pan tool hold: cancel if application loses focus (KeyRelease won't arrive)
     if (m_panHoldActive && event->type() == QEvent::ApplicationDeactivate) {
@@ -5717,52 +5718,51 @@ void MainWindow::loadUserSettings() {
     touchGestureMode = static_cast<TouchGestureMode>(savedMode);
     setTouchGestureMode(touchGestureMode);
     
-#ifdef Q_OS_LINUX
-    // Load palm rejection settings (Linux only)
-    m_palmRejectionEnabled = settings.value("palmRejection/enabled", false).toBool();
-    m_palmRejectionDelayMs = settings.value("palmRejection/delayMs", 500).toInt();
-#endif
+    // Load every anti-mistouch guard (toggles + timings) in one go.
+    palmRejection().load();
     
     // Load theme settings
     loadThemeSettings();
 }
 
-// ==================== Palm Rejection (Linux Only) ====================
+// ==================== Palm Rejection ====================
 
-#ifdef Q_OS_LINUX
 bool MainWindow::isPalmRejectionEnabled() const {
-    return m_palmRejectionEnabled;
+    return palmRejection().stylusSuppressEnabled;
 }
 
 void MainWindow::setPalmRejectionEnabled(bool enabled) {
-    m_palmRejectionEnabled = enabled;
-    
-    // If disabling while palm rejection is actively suppressing touch, restore immediately
-    if (!enabled && m_palmRejectionActive) {
+    palmRejection().stylusSuppressEnabled = enabled;
+    palmRejection().save();
+    applyPalmRejectionSettings();
+}
+
+int MainWindow::getPalmRejectionDelay() const {
+    return palmRejection().stylusRestoreDelayMs;
+}
+
+void MainWindow::setPalmRejectionDelay(int delayMs) {
+    palmRejection().stylusRestoreDelayMs = delayMs;
+    palmRejection().save();
+}
+
+void MainWindow::applyPalmRejectionSettings() {
+    // Every guard reads PalmRejectionSettings at decision time, so there is
+    // nothing to push out to the viewports. The one piece of live state that
+    // can go stale is the suppression latch: switching the guard off (or
+    // shortening it) while it is holding touch disabled must release touch now
+    // rather than waiting for the pen to leave range.
+    if (!palmRejection().stylusSuppressEnabled && m_palmRejectionActive) {
         m_palmRejectionTimer->stop();
         m_palmRejectionActive = false;
         if (DocumentViewport* vp = currentViewport()) {
             vp->setTouchGestureMode(touchGestureMode);
         }
     }
-    
-    QSettings settings("SpeedyNote", "App");
-    settings.setValue("palmRejection/enabled", enabled);
-}
-
-int MainWindow::getPalmRejectionDelay() const {
-    return m_palmRejectionDelayMs;
-}
-
-void MainWindow::setPalmRejectionDelay(int delayMs) {
-    m_palmRejectionDelayMs = delayMs;
-    
-    QSettings settings("SpeedyNote", "App");
-    settings.setValue("palmRejection/delayMs", delayMs);
 }
 
 void MainWindow::onStylusProximityEnter() {
-    if (!m_palmRejectionEnabled) return;
+    if (!palmRejection().stylusSuppressEnabled) return;
     
     // Only affect active touch gesture modes (YAxisOnly and Full)
     if (touchGestureMode == TouchGestureMode::Disabled) return;
@@ -5779,13 +5779,12 @@ void MainWindow::onStylusProximityEnter() {
 }
 
 void MainWindow::onStylusProximityLeave() {
-    if (!m_palmRejectionEnabled || !m_palmRejectionActive) return;
+    if (!palmRejection().stylusSuppressEnabled || !m_palmRejectionActive) return;
     
     // Start delay timer - touch gestures will be restored when it fires.
     // This delay prevents accidental palm touches immediately after lifting the stylus.
-    m_palmRejectionTimer->start(m_palmRejectionDelayMs);
+    m_palmRejectionTimer->start(palmRejection().stylusRestoreDelayMs);
 }
-#endif
 
 void MainWindow::wheelEvent(QWheelEvent *event) {
     // MW2.2: Forward to base class - dial wheel handling removed

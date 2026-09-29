@@ -8,6 +8,7 @@
 #include "DarkModeUtils.h"
 #include "ObjectConstraints.h"      // Page containment for inserted objects
 #include "TouchGestureHandler.h"
+#include "PalmRejectionSettings.h"
 // Note: ShortcutManager.h no longer needed here - all shortcuts handled by MainWindow
 #include "MarkdownNote.h"           // Phase M.2: For markdown note creation
 #include "../layers/VectorLayer.h"
@@ -307,7 +308,7 @@ DocumentViewport::DocumentViewport(QWidget* parent)
         // stationary produces no TabletMove events, so firing 100ms after the
         // last hover would clear the proximity lock mid-hover and a hand
         // landing right afterwards would pan/zoom the canvas. The proximity
-        // watchdog (STYLUS_PROXIMITY_TIMEOUT_MS) owns that state and clears
+        // watchdog (the configured proximity timeout) owns that state and clears
         // it only after a silence long enough to outlast a hover pause.
         // Never clear while a stroke is in flight - hovers pause during a
         // press, so the timer fires mid-stroke and must not re-enable touch
@@ -331,7 +332,7 @@ DocumentViewport::DocumentViewport(QWidget* parent)
     });
 
     // Stylus proximity watchdog: restarted by every tablet event. When it
-    // fires, the pen has been silent for STYLUS_PROXIMITY_TIMEOUT_MS - it is
+    // fires, the pen has been silent for the configured proximity timeout - it is
     // definitively gone (hover-still, lost Release, or out of range) - so
     // clear the proximity lock and let touch gestures re-enable. Windows
     // Wacom drivers often omit TabletLeaveProximity, so this timer (not the
@@ -342,22 +343,22 @@ DocumentViewport::DocumentViewport(QWidget* parent)
     // of what the last event was.
     m_stylusProximityTimer = new QTimer(this);
     m_stylusProximityTimer->setSingleShot(true);
-    m_stylusProximityTimer->setInterval(STYLUS_PROXIMITY_TIMEOUT_MS);
+    m_stylusProximityTimer->setInterval(palmRejection().effectiveStylusProximityMs());
     connect(m_stylusProximityTimer, &QTimer::timeout, this, [this]() {
         m_stylusInProximity = false;
     });
 
     // Pen-activity watchdog: restarted by EVERY tablet event (see header for
     // rationale). When it expires the pen has stopped producing events for
-    // STYLUS_ACTIVITY_GUARD_MS, so it has truly left - clear the per-sequence
+    // the configured activity guard, so it has truly left - clear the per-sequence
     // touch latch and cancel any in-flight gesture so a lost TabletRelease or
     // TouchEnd can never leave touch dead. It deliberately does NOT clear
     // m_stylusInProximity: that is the single "pen present" state, owned by
-    // the proximity watchdog (STYLUS_PROXIMITY_TIMEOUT_MS) and
+    // the proximity watchdog (the configured proximity timeout) and
     // TabletLeaveProximity, which clear it only once the pen is truly gone.
     m_stylusActivityGuard = new QTimer(this);
     m_stylusActivityGuard->setSingleShot(true);
-    m_stylusActivityGuard->setInterval(STYLUS_ACTIVITY_GUARD_MS);
+    m_stylusActivityGuard->setInterval(palmRejection().effectiveStylusGuardMs());
     connect(m_stylusActivityGuard, &QTimer::timeout, this, [this]() {
         m_touchSequenceRejected = false;
         if (m_touchHandler) {
@@ -4399,7 +4400,8 @@ QPointF DocumentViewport::applyTrackpadAxisLock(const QWheelEvent* event,
         const qreal ay = qAbs(m_scrollLockAccum.y());
         const qreal strong = qMax(ax, ay);
 
-        if (strong < SCROLL_LOCK_DECIDE_PX) {
+        if (palmRejection().scrollAxisLockEnabled
+            && strong < palmRejection().scrollLockDecidePx) {
             // Still ambiguous.  Pass both axes through so scrolling responds
             // from the very first event; the leak is bounded by the threshold.
             return scrollDelta;
@@ -4445,7 +4447,8 @@ QPointF DocumentViewport::applyTrackpadAxisLock(const QWheelEvent* event,
             m_scrollLockCross = 0.0;
         }
 
-        if (qAbs(m_scrollLockCross) >= SCROLL_LOCK_BREAKOUT_PX) {
+        if (palmRejection().scrollAxisLockEnabled
+            && qAbs(m_scrollLockCross) >= palmRejection().scrollLockBreakoutPx) {
             // Release rather than flip to the perpendicular axis.  The user is
             // steering, and a flip would only trade one fight for another.
             m_scrollLock = ScrollAxisLock::Free;
@@ -4805,6 +4808,9 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
     m_stylusInProximity = true;
     // Restart the "pen left" watchdog - see m_stylusProximityTimer.
     if (m_stylusProximityTimer) {
+        // Re-read the interval on every event so a change in the palm
+        // rejection settings applies without a restart.
+        m_stylusProximityTimer->setInterval(palmRejection().effectiveStylusProximityMs());
         m_stylusProximityTimer->start();
     }
     // Restart the pen-activity guard. Every tablet event - press, move,
@@ -4812,6 +4818,7 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
     // finally expires the pen has been silent long enough that touch locks
     // must be released even if TabletRelease was never delivered.
     if (m_stylusActivityGuard) {
+        m_stylusActivityGuard->setInterval(palmRejection().effectiveStylusGuardMs());
         m_stylusActivityGuard->start();
     }
 
@@ -5414,6 +5421,7 @@ bool DocumentViewport::event(QEvent* event)
         // motionless (no TabletMove arrives to keep restarting it) and the
         // driver never sends TabletLeaveProximity.
         if (m_stylusProximityTimer) {
+            m_stylusProximityTimer->setInterval(palmRejection().effectiveStylusProximityMs());
             m_stylusProximityTimer->start();
         }
 
@@ -5474,7 +5482,7 @@ bool DocumentViewport::event(QEvent* event)
             return QWidget::event(event);
         }
 
-        // Palm rejection: >= PALM_REJECT_TOUCH_POINTS concurrent touches mean a
+        // Palm rejection: at least the configured number of concurrent touches mean a
         // hand is resting on the glass. Treat that as invalid input - cancel any
         // in-flight pen stroke and swallow the touch below so it neither draws
         // nor pans/zooms until the hand lifts below the threshold.
@@ -5486,7 +5494,8 @@ bool DocumentViewport::event(QEvent* event)
         // Touch cooldown: reject all touch events briefly after becoming visible
         // This prevents crashes from stale touch state after sleep/wake on Android
         if (m_touchCooldownActive) {
-            if (m_touchCooldownTimer.elapsed() < TOUCH_COOLDOWN_MS) {
+            if (palmRejection().touchCooldownEnabled
+                && m_touchCooldownTimer.elapsed() < palmRejection().touchCooldownMs) {
 #ifdef SPEEDYNOTE_DEBUG
                 qDebug() << "[DocumentViewport] Touch event rejected - cooldown active"
                          << "elapsed:" << m_touchCooldownTimer.elapsed() << "ms";
@@ -5599,7 +5608,7 @@ bool DocumentViewport::event(QEvent* event)
         // (TabletEnterProximity already fired earlier), so without it the
         // touch activates a pan/zoom even though the pen is clearly present.
         // The lock is NOT permanent: the proximity watchdog
-        // (STYLUS_PROXIMITY_TIMEOUT_MS) clears it after a long pen silence
+        // (the configured proximity timeout) clears it after a long pen silence
         // (covering stationary hover between strokes), and
         // TabletLeaveProximity clears it instantly, so finger scrolling
         // re-enables as soon as the pen truly leaves the glass even if the
@@ -6603,7 +6612,9 @@ bool DocumentViewport::updatePalmRejection(QTouchEvent* touchEvent)
     }
 
     const bool wasPalm = m_palmContactActive;
-    m_palmContactActive = (m_activeTouchCount >= PALM_REJECT_TOUCH_POINTS);
+    m_palmContactActive =
+        palmRejection().palmContactEnabled
+        && (m_activeTouchCount >= palmRejection().palmContactPoints);
 
     // A palm landing mid-draw must void the stroke already in flight, otherwise
     // the pen keeps writing while the hand rests on the glass.

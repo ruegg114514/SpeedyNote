@@ -124,13 +124,16 @@ public:
     void setTouchGestureMode(TouchGestureMode mode);
     void cycleTouchGestureMode(); // Cycle through: Disabled -> YAxisOnly -> Full -> Disabled
 
-#ifdef Q_OS_LINUX
-    // Palm rejection (Linux only - Windows/macOS/Android have built-in palm rejection)
+    // Palm rejection: suppresses touch gestures while the stylus is in range.
+    // Available on every platform (the guards live in the input code everywhere,
+    // not just Linux); the guard itself is a user setting that defaults to off.
+    // Backed by PalmRejectionSettings.
     bool isPalmRejectionEnabled() const;
     void setPalmRejectionEnabled(bool enabled);
     int getPalmRejectionDelay() const;
     void setPalmRejectionDelay(int delayMs);
-#endif
+    /// Re-apply the anti-mistouch settings after the settings panel changed them.
+    void applyPalmRejectionSettings();
 
     // Scroll-bar placement settings (Plan SB4); delegate to SplitViewManager.
     // Page-axis (vertical) bar: false = left edge, true = right edge.
@@ -969,17 +972,14 @@ private:
     // shortcut is registered in that window's shortcut map.
     static void wireQActionDispatchers();
 
-#ifdef Q_OS_LINUX
-    // Palm rejection state (Linux only)
-    // Temporarily disables touch gestures while the stylus is in proximity.
-    // Restores the user's configured mode after a delay when the stylus leaves.
-    bool m_palmRejectionEnabled = false;
-    int m_palmRejectionDelayMs = 500;
+    // Palm rejection state. The enable flag and the restore delay live in
+    // PalmRejectionSettings; only the live suppression state is kept here.
+    // Temporarily disables touch gestures while the stylus is in proximity,
+    // and restores the user's configured mode after the delay once it leaves.
     QTimer* m_palmRejectionTimer = nullptr;
     bool m_palmRejectionActive = false;  ///< Whether currently suppressing touch gestures
     void onStylusProximityEnter();
     void onStylusProximityLeave();
-#endif
 };
 
 #endif // MAINWINDOW_H

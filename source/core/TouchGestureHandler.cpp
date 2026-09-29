@@ -1,5 +1,6 @@
 #include "TouchGestureHandler.h"
 #include "DocumentViewport.h"
+#include "PalmRejectionSettings.h"
 #include <QTouchEvent>
 #include "../compat/qt_compat.h"  // SN_TouchPoint, SN_TOUCH_POINTS, SN_TP_* shims
 #include <QLineF>
@@ -126,7 +127,7 @@ TouchGestureHandler::TouchGestureHandler(DocumentViewport* viewport, QObject* pa
     // Grace-period timer for deferred gesture activation (palm rejection).
     m_activationTimer = new QTimer(this);
     m_activationTimer->setSingleShot(true);
-    m_activationTimer->setInterval(ACTIVATION_GRACE_MS);
+    m_activationTimer->setInterval(palmRejection().effectiveGestureGraceMs());
     connect(m_activationTimer, &QTimer::timeout, this, &TouchGestureHandler::activatePendingGesture);
 }
 
@@ -477,11 +478,15 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
 
         // Palm grace period: defer pan/pinch activation. A palm landing on the
         // glass looks exactly like a 1-2 finger touch at this point; only after
-        // ACTIVATION_GRACE_MS without a stylus veto do we treat it as a gesture.
+        // PalmRejectionSettings::gestureGraceMs without a stylus veto do we
+        // treat it as a gesture.
         if (!activePoints.isEmpty()) {
             m_lastPos = SN_TP_POS(*activePoints.first());
             m_activationPending = true;
             if (m_activationTimer) {
+                // Re-read the window on every activation so the settings
+                // change applies immediately, with no restart.
+                m_activationTimer->setInterval(palmRejection().effectiveGestureGraceMs());
                 m_activationTimer->start();
             }
         }
@@ -738,7 +743,7 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
                 // This prevents accidental zoom during 2-finger pan
                 if (!m_zoomActivated && m_initialDistance > 0) {
                     qreal distanceChange = std::abs(distance - m_initialDistance) / m_initialDistance;
-                    if (distanceChange > ZOOM_ACTIVATION_THRESHOLD) {
+                    if (distanceChange > palmRejection().zoomActivationFraction()) {
                         m_zoomActivated = true;
 #ifdef SPEEDYNOTE_DEBUG
                         qDebug() << "[TouchGestureHandler] Zoom activated! change:" << distanceChange;
@@ -754,7 +759,7 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
                 if (m_zoomActivated) {
                     // Apply scale dead zone: treat values very close to 1.0 as exactly 1.0
                     // This prevents zoom jitter from small finger distance variations
-                    if (std::abs(rawScale - 1.0) > ZOOM_SCALE_DEAD_ZONE) {
+                    if (std::abs(rawScale - 1.0) > palmRejection().zoomScaleDeadZone()) {
                         targetScale = rawScale;
                     }
                 }
@@ -836,14 +841,16 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
                     }
                     
         // TG.5: Check for 3-finger tap
-        // A valid tap requires: 3 fingers were down, duration < 300ms, all fingers released
+        // A valid tap requires: 3 fingers were down, a short press (see
+        // PalmRejectionSettings::tapMaxDurationMs), all fingers released
         if (event->type() == QEvent::TouchEnd && m_threeFingerTimerActive) {
             // Check if all touch points are now released
             bool allReleased = (m_activeTouchPoints == 0);
             
             if (allReleased) {
                 qint64 duration = m_threeFingerTimer.elapsed();
-                if (duration > 0 && duration < TAP_MAX_DURATION_MS) {
+                if (palmRejection().tapDetectionEnabled && duration > 0
+                    && duration < palmRejection().tapMaxDurationMs) {
                     on3FingerTap();
                 }
             }
@@ -1091,7 +1098,7 @@ bool TouchGestureHandler::handleTwoFingerGestureNative(QTouchEvent* event,
         // Activate zoom if threshold exceeded
         if (!m_zoomActivated && m_initialDistance > 0) {
             qreal distanceChange = std::abs(distance - m_initialDistance) / m_initialDistance;
-            if (distanceChange > ZOOM_ACTIVATION_THRESHOLD) {
+            if (distanceChange > palmRejection().zoomActivationFraction()) {
                 m_zoomActivated = true;
 #ifdef SPEEDYNOTE_DEBUG
                 qDebug() << "[TouchGestureHandler] NATIVE zoom activated! change:" << distanceChange;
@@ -1102,7 +1109,7 @@ bool TouchGestureHandler::handleTwoFingerGestureNative(QTouchEvent* event,
         // Apply scale dead zone and smoothing
         qreal targetScale = 1.0;
         if (m_zoomActivated) {
-            if (std::abs(rawScale - 1.0) > ZOOM_SCALE_DEAD_ZONE) {
+            if (std::abs(rawScale - 1.0) > palmRejection().zoomScaleDeadZone()) {
                 targetScale = rawScale;
             }
         }
