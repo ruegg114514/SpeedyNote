@@ -1492,6 +1492,30 @@ void Document::setPageSize(int index, const QSizeF& size)
     markModified();
 }
 
+void Document::setPageMetrics(int index, qreal bodyWidth, qreal notesWidth)
+{
+    if (index < 0 || index >= m_pageOrder.size() || bodyWidth <= 0.0) {
+        return;
+    }
+
+    const QSizeF current = pageSizeAt(index);
+    const qreal height =
+        current.height() > 0.0 ? current.height() : defaultPageSize.height();
+
+    const bool hasColumn = notesWidth > 0.0;
+    const qreal total = hasColumn ? bodyWidth + notesWidth : bodyWidth;
+
+    // setPageSize() writes Page::size, the layout metadata and the dirty set.
+    setPageSize(index, QSizeF(total, height));
+
+    // It also loads the page when needed, so the split lands on the same
+    // object without a second lookup.
+    if (Page* p = page(index)) {
+        p->bodyWidth = hasColumn ? bodyWidth : 0.0;
+    }
+    markModified();
+}
+
 bool Document::loadPageFromDisk(int index) const
 {
     if (m_bundlePath.isEmpty()) {

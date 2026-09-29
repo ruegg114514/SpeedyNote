@@ -5067,6 +5067,17 @@ private:
     int notesPageAtViewport(const QPointF& vpPos) const;
     void eraseNotesAt(const QPointF& viewportPos);
 
+    /// Page-local X where a page's notes column begins, i.e. the body/notes
+    /// boundary. The column is the page sheet's right-hand strip, so this is
+    /// the page's own width minus the column width; it equals the page width
+    /// when the page has no column, letting callers use it unconditionally.
+    qreal notesBoundaryLocalX(const Page* page, int pageIndex) const {
+        if (!page) return 0.0;
+        const qreal notesW = sideNotesWidthFor(pageIndex);
+        return notesW > 0.0 ? qMax<qreal>(0.0, page->size.width() - notesW)
+                            : page->size.width();
+    }
+
     /**
      * @brief Apply the active pen preset's minimum-width floor to a raw
      *        pressure sample.

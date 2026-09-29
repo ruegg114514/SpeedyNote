@@ -1519,6 +1519,22 @@ public:
      * (e.g. applying user-configured defaults to the first page).
      */
     void setPageSize(int index, const QSizeF& size);
+
+    /**
+     * @brief Set a page's body/notes split and its resulting total size.
+     *
+     * A page carrying a notes column is a single sheet: the body occupies
+     * [0, bodyWidth] and the column the strip to its right. This writes
+     * Page::bodyWidth and the total width together, so the two can never
+     * disagree - and, through setPageSize(), keeps Page::size, the layout
+     * metadata and the dirty-page set in step.
+     *
+     * @param index      0-based page index.
+     * @param bodyWidth  Width of the body in document units. Must be > 0.
+     * @param notesWidth Width of the notes column; <= 0 means "no column",
+     *                   in which case the total width is bodyWidth.
+     */
+    void setPageMetrics(int index, qreal bodyWidth, qreal notesWidth);
     
     // ===== UUID→Index Lookup (Phase C.0.2) =====
     

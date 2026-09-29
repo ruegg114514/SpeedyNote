@@ -2336,28 +2336,14 @@ QPointF DocumentViewport::clampObjectPositionToPage(int pageIndex, QPointF pageP
         return pagePos;
     }
 
+    // A widened page already includes its notes column, so the page rect is the
+    // whole allowed area - there is nothing extra to add for the column.
     const QSizeF pageSize = m_document->pageSizeAt(pageIndex);
-    // If this page has side notes, extend the allowed right boundary
-    // so objects can overflow into the notes column
-    qreal notesW = sideNotesWidthFor(pageIndex);
-    const qreal maxRight = pageSize.width() + notesW;
-    
-    // Clamp Y normally, but X can go into the notes column
+
     const qreal clampedY = ObjectConstraints::clampAxis(
         pagePos.y(), size.height(), pageSize.height());
-
-    qreal clampedX;
-    if (notesW <= 0.0) {
-        // No notes column - original behavior (clamp to page body width)
-        clampedX = ObjectConstraints::clampAxis(
-            pagePos.x(), size.width(), pageSize.width());
-    } else {
-        // With notes column: X can extend up to (page width + notes width).
-        // The notes column belongs to this page, so objects placed here
-        // stay with this page (owned by the page), just drawn after notes.
-        clampedX = ObjectConstraints::clampAxis(
-            pagePos.x(), size.width(), maxRight);
-    }
+    const qreal clampedX = ObjectConstraints::clampAxis(
+        pagePos.x(), size.width(), pageSize.width());
 
     return QPointF(clampedX, clampedY);
 }
@@ -3451,13 +3437,13 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
         // Get page position once (O(1) with cache, but avoid redundant calls)
         QPointF pos = pagePosition(pageIdx);
         
-        // Check if this page (plus notes area) intersects the dirty region
+        // Check if this page intersects the dirty region. The page rect
+        // already covers its notes column, so no extra width is added here.
         if (isPartialUpdate) {
-            qreal notesW = sideNotesWidthFor(pageIdx);
             QRectF pageRectInViewport = QRectF(
                 (pos.x() - m_panOffset.x()) * m_zoomLevel,
                 (pos.y() - m_panOffset.y()) * m_zoomLevel,
-                (page->size.width() + notesW) * m_zoomLevel,
+                page->size.width() * m_zoomLevel,
                 page->size.height() * m_zoomLevel
             );
             if (!pageRectInViewport.intersects(dirtyRect)) {
@@ -6109,9 +6095,9 @@ void DocumentViewport::ensurePageLayoutCache() const
                 m_pageYCache[i] = y;
                 QSizeF pageSize = m_document->pageSizeAt(i);
                 if (!pageSize.isEmpty()) {
-                    // Note: each page's notes column extends the scrollable width.
-                    const qreal notesW = sideNotesWidthFor(i);
-                    totalWidth = qMax(totalWidth, pageSize.width() + notesW);
+                    // pageSize already covers the notes column: a page that has
+                    // one is stored at its widened width (see setPageMetrics).
+                    totalWidth = qMax(totalWidth, pageSize.width());
                     totalHeight = y + pageSize.height();  // Track total height
                     y += pageSize.height() + m_pageGap;
                 }
@@ -6140,10 +6126,11 @@ void DocumentViewport::ensurePageLayoutCache() const
                     if (!leftSize.isEmpty()) rowHeight = qMax(rowHeight, leftSize.height());
                     if (!rightSize.isEmpty()) rowHeight = qMax(rowHeight, rightSize.height());
                     
-                    // Track total width (both pages + their notes columns + gap)
+                    // Track total width (both pages + gap). Each size already
+                    // includes that page's notes column when it has one.
                     qreal rowWidth = 0;
-                    if (!leftSize.isEmpty()) rowWidth += leftSize.width() + sideNotesWidthFor(i - 1);
-                    if (!rightSize.isEmpty()) rowWidth += m_pageGap + rightSize.width() + sideNotesWidthFor(i);
+                    if (!leftSize.isEmpty()) rowWidth += leftSize.width();
+                    if (!rightSize.isEmpty()) rowWidth += m_pageGap + rightSize.width();
                     totalWidth = qMax(totalWidth, rowWidth);
                     
                     totalHeight = y + rowHeight;  // Track total height
@@ -6154,7 +6141,7 @@ void DocumentViewport::ensurePageLayoutCache() const
             if (pageCount % 2 == 1 && pageCount > 0) {
                 QSizeF lastSize = m_document->pageSizeAt(pageCount - 1);
                 if (!lastSize.isEmpty()) {
-                    qreal lastW = lastSize.width() + sideNotesWidthFor(pageCount - 1);
+                    qreal lastW = lastSize.width();
                     totalWidth = qMax(totalWidth, lastW);
                     totalHeight = m_pageYCache[pageCount - 1] + lastSize.height();
                 }
@@ -6669,7 +6656,11 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
             // below loads the page it actually edits.
             QSizeF psz = m_document->pageSizeAt(i);
             if (psz.isEmpty()) continue;
-            QRectF notesRect(pos.x() + psz.width(), pos.y(), notesW, psz.height());
+            // The column is the sheet's right-hand strip, so it starts at the
+            // body/notes boundary rather than at the page's right edge. Only
+            // metadata is available here, hence the same arithmetic inline.
+            const qreal boundaryX = qMax<qreal>(0.0, psz.width() - notesW);
+            QRectF notesRect(pos.x() + boundaryX, pos.y(), notesW, psz.height());
             if (notesRect.contains(docPt)) {
                 // Pointer is in the notes area
                 bool isErasing = m_hardwareEraserActive || m_currentTool == ToolType::Eraser;
@@ -7512,7 +7503,9 @@ void DocumentViewport::splitStrokeAtNotesBoundary(int pageIndex,
         pdfParts.append(m_currentStroke);
         return;
     }
-    const qreal pageW = page->size.width();
+    // Split at the body/notes boundary: ink up to there belongs to the page
+    // bitmap and ink beyond it to the notes column.
+    const qreal pageW = notesBoundaryLocalX(page, pageIndex);
 
     const int n = m_currentStroke.points.size();
     if (n < 1) return;
@@ -9270,16 +9263,10 @@ void DocumentViewport::updateObjectDrag(const QPointF& totalDelta)
             
             if (targetPage >= 0) {
                 QRectF localRect = freeGroupRect.translated(-pagePosition(targetPage));
-                QSizeF targetPageSize = m_document->pageSizeAt(targetPage);
-                // Extend the right boundary by the side-notes column width so a
-                // drag may carry the selection past the page/notes divider into
-                // the notes column (mirrors clampObjectPositionToPage). Without
-                // this the selection sticks at the divider and cannot enter the
-                // notes column.
-                if (!targetPageSize.isEmpty()) {
-                    targetPageSize.setWidth(
-                        targetPageSize.width() + sideNotesWidthFor(targetPage));
-                }
+                // The page size already includes its notes column, so the page
+                // rect is the whole allowed area - nothing extra to add for the
+                // column (mirrors clampObjectPositionToPage).
+                const QSizeF targetPageSize = m_document->pageSizeAt(targetPage);
                 correction = ObjectConstraints::correctionToPage(
                     localRect, targetPageSize);
             }
@@ -13649,13 +13636,13 @@ void DocumentViewport::finalizeLassoSelection()
         }
 
         // ===== Also capture this page's notes-column strokes inside the lasso =====
-        // Notes strokes are stored notes-local (origin is the page's left edge +
-        // the page width), so translate them to page-local before the hit test.
+        // Notes strokes are stored notes-local (origin is the body/notes
+        // boundary), so translate them to page-local before the hit test.
         // NOTE: notes strokes are drawn point-by-point and their stored boundingBox
         // is not maintained, so compute it on the translated copy here; relying on
         // the stored box would reject every notes stroke and break the selection.
-        const qreal pageW = page->size.width();
-        QPointF notesOffset(pageW, 0);
+        const QPointF notesOffset(
+            notesBoundaryLocalX(page, m_lassoSelection.sourcePageIndex), 0);
         if (m_sideNotesStrokes.contains(m_lassoSelection.sourcePageIndex)) {
             QVector<VectorStroke>& notes = m_sideNotesStrokes[m_lassoSelection.sourcePageIndex];
             for (int idx = 0; idx < notes.size(); ++idx) {
@@ -14982,8 +14969,15 @@ void DocumentViewport::applySelectionTransform()
                 const qreal ph = pp->size.height();
                 const qreal nw = sideNotesWidthFor(p);
                 const QPointF po = pagePosition(p);
-                if (QRectF(po, QSizeF(pw, ph)).contains(docCenter)) { destPage = p; destNotes = false; break; }
-                if (nw > 0.0 && QRectF(po + QPointF(pw, 0), QSizeF(nw, ph)).contains(docCenter)) { destPage = p; destNotes = true; break; }
+                // The page rect already covers its column, so one test decides
+                // the landing page; x says whether the ink landed on the body or
+                // in the notes strip.
+                if (QRectF(po, QSizeF(pw, ph)).contains(docCenter)) {
+                    destPage = p;
+                    destNotes = nw > 0.0
+                        && docCenter.x() >= po.x() + notesBoundaryLocalX(pp, p);
+                    break;
+                }
             }
             if (destPage < 0) {
                 // Landed in a page gap -- snap to the nearest page by vertical centre.
@@ -21507,18 +21501,37 @@ void DocumentViewport::setSideNotesWidthOnPage(int pageIndex, qreal width)
     const qreal oldWidth = m_sideNotesWidths.value(pageIndex, 0.0);
     if (qFuzzyCompare(oldWidth, width)) return;   // No change
 
+    // The body is everything the sheet has besides the column, so it is
+    // derivable from the current geometry and stays fixed while the column is
+    // resized. <= 0 means it could not be derived (no paged document yet).
+    const bool paged = m_document && !m_document->isEdgeless();
+    qreal bodyWidth = 0.0;
+    if (paged) {
+        const QSizeF s = m_document->pageSizeAt(pageIndex);
+        if (s.width() > 0.0) bodyWidth = s.width() - oldWidth;
+    }
+
     if (width <= 0.0) {
         if (m_sideNotesWidths.remove(pageIndex))
             emit sideNotesVisibilityChanged(false);
+        if (paged && bodyWidth > 0.0) {
+            m_document->setPageMetrics(pageIndex, bodyWidth, 0.0);
+        }
     } else {
         qreal clamped = qBound(m_sideNotesMinWidth, width, m_sideNotesMaxWidth);
         bool became = !hasSideNotesOnPage(pageIndex);
         m_sideNotesWidths[pageIndex] = clamped;
         if (became) emit sideNotesVisibilityChanged(true);
+        // First time a column is added the body is simply the page's current
+        // width, i.e. the sheet grows by the column.
+        const qreal body = bodyWidth > 0.0 ? bodyWidth : clamped;
+        if (paged) {
+            m_document->setPageMetrics(pageIndex, body, clamped);
+        }
     }
 
-    // Column width participates in the layout content size, so force a
-    // recompute (ensurePageLayoutCache only acts while the flag is dirty).
+    // The page size now carries the column, so rebuild the layout cache
+    // (ensurePageLayoutCache only acts while the flag is dirty).
     m_pageLayoutDirty = true;
     ensurePageLayoutCache();
     update();
@@ -21530,18 +21543,13 @@ bool DocumentViewport::addSideNotesToCurrentPage()
     const int idx = m_currentPageIndex;
     if (idx < 0 || idx >= m_document->pageCount()) return false;
 
-    const bool turningOn = !hasSideNotesOnPage(idx);
-    if (turningOn) {
-        // Default column width: exactly the page's own width (document units).
-        // Applied directly (not through setSideNotesWidthOnPage) so it is never
-        // capped by the resize maximum, guaranteeing the default matches the page.
-        Page* page = m_document->page(idx);
-        qreal w = (page && page->size.width() > 0.0) ? page->size.width() : 200.0;
-        m_sideNotesWidths[idx] = qMax(w, m_sideNotesMinWidth);
-        emit sideNotesVisibilityChanged(true);
-        m_pageLayoutDirty = true;
-        ensurePageLayoutCache();
-        update();
+    if (!hasSideNotesOnPage(idx)) {
+        // Default column width: exactly the page's own width (document units),
+        // so the widened sheet is twice the original. Routed through
+        // setSideNotesWidthOnPage() because the column is part of the page
+        // sheet now - turning it on has to widen the page with it.
+        const QSizeF s = m_document->pageSizeAt(idx);
+        setSideNotesWidthOnPage(idx, s.width() > 0.0 ? s.width() : m_sideNotesMinWidth);
     } else {
         setSideNotesWidthOnPage(idx, 0.0);
     }
@@ -21565,7 +21573,10 @@ int DocumentViewport::notesDividerPageAtViewport(const QPointF& vpPos) const
         Page* page = m_document->page(i);
         if (!page || page->size.width() <= 0.0) continue;
         QPointF pos = pagePosition(i);
-        const qreal divX = (pos.x() + page->size.width() - m_panOffset.x()) * zoom;
+        // The column is the sheet's right-hand strip, so the divider sits at
+        // the body/notes boundary rather than at the page's right edge.
+        const qreal divX =
+            (pos.x() + notesBoundaryLocalX(page, i) - m_panOffset.x()) * zoom;
         // Visibility/UX: the resize handle pinned to the top of the divider is
         // the sole grab target. Its box is deliberately large so it is easy to
         // hit with a finger or stylus on a tablet.
@@ -21595,7 +21606,8 @@ int DocumentViewport::notesPageAtViewport(const QPointF& vpPos) const
         Page* page = m_document->page(i);
         if (!page || page->size.width() <= 0.0) continue;
         QPointF pos = pagePosition(i);
-        QRectF notesRect(pos.x() + page->size.width(), pos.y(), notesW, page->size.height());
+        QRectF notesRect(pos.x() + notesBoundaryLocalX(page, i), pos.y(),
+                         notesW, page->size.height());
         if (notesRect.contains(docPt)) return i;
     }
     return -1;
@@ -21630,15 +21642,13 @@ void DocumentViewport::startNotesStroke(const PointerEvent& pe, int pageIndex)
     m_sideNotesCurrentStroke.baseThickness = strokeThickness;
 
     // Convert viewport position to notes-local coordinates. The origin is the
-    // left edge of the notes column (page top-left + the page's own width),
-    // computed from page->size so it exactly matches continueNotesStroke and
-    // the painting path.
+    // left edge of the notes column, which is the body/notes boundary inside
+    // the page sheet - shared with continueNotesStroke and the painting path
+    // through notesBoundaryLocalX().
     QPointF docPt = viewportToDocument(pe.viewportPos);
-    QPointF notesOrigin = pagePosition(pageIndex);
     Page* page = m_document->page(pageIndex);
-    if (page) {
-        notesOrigin += QPointF(page->size.width(), 0);
-    }
+    const QPointF notesOrigin = pagePosition(pageIndex)
+        + QPointF(notesBoundaryLocalX(page, pageIndex), 0);
     QPointF notesLocal = docPt - notesOrigin;
 
     // Add first point
@@ -21656,11 +21666,11 @@ void DocumentViewport::continueNotesStroke(const PointerEvent& pe)
 {
     if (!m_isDrawingSideNotes || !m_document) return;
 
-    // Get notes origin in document coordinates
-    QPointF notesOrigin = pagePosition(m_sideNotesActivePage);
+    // Get notes origin in document coordinates (the body/notes boundary)
     Page* page = m_document->page(m_sideNotesActivePage);
     if (!page) return;
-    notesOrigin += QPointF(page->size.width(), 0);
+    const QPointF notesOrigin = pagePosition(m_sideNotesActivePage)
+        + QPointF(notesBoundaryLocalX(page, m_sideNotesActivePage), 0);
 
     // Convert viewport position to notes-local coordinates
     QPointF docPt = viewportToDocument(pe.viewportPos);
@@ -21772,6 +21782,10 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
     if (notesW <= 0) return;
 
     const qreal pageH = page->size.height();
+    // Where the column sits inside the page sheet: the body/notes boundary.
+    // Before pages were widened the column lived BESIDE the page and started at
+    // page->size.width(); now it is the sheet's right-hand strip.
+    const qreal columnX = notesBoundaryLocalX(page, pageIdx);
 
     // While a notes lasso is active the hidden-block set changes per frame and the
     // overlay already draws the dragged strokes, so the column must be redrawn live
@@ -21908,7 +21922,7 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
         // page first; the column blit below then covers any cap spill-back at the
         // column edges.
         drawNotesColumnOverflow(painter, page, pageIdx);
-        painter.drawPixmap(QPointF(page->size.width(), 0), cacheIt->pixmap);
+        painter.drawPixmap(QPointF(columnX, 0), cacheIt->pixmap);
         // Re-draw objects that spill into the notes column on top of the column
         // background, so images/objects placed in the notes area stay visible.
         renderObjectsOverNotes(painter, page, pageIdx);
@@ -21924,7 +21938,7 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
     // per-frame rendering rather than allocating an oversized buffer.
     const int cap = VectorLayer::MAX_STROKE_CACHE_DIM;
     if (phys.width() > cap || phys.height() > cap) {
-        renderLocal(painter, page->size.width());
+        renderLocal(painter, columnX);
         renderObjectsOverNotes(painter, page, pageIdx);
         return;
     }
@@ -21943,7 +21957,7 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
         // be repainted on top of the page before the blit.
         drawNotesColumnOverflow(painter, page, pageIdx);
     }
-    painter.drawPixmap(QPointF(page->size.width(), 0), px);
+    painter.drawPixmap(QPointF(columnX, 0), px);
     // Objects that spill into the notes column must be re-drawn on top of the
     // column background (see renderObjectsOverNotes for the full explanation).
     if (!lassoEditingNotes) {
@@ -21958,8 +21972,8 @@ void DocumentViewport::drawNotesColumn(QPainter& painter, Page* page, int pageId
         for (auto it2 = m_notesColumnCache.begin();
              it2 != m_notesColumnCache.end();) {
             if (it2.key() == pageIdx) { ++it2; continue; }
-            QRectF pr = pageRect(it2.key());
-            pr.adjust(0, 0, sideNotesWidthFor(it2.key()), 0);
+            // pageRect() already covers the page's notes column.
+            const QRectF pr = pageRect(it2.key());
             if (!pr.intersects(viewRect)) {
                 it2 = m_notesColumnCache.erase(it2);
             } else {
@@ -21985,7 +21999,9 @@ void DocumentViewport::drawNotesColumnOverflow(QPainter& painter, Page* page, in
     if (notesW <= 0) return;
 
     painter.save();
-    painter.translate(page->size.width(), 0);  // into notes-column-local coords
+    // Into notes-column-local coords: the column's origin is the body/notes
+    // boundary, not the page's right edge.
+    painter.translate(notesBoundaryLocalX(page, pageIdx), 0);
 
     const QVector<VectorStroke>& strokes = notesIt.value();
     for (const VectorStroke& stroke : strokes) {
@@ -22046,11 +22062,13 @@ void DocumentViewport::drawNotesColumnOverflow(QPainter& painter, Page* page, in
 
 void DocumentViewport::renderObjectsOverNotes(QPainter& painter, Page* page, int pageIdx)
 {
-    const qreal pageW = page->size.width();
     const qreal notesW = sideNotesWidthFor(pageIdx);
     if (notesW <= 0.0) {
         return;  // no side notes column - nothing to do
     }
+    // Left edge of the column: the body/notes boundary (it was the page's right
+    // edge back when the column lived beside the page).
+    const qreal pageW = notesBoundaryLocalX(page, pageIdx);
 
     // We walk all affinity layers because objects can live under any layer (affinity
     // matches active layer number). Render in z-order so top objects are on top.
@@ -22185,7 +22203,8 @@ void DocumentViewport::eraseNotesAt(const QPointF& viewportPos)
         if (psz.isEmpty()) continue;
         const qreal notesW = sideNotesWidthFor(i);
         if (notesW <= 0) continue;
-        QPointF notesOrigin = pos + QPointF(psz.width(), 0);
+        // The column is the page sheet's right-hand strip.
+        const QPointF notesOrigin = pos + QPointF(notesBoundaryLocalX(page, i), 0);
         QRectF notesRect(notesOrigin.x(), notesOrigin.y(), notesW, psz.height());
 
         if (!notesRect.contains(docPt)) continue;
@@ -22340,6 +22359,10 @@ void DocumentViewport::loadSideNotes()
         return pageIndex >= 0 && pageIndex < pageCount;
     };
 
+    // Preserved so the one-time geometry migration at the end of this function
+    // does not make opening an old notebook look like an unsaved edit.
+    const bool wasModified = m_document->modified;
+
     QString filePath = m_sideNotesDir + "/side_notes.json";
     QFile file(filePath);
     if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
@@ -22421,6 +22444,35 @@ void DocumentViewport::loadSideNotes()
 
         if (!strokes.isEmpty()) {
             m_sideNotesStrokes[pageIndex] = strokes;
+        }
+    }
+
+    // ---- One-time geometry migration ----
+    // Notebooks written before the column became part of the page sheet stored
+    // the column BESIDE the page: Page::size was the body width and the column
+    // sat at the page's right edge. Page geometry now carries the column, so
+    // those pages have to be widened once. Their strokes need no translation:
+    // the column-local origin simply moves from the page's right edge to the
+    // body/notes boundary, and the strokes were always measured from that
+    // boundary - it just used to coincide with the page's right edge.
+    {
+        const QList<int> pagesWithColumns = m_sideNotesWidths.keys();
+        bool migrated = false;
+        for (int idx : pagesWithColumns) {
+            const qreal w = m_sideNotesWidths.value(idx, 0.0);
+            if (w <= 0.0) continue;
+            Page* page = m_document->page(idx);  // loads and caches this page
+            if (!page || page->bodyWidth > 0.0) continue;  // already widened
+            const qreal body = page->size.width();
+            if (body <= 0.0) continue;
+            m_document->setPageMetrics(idx, body, w);
+            migrated = true;
+        }
+        // Widening is a format upgrade, not a user edit. The pages are in the
+        // dirty set, so an explicit save still persists the new geometry, but
+        // the document must not read as modified the moment it is opened.
+        if (migrated && !wasModified) {
+            m_document->clearModified();
         }
     }
 
