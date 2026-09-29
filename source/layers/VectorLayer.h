@@ -770,6 +770,20 @@ public:
         }
         
         ensureStrokeCacheValid(size, zoom, dpr);
+
+        // A whole-page pixmap blit is the most expensive single draw a page does
+        // per frame, and a layer's ink usually covers only part of the page.
+        // Now that the cache is valid the content rect is authoritative, so the
+        // blit (and its alpha blending) can be skipped outright when the ink
+        // cannot be inside the region being painted. Both the clip and the
+        // content rect are in page/tile-local units here, because callers scale
+        // the painter to page coordinates before calling.
+        if (!m_strokeCache.isNull() && !m_cacheContentRect.isNull()) {
+            const QRectF clip = painter.clipBoundingRect();
+            if (!clip.isNull() && !clip.intersects(m_cacheContentRect)) {
+                return;
+            }
+        }
         
         if (!m_strokeCache.isNull()) {
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
@@ -1040,6 +1054,12 @@ private:
     // Stroke cache for performance (Task 1.3.7 + Zoom-Aware + Incremental)
     mutable QPixmap m_strokeCache;          ///< Cached rendered strokes at current zoom
     mutable bool m_strokeCacheDirty = true; ///< Whether cache needs full rebuild
+    /// Union of the cached strokes' bounding boxes, in page/tile-local units, as
+    /// last produced by rebuildStrokeCache()/appendPendingStrokes(). A null rect
+    /// means "unknown", which disables the skip in renderWithZoomCache() - the
+    /// safe direction. Removal and transform paths can only ever leave it too
+    /// large, never too small.
+    mutable QRectF m_cacheContentRect;
     mutable qreal m_cacheZoom = 1.0;        ///< Zoom level cache was built at
     mutable qreal m_cacheDpr = 1.0;         ///< DPI ratio cache was built at
     mutable int m_cacheDivisor = 1;         ///< Integer divisor applied for resolution cap
@@ -1134,6 +1154,14 @@ private:
         
         for (int i = m_pendingStrokeStart; i < m_strokes.size(); ++i) {
             renderStroke(cachePainter, m_strokes[i]);
+            const QRectF& appended = m_strokes[i].boundingBox;
+            if (appended.isNull()) {
+                // Unknown extent: keep the skip switched off rather than risk
+                // skipping ink that is really there.
+                m_cacheContentRect = QRectF();
+            } else if (!m_cacheContentRect.isNull()) {
+                m_cacheContentRect = m_cacheContentRect.united(appended);
+            }
         }
         
         m_pendingStrokeStart = -1;
@@ -1284,7 +1312,28 @@ private:
             m_cacheZoom = zoom;
             m_cacheDpr = dpr;
             m_cacheDivisor = divisor;
+            m_cacheContentRect = QRectF();
             return;
+        }
+
+        // Record where the ink actually is (page/tile-local units) so
+        // renderWithZoomCache() can skip a whole-page blit that cannot show
+        // anything. A stroke without a bounding box leaves the extent unknown,
+        // in which case the optimisation is switched off rather than risking a
+        // skip that hides real ink.
+        m_cacheContentRect = QRectF();
+        bool contentExtentKnown = true;
+        for (const auto& stroke : m_strokes) {
+            if (stroke.boundingBox.isNull()) {
+                contentExtentKnown = false;
+                break;
+            }
+            m_cacheContentRect = m_cacheContentRect.isNull()
+                ? stroke.boundingBox
+                : m_cacheContentRect.united(stroke.boundingBox);
+        }
+        if (!contentExtentKnown) {
+            m_cacheContentRect = QRectF();
         }
         
         QPainter cachePainter(&m_strokeCache);

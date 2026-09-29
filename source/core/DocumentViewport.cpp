@@ -3290,7 +3290,19 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
 
             if (m_document && !exposedRegion.isEmpty()) {
                 painter.save();
-                painter.setClipRegion(exposedRegion);
+                // A one-rect exposure (the common case for a mostly vertical or
+                // horizontal drag) gets a plain rect clip. The raster engine's
+                // region clipping is span-based, and this clip wraps several
+                // whole-page draws once per gesture frame (paper fill, PDF
+                // background, stroke-cache blit), so all of them pay for it.
+                // Painting the bounding rect only touches pixels the shifted
+                // frame already covered: a sliver of overdraw in exchange for a
+                // much cheaper clip on every draw inside it.
+                if (exposedRegion.rectCount() == 1) {
+                    painter.setClipRect(exposedRegion.boundingRect());
+                } else {
+                    painter.setClipRegion(exposedRegion);
+                }
                 painter.fillRect(exposedRegion.boundingRect(), m_backgroundColor);
 
                 if (m_document->isEdgeless()) {
@@ -20073,9 +20085,50 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
     const QRectF bodyRect = page->bodyRect();
     const QSizeF bodySize = bodyRect.size();
     
-    // 1. Fill with page background color
-    painter.fillRect(pageRect, paperColorForPage(page));
-    
+    // 1. Fill with page background color.
+    //
+    // Skipped over a page body that an opaque background image is about to
+    // cover: a full-page fillRect is an entire extra pass over the page rect on
+    // every composite frame, and the PDF branch below paints an opaque image
+    // there anyway. The lookup has to run before the fill to know whether an
+    // image is actually available; the switch below reuses the result.
+    QPixmap pdfBackground;
+    bool pdfUsable = false;
+    if (page->backgroundType == Page::BackgroundType::PDF && page->pdfPageNumber >= 0) {
+        PdfProvider* prov = m_document->providerForSource(page->pdfSourceId);
+        // Skip pages whose original number can't be served by the resolved
+        // provider (e.g. a bundled source without the original PDF where the
+        // page isn't in the mini-PDF's page map). Rendering would return null
+        // and, since nulls aren't cached, retry on every repaint. Draw blank.
+        const int resolvedPage =
+            m_document->resolveSourcePageIndex(page->pdfSourceId, page->pdfPageNumber);
+        if (prov && prov->isValid() && resolvedPage >= 0 && resolvedPage < prov->pageCount()) {
+            const qreal dpi = effectivePdfDpi();
+            // SP2: never render synchronously while scrolling - draw the cached
+            // pixmap if present, else fall back to the page background (filled
+            // below). The settle handler renders the final visible pages once
+            // scrolling stops. Same during a viewport gesture once its cached
+            // frame exists: the exposed-strip repaint runs every gesture frame,
+            // so a synchronous render would stall the gesture on low-end
+            // hardware. The gesture-end repaint and the async preloader fill the
+            // pages right after.
+            const bool gestureLive =
+                m_gesture.isActive() && !m_gesture.cachedFrame.isNull();
+            pdfBackground = (isScrolling() || gestureLive)
+                ? lookupCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi)
+                : getCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi);
+            pdfUsable = true;
+        }
+    }
+    // Only a PDF page image is guaranteed opaque (MuPDF clears it to white and
+    // hands back ARGB with alpha 255), so only that case may skip the fill; a
+    // custom background image may carry transparency.
+    const bool bodyFullyCovered =
+        pdfUsable && !pdfBackground.isNull() && bodyRect == pageRect;
+    if (!bodyFullyCovered) {
+        painter.fillRect(pageRect, paperColorForPage(page));
+    }
+
     // 2. Render background based on type
     switch (page->backgroundType) {
         case Page::BackgroundType::None:
@@ -20083,39 +20136,14 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
             break;
             
         case Page::BackgroundType::PDF:
-            // Render PDF page from cache (Task 1.3.6), resolving the page's own source.
-            if (page->pdfPageNumber >= 0) {
-                PdfProvider* prov = m_document->providerForSource(page->pdfSourceId);
-                // Skip pages whose original number can't be served by the resolved
-                // provider (e.g. a bundled source without the original PDF where the
-                // page isn't in the mini-PDF's page map). Rendering would return null
-                // and, since nulls aren't cached, retry on every repaint. Draw blank.
-                const int resolvedPage = m_document->resolveSourcePageIndex(page->pdfSourceId, page->pdfPageNumber);
-                if (prov && prov->isValid() && resolvedPage >= 0 && resolvedPage < prov->pageCount()) {
-                    qreal dpi = effectivePdfDpi();
-                    // SP2: never render synchronously while scrolling - draw the
-                    // cached pixmap if present, else fall back to the page
-                    // background (already filled above). The settle handler
-                    // renders the final visible pages once scrolling stops.
-                    // Same during a viewport gesture once its cached frame
-                    // exists: the exposed-strip repaint runs every gesture
-                    // frame, so a synchronous render would stall the gesture
-                    // on low-end hardware. The gesture-end repaint and the
-                    // async preloader fill the pages right after.
-                    const bool gestureLive =
-                        m_gesture.isActive() && !m_gesture.cachedFrame.isNull();
-                    QPixmap pdfPixmap = (isScrolling() || gestureLive)
-                        ? lookupCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi)
-                        : getCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi);
-                    
-                    if (!pdfPixmap.isNull()) {
-                        // Scale pixmap to fit page rect
-                        painter.drawPixmap(bodyRect.toRect(), pdfPixmap);
-                    }
-                }
+            // Blit the pixmap fetched above (see the note on the paper fill
+            // decision: it had to be looked up before the fill so a fully
+            // covered body could skip it).
+            if (pdfUsable && !pdfBackground.isNull()) {
+                painter.drawPixmap(bodyRect.toRect(), pdfBackground);
             }
             break;
-            
+
         case Page::BackgroundType::Custom:
             // Draw custom background image
             if (!page->customBackground.isNull()) {
