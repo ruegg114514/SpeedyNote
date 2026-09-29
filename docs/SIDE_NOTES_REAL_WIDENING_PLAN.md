@@ -1,7 +1,7 @@
 # 笔记栏重构方案：从「平行结构」改为「页面的一部分」
 
 > 分支：`work-palm`
-> 状态：阶段 0+1+2a 已落地，阶段 2b（页面真实加宽）待做
+> 状态：阶段 0/1/2a/2b 已落地，阶段 3（删掉平行结构）待做
 > 一句话：**把笔记栏从"页面旁边的另一个东西"改成"页面本身变宽多出来的那一块"。**
 
 ---
@@ -272,28 +272,34 @@ QRectF bodyRect() const { return QRectF(0, 0, bodyWidth > 0.0 ? bodyWidth : size
 
 - `ThumbnailSnapshot` 新增 `bodyWidth` 字段，由主线程抓取时从 `page->bodyWidth` 填入
 - `renderFromSnapshot` 的背景绘制（PDF 位图 + Grid/Lines 图案）改用 body 矩形
-- `bodyWidth` 恒为 0 时 body 矩形就是整页矩形，缩略图逐像素不变
 
-**仍待做（2b）**：
+**已完成（2b）**：笔记栏成为页面几何的一部分。
 
-1. **`source/pdf/MuPdfExporter.cpp`** —— 导出路径要把源 PDF 放进 body 区域，
-   而不是页面的整张矩形；顺带定 `裁切到正文 / 保留笔记栏` 选项（4.7 第 4 条）。
-2. **`DocumentViewport` 的笔记栏几何全部要改锚点** —— 这是 2b 的主体：
-   - `notesPageAtViewport` / `notesDividerPageAtViewport`：分隔线从
-     `pos.x + page->size.width()` 改为 `pos.x + page->bodyWidth()`
-   - `startNotesStroke` / `continueNotesStroke`：落笔原点从"页面右边缘之外"
-     改为页面局部（`pagePosition`），使笔迹落在 `[bodyWidth, size.width())` 内
-   - `drawNotesColumn` / `drawNotesColumnOverflow`：绘制原点与裁剪矩形同步改；
-     列缓存可并入页面级缓存
-   - `notesDividerPageAtViewport` 的拖动：改为改 `bodyWidth` 并写回页尺寸
-   - `ensurePageLayoutCache` 里 `+ sideNotesWidthFor(i)` 的三处加法要**删掉** ——
-     `pageSizeAt()` 已经包含笔记栏宽度，再加一次会重复计算
-   - `clampObjectPositionToPage` 的 `pageSize.width() + notesW` 简化为整页宽度
-3. **`Document::setPageMetrics(int index, qreal bodyWidth, qreal notesWidth)`** —— 2b 的入口：
-   同时写 `Page::bodyWidth` 与页总宽（总宽 = bodyWidth + notesWidth），
-   经 `setPageSize` 同步布局元数据，再 `markPageDirty` + 置 `m_pageLayoutDirty`。
-4. **`side_notes.json` 迁移** —— 老文档里有宽度但没有加宽页尺寸，
-   打开时要按 `pageWidths` 把对应的页加宽，并把旧笔画整体 X 平移 `+bodyWidth`。
+核心是**一个洞察**：`drawNotesColumn` 本来就是"列局部坐标 + 一个 `dx` 平移"，
+所以锚点改动集中在 `dx` 的取值 —— 从"页面右边缘"移到"正文/笔记边界"。
+新增 `DocumentViewport::notesBoundaryLocalX()` 把这一个值收口，
+命中测试、绘制、擦除、lasso、笔画切分都用它，不可能各算各的。
+
+- `Document::setPageMetrics(index, bodyWidth, notesWidth)`：同时写 `Page::bodyWidth`
+  与页总宽（经 `setPageSize` 同步元数据），是"开栏 / 拖分隔线 / 关栏"的唯一入口
+- 笔记笔画**不需要坐标平移**：它们一直是以该边界为原点量的，
+  只是这个边界以前恰好等于页面右边缘
+- `ensurePageLayoutCache` 里三处 `+ sideNotesWidthFor(i)` 已删（页尺寸已含笔记栏，否则算重）
+- `clampObjectPositionToPage` 与选区拖动不再额外放宽右边界（同上）
+- `loadSideNotes()` 内做一次性迁移：老文档里 `Page::size` 是正文宽、列在旁边，
+  按 `bodyWidth == 0` 识别后加宽一次；迁移完恢复文档的 modified 标志，
+  免得打开旧笔记本就显示"有未保存改动"
+
+**仍待做**：
+
+1. **`side_notes.json` / 平行结构本身**（阶段 3）—— 笔记笔画仍存在
+   `m_sideNotesStrokes`，没进页面图层，所以 `fromNotes` 的 undo 分流、
+   `m_lassoNotesPage` 平行索引、`side_notes.json` 持久化都还在。删掉它们才是最终形态。
+2. **导出的笔记笔画** —— `renderModifiedPage` 一直不含笔记笔画（2b 之前就如此，
+   不是回归）；现在页面加宽了，笔记条会以空白纸导出。应把笔记笔画按边界偏移
+   追加进页面内容流。`notesOnly` 导出路径不受影响。
+3. **尚未拍板的 UX**（4.7）：`zoomToFit` 按整页还是按正文、缩略图比例、
+   新建页是否继承栏宽。
 
 ### 阶段 2 的入口
 
