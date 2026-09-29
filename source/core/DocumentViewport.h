@@ -3962,24 +3962,7 @@ private:
     qreal m_touchResizeStartX = 0.0;       ///< Viewport X where the touch resize started
     qreal m_touchResizeStartWidth = 0.0;   ///< Column width when the touch resize started
     QMap<int, QVector<VectorStroke>> m_sideNotesStrokes;  ///< Per-page notes strokes
-    VectorStroke m_sideNotesCurrentStroke;  ///< Stroke being drawn in notes area
-    bool m_isDrawingSideNotes = false;      ///< Currently drawing in notes area
-    int m_sideNotesActivePage = -1;         ///< Page index for active notes stroke
     QString m_sideNotesDir;                 ///< Directory for notes persistence
-
-    // ===== Side-notes column pixel cache =====
-    // The notes column (background + dot grid + committed strokes) was re-vectorized
-    // every frame, so a drag panning over the notes region stuttered even though the
-    // main-page strokes draw from cached pixmaps. Cache the whole column per page
-    // (like the main-page stroke cache) so a pan becomes a cheap pixmap blit; rebuild
-    // when zoom / dpr / size / content fingerprint changes.
-    struct NotesColumnCacheEntry {
-        QPixmap pixmap;
-        quint64 sig = 0;   ///< content fingerprint the pixmap was built from
-    };
-    QHash<int, NotesColumnCacheEntry> m_notesColumnCache;
-    qreal m_notesCacheZoom = -1.0;  ///< zoom the cache was built at (cleared when it changes)
-    qreal m_notesCacheDpr = -1.0;   ///< dpr  the cache was built at
     
     // ===== Page Layout Cache (Performance: O(1) page position lookup) =====
     mutable QVector<qreal> m_pageYCache;  ///< Cached Y position for each page (single column)
@@ -5045,27 +5028,8 @@ private:
     void addPointToStroke(const QPointF& pagePos, qreal pressure, qint64 timestamp = 0);
 
     // ===== Side Notes Area Helpers =====
-    void startNotesStroke(const PointerEvent& pe, int pageIndex);
-    void continueNotesStroke(const PointerEvent& pe);
-    void endNotesStroke();
-    void drawNotesStroke(QPainter& painter, const VectorStroke& stroke);
-    // Draws the notes column (background, grid, drag handle, committed strokes) of
-    // a page. Painter must already be translated to the page's top-left corner
-    // (page-local coordinates).
-    void drawNotesColumn(QPainter& painter, Page* page, int pageIdx);
-    // Draws the pieces of committed notes strokes that fall OUTSIDE the notes
-    // column (swept onto the page body / past the far edge). Called after the
-    // page but before the column pixmap blit so swept ink stays on top of the
-    // page content instead of being clipped out by the column-sized cache.
-    void drawNotesColumnOverflow(QPainter& painter, Page* page, int pageIdx);
-    // Renders page objects whose (page-local) rect overlaps the side-notes
-    // column ON TOP of the column, so an image placed in the notes area is
-    // visible instead of being hidden by the column's white background.
-    // Painter must already be translated to the page's top-left corner.
-    void renderObjectsOverNotes(QPainter& painter, Page* page, int pageIdx);
     int notesDividerPageAtViewport(const QPointF& vpPos) const;
     int notesPageAtViewport(const QPointF& vpPos) const;
-    void eraseNotesAt(const QPointF& viewportPos);
 
     /// Page-local X where a page's notes column begins, i.e. the body/notes
     /// boundary. The column is the page sheet's right-hand strip, so this is
