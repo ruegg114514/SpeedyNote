@@ -1,7 +1,7 @@
 # 笔记栏重构方案：从「平行结构」改为「页面的一部分」
 
 > 分支：`work-palm`
-> 状态：阶段 0/1/2a/2b/3a 已落地，阶段 3b（删撤销与 lasso 的死分支）待做
+> 状态：阶段 0/1/2a/2b/3a/3b 全部落地，平行结构已清零；只余 4 项 UX 拍板
 > 一句话：**把笔记栏从"页面旁边的另一个东西"改成"页面本身变宽多出来的那一块"。**
 
 ---
@@ -301,16 +301,40 @@ QRectF bodyRect() const { return QRectF(0, 0, bodyWidth > 0.0 ? bodyWidth : size
 - 迁移合并成一件事：加宽页面 **并**把旧笔画 `+body` 平移后 `layer->addStroke()`
   进页面活动图层；幂等靠 `bodyWidth == 0` 判定
 
-**仍待做**：
+**已完成（3b）**：撤销 / lasso 的平行结构删除，**顺带修掉一个活 bug**。
 
-1. **阶段 3b：删除撤销与 lasso 的死分支** —— `fromNotes` 的 undo 分流、
-   `m_lassoNotesPage` 平行索引都只读 `m_sideNotesStrokes`，而已经没有任何代码写它，
-   所以是死代码但无害。删它们要动 undo 与 lasso，是最需要实机验证的部分，故单独提交。
-2. **导出的笔记笔画** —— `renderModifiedPage` 一直不含笔记笔画（2b 之前就如此，
-   不是回归）；现在页面加宽了，笔记条会以空白纸导出。应把笔画按边界偏移
-   追加进页面内容流。`notesOnly` 导出路径不受影响。
-3. **尚未拍板的 UX**（4.7）：`zoomToFit` 按整页还是按正文、缩略图比例、
-   新建页是否继承栏宽。
+- **一个活 bug**：`splitStrokeAtNotesBoundary()` 在落笔时仍把跨越正文/笔记边界的笔画
+  **切成两半**，笔记那半塞进 `m_sideNotesStrokes` —— 而 3a 之后那个容器
+  **没有任何渲染路径了**。也就是说 3a 到 3b 之间，一笔从正文画进笔记栏的笔画，
+  笔记栏那半会消失。3b 把切分整个删掉，笔画直接整笔进页面图层。
+- `UndoAction::StrokeSegment::fromNotes` 及 undo / redo 的**六处**分流删除
+- `m_lassoNotesPage` / `m_lassoNotesIndices` 及 lasso 的**三处**分支删除
+  （框选捕获、删除、搬移）
+- lasso 搬移从"按落点判断落到正文还是笔记栏，再用 `splitDocumentStrokeAtX()`
+  按边界切成多段分别提交到两个容器"简化为"找到落点页 → 整笔写进该页图层"，
+  `splitDocumentStrokeAtX()` 随之删除
+- 顺带删除的还有 `m_sideNotesStrokes`、`clearSideNotesCurrentPage()`、
+  `notesPageAtViewport()`（页面矩形已覆盖笔记栏，`pageHit` 恒先命中，
+  这个分支已不可达）
+
+**导出：架构改动本身就把这个问题解决了。** `renderModifiedPage()` 的 mediabox 取自
+`page->size`（已含笔记栏），并且**遍历所有图层**调 `appendLayerStrokesToBuffer()`
+（`MuPdfExporter.cpp:1539`）。笔记笔画现在就在页面图层里，所以普通 PDF 导出
+**自动包含笔记栏墨迹**，一行代码都不用加。
+
+`notesOnly` 导出单独处理：列墨迹同样取自页面图层，整体 X 平移 `-bodyWidth`
+后就是"以笔记栏为原点的页面"；画在正文区的那部分落到 x < 0，被 mediabox 裁掉 ——
+这正是"只要笔记栏"该有的样子。`MuPdfExporter` 因此只保留 `m_sideNotesWidths`
+（栏宽）与一份**遗留墨迹兜底**（`m_sideNotesStrokes`，仅由
+`loadSideNotesFromDisk()` 填充）：加宽前的文档墨迹还在 `side_notes.json` 里，
+CLI / 批量导出这种不经过 `DocumentViewport` 的路径仍要能出图。
+
+**仍待做**（只剩需要你拍板的 UX，见 4.7）：
+
+1. `zoomToFit` / 适应宽度按整页还是按正文
+2. 加宽页的缩略图比例
+3. 新建页是否继承上一页的栏宽
+4. 导出加"裁切到正文 / 保留笔记栏"选项（现在默认整页，含笔记栏）
 
 ### 另：启动"恢复上次标签"提示已移除
 

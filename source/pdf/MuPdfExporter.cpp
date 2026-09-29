@@ -747,8 +747,7 @@ PdfExportResult MuPdfExporter::exportPdf(const PdfExportOptions& options)
     // caller wins over the persisted JSON) and restrict the output to pages
     // that actually have a notes column.
     if (m_options.notesOnly) {
-        if (m_sideNotesStrokes.isEmpty() && m_sideNotesWidths.isEmpty()
-                && !loadSideNotesFromDisk()) {
+        if (m_sideNotesWidths.isEmpty() && !loadSideNotesFromDisk()) {
             result.errorMessage = tr("No side notes data found for this document");
             cleanup();
             emit exportFailed(result.errorMessage);
@@ -1969,11 +1968,9 @@ bool MuPdfExporter::renderBlankPage(int pageIndex)
 // Side-Notes Column Export
 // ============================================================================
 
-void MuPdfExporter::setSideNotesData(const QMap<int, qreal>& widths,
-                                     const QMap<int, QVector<VectorStroke>>& strokes)
+void MuPdfExporter::setSideNotesData(const QMap<int, qreal>& widths)
 {
     m_sideNotesWidths = widths;
-    m_sideNotesStrokes = strokes;
 }
 
 bool MuPdfExporter::loadSideNotesFromDisk()
@@ -2031,7 +2028,10 @@ bool MuPdfExporter::loadSideNotesFromDisk()
         }
     }
 
-    // Per-page notes strokes
+    // Legacy per-page notes ink. Only the pre-widening format stored ink in
+    // side_notes.json; a current notebook keeps it in the page JSON with the
+    // rest of the page's content. Read here purely so that a notes-only export
+    // of a document that has not been widened yet still produces its ink.
     QJsonObject pagesObj = root.value("pages").toObject();
     for (auto it = pagesObj.begin(); it != pagesObj.end(); ++it) {
         const int pageIndex = it.key().toInt();
@@ -2096,16 +2096,36 @@ bool MuPdfExporter::renderNotesColumnPage(int pageIndex)
         content = fz_new_buffer(m_ctx, 1024);
         resources = pdf_new_dict(m_ctx, m_outputDoc, 4);
 
-        // Emit the page's notes strokes (notes-local coordinates already)
+        // The column's ink is page content: it sits in the page's own layers in
+        // page-local coordinates, so shifting x by the body width moves the
+        // column to the origin of THIS output page. Ink that was drawn on the
+        // body lands at negative x, outside the mediabox, and is clipped - which
+        // is exactly what "notes only" should show.
+        QVector<VectorStroke> columnInk;
+        if (page->notesWidth() > 0.0) {
+            const qreal bodyW = page->bodyWidth;
+            for (const auto& layerPtr : page->vectorLayers) {
+                if (!layerPtr) continue;
+                for (const VectorStroke& s : layerPtr->strokes()) {
+                    VectorStroke col = s;
+                    for (StrokePoint& pt : col.points) pt.pos.rx() -= bodyW;
+                    col.updateBoundingBox();
+                    columnInk.append(col);
+                }
+            }
+        } else {
+            // Not widened yet: the ink is still in side_notes.json, in
+            // column-local coordinates, and goes out verbatim.
+            const auto it = m_sideNotesStrokes.constFind(pageIndex);
+            if (it != m_sideNotesStrokes.constEnd()) columnInk = it.value();
+        }
+
         int gsIndex = 0;
         std::map<int, QString> alphaToGsName;
-        const auto it = m_sideNotesStrokes.constFind(pageIndex);
-        if (it != m_sideNotesStrokes.constEnd()) {
-            appendNotesStrokesToBuffer(m_ctx, m_outputDoc, content, resources,
-                                       it.value(), page->size.height(),
-                                       gsIndex, alphaToGsName,
-                                       m_options.darkenStrokes);
-        }
+        appendNotesStrokesToBuffer(m_ctx, m_outputDoc, content, resources,
+                                   columnInk, page->size.height(),
+                                   gsIndex, alphaToGsName,
+                                   m_options.darkenStrokes);
 
         fz_rect mediabox = fz_make_rect(0, 0, widthPt, heightPt);
         pdf_obj* pageObj = pdf_add_page(m_ctx, m_outputDoc, mediabox, 0, resources, content);

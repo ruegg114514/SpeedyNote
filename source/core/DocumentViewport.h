@@ -145,7 +145,6 @@ struct UndoAction {
         int pageIndex = -1;
         Document::TileCoord tileCoord = {0, 0};
         VectorStroke stroke;
-        bool fromNotes = false;          ///< True if this segment belongs to a notes column
     };
 
     // Single-stroke actions
@@ -631,14 +630,6 @@ public:
     const QMap<int, qreal>& sideNotesWidths() const { return m_sideNotesWidths; }
 
     /**
-     * @brief All notes strokes (pageIdx -> strokes) in notes-local coordinates.
-     *
-     * Exposed read-only for PDF notes-only export so live (possibly unsaved)
-     * strokes can be handed to the exporter.
-     */
-    const QMap<int, QVector<VectorStroke>>& sideNotesStrokes() const { return m_sideNotesStrokes; }
-
-    /**
      * @brief Set the width (document units) of a page's notes column.
      * @param width Width <= 0 removes the column for that page.
      * @param pageIndex
@@ -651,12 +642,7 @@ public:
     void setSideNotesDir(const QString& dir);
 
     /**
-     * @brief Clear all notes strokes for the current page.
-     */
-    void clearSideNotesCurrentPage();
-
-    /**
-     * @brief Save all notes strokes to disk.
+     * @brief Save the notes-column layout to disk.
      */
     void saveSideNotes();
 
@@ -3334,11 +3320,6 @@ private:
         }
     };
     LassoSelection m_lassoSelection;
-    // For a paged lasso that also captured notes-column strokes: the originating
-    // page and the indices (into m_sideNotesStrokes[thatPage]) that are selected.
-    // Kept parallel to the notes copies added to m_lassoSelection.selectedStrokes.
-    int m_lassoNotesPage = -1;
-    QVector<int> m_lassoNotesIndices;
     QPolygonF m_lassoPath;               ///< The lasso path being drawn
     bool m_isDrawingLasso = false;       ///< Currently drawing a lasso path
     
@@ -3961,7 +3942,6 @@ private:
     int m_touchResizeDividerPage = -1;     ///< Page whose notes divider is being resized by a finger (<0 = none)
     qreal m_touchResizeStartX = 0.0;       ///< Viewport X where the touch resize started
     qreal m_touchResizeStartWidth = 0.0;   ///< Column width when the touch resize started
-    QMap<int, QVector<VectorStroke>> m_sideNotesStrokes;  ///< Per-page notes strokes
     QString m_sideNotesDir;                 ///< Directory for notes persistence
     
     // ===== Page Layout Cache (Performance: O(1) page position lookup) =====
@@ -4476,18 +4456,6 @@ private:
      */
     void finishStrokeEdgeless();
 
-    // ===== Notes-column stroke splitting =====
-    // Splits an in-progress paged stroke (page-local coords) at the page's
-    // right edge when it crosses into that page's notes column. The on-page
-    // portion(s) are emitted as regular page strokes; the notes-column portions
-    // are emitted shifted into notes-local coordinates (x -= pageWidth). Both
-    // share a boundary point so the segments meet seamlessly. `pdfParts`/`notesParts`
-    // are filled; either may end up empty when the stroke never leaves/reaches
-    // that side.
-    void splitStrokeAtNotesBoundary(int pageIndex,
-                                    QVector<VectorStroke>& pdfParts,
-                                    QVector<VectorStroke>& notesParts) const;
-    
     /**
      * @brief Create a straight line stroke between two points (Task 2.9).
      * @param start Start point (document coords for edgeless, page coords for paged).
@@ -5029,7 +4997,6 @@ private:
 
     // ===== Side Notes Area Helpers =====
     int notesDividerPageAtViewport(const QPointF& vpPos) const;
-    int notesPageAtViewport(const QPointF& vpPos) const;
 
     /// Page-local X where a page's notes column begins, i.e. the body/notes
     /// boundary. The column is the page sheet's right-hand strip, so this is

@@ -198,19 +198,18 @@ public:
                                                     qreal pageHeightSn);
 
     /**
-     * @brief Provide live side-notes column data for a notes-only export.
+     * @brief Provide live side-notes column widths for a notes-only export.
      * @param widths Per-page notes column widths (pageIdx -> width; a page has a
      *               column iff present with width > 0)
-     * @param strokes Per-page notes strokes, stored in notes-local coordinates
-     *                (origin = left edge of the notes column)
      *
      * Only needed when PdfExportOptions::notesOnly is set. When the exporter is
      * used from a UI that owns the live DocumentViewport (e.g. MainWindow), pass
-     * the viewport's current data here so the export reflects unpersisted edits.
-     * Without a call, the exporter falls back to the persisted side_notes.json.
+     * the viewport's current widths here so the export reflects unpersisted
+     * changes. Without a call, the exporter falls back to the persisted
+     * side_notes.json. The column's ink is page content, so it is taken from the
+     * document's own pages either way.
      */
-    void setSideNotesData(const QMap<int, qreal>& widths,
-                          const QMap<int, QVector<VectorStroke>>& strokes);
+    void setSideNotesData(const QMap<int, qreal>& widths);
 
 signals:
     /**
@@ -441,10 +440,15 @@ private:
     PdfExportOptions m_options;
     QString m_lastError;  ///< Detailed error message from last failed operation
 
-    // Side-notes column data for notes-only export. Populated either via
+    // Side-notes column widths for notes-only export. Populated either via
     // setSideNotesData() (live viewport data) or loadSideNotesFromDisk().
     QMap<int, qreal> m_sideNotesWidths;                  ///< pageIdx -> column width (>0 = has column)
-    QMap<int, QVector<VectorStroke>> m_sideNotesStrokes; ///< pageIdx -> notes strokes
+    // Legacy column ink, populated only by loadSideNotesFromDisk(). A document
+    // written before the column became part of the page sheet keeps its column
+    // ink in side_notes.json rather than in its pages, so it is read here as the
+    // fallback for pages that have no body/notes split yet. Ink for a widened
+    // page comes from that page's own vector layers.
+    QMap<int, QVector<VectorStroke>> m_sideNotesStrokes; ///< pageIdx -> legacy notes strokes
 };
 
 #else // SPEEDYNOTE_MUPDF_EXPORT not defined
@@ -472,7 +476,7 @@ public:
         return result;
     }
     
-    void setSideNotesData(const QMap<int, qreal>&, const QMap<int, QVector<VectorStroke>>&) {}
+    void setSideNotesData(const QMap<int, qreal>&) {}
     
     void cancel() {}
     bool isExporting() const { return false; }

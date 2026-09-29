@@ -7303,61 +7303,18 @@ void DocumentViewport::finishStroke()
         return;
     }
     
-    // Paged mode: add to page's active layer
+    // Paged mode: add to page's active layer. The page sheet covers its own
+    // notes column, so a stroke drawn from the body into the column is simply
+    // one page stroke - there is no boundary to split at, no second container
+    // to route the far half into, and no way for the tail to go missing.
     Page* page = m_document ? m_document->page(m_activeDrawingPage) : nullptr;
     if (page) {
         VectorLayer* layer = page->activeLayer();
         if (layer) {
-            // ===== Notes-column crossing split =====
-            // A single continuous stroke drawn from the page across its right
-            // edge into the page's notes column must not be lost on pen-up: the
-            // page layer rasterizes into a page-sized cache that clips anything
-            // beyond the page's right edge, which would silently drop the
-            // notes-column portion. Split at that boundary - the on-page part
-            // commits to the page layer and the notes-column part is stored as
-            // a notes stroke (shifted into notes-local coordinates). Both keep
-            // a shared boundary point so the two segments meet seamlessly.
-            QVector<VectorStroke> pdfParts, notesParts;
-            splitStrokeAtNotesBoundary(m_activeDrawingPage, pdfParts, notesParts);
-
-            if (notesParts.isEmpty()) {
-                // No crossing: the plain, undo-able single-stroke path.
-                layer->addStroke(m_currentStroke);
-                m_document->markPageDirty(m_activeDrawingPage);
-                pushPageStrokeUndo(m_activeDrawingPage, UndoAction::AddStroke,
-                                   m_currentStroke, page->activeLayerIndex);
-            } else {
-                // Crossing: commit the on-page part(s) and the notes part(s) as
-                // one undo-able operation: undoing removes both halves, so a
-                // boundary-spanning stroke reverses cleanly instead of silently
-                // leaving the notes-column tail behind.
-                UndoAction undoAction;
-                undoAction.type = UndoAction::AddStroke;
-                undoAction.layerIndex = page->activeLayerIndex;
-
-                for (const VectorStroke& s : pdfParts) {
-                    layer->addStroke(s);
-                    UndoAction::StrokeSegment seg;
-                    seg.pageIndex = m_activeDrawingPage;
-                    seg.stroke = s;
-                    undoAction.segments.append(seg);
-                }
-                m_document->markPageDirty(m_activeDrawingPage);
-
-                QVector<VectorStroke>& noteList = m_sideNotesStrokes[m_activeDrawingPage];
-                for (const VectorStroke& s : notesParts) {
-                    noteList.append(s);
-                    UndoAction::StrokeSegment seg;
-                    seg.pageIndex = m_activeDrawingPage;
-                    seg.stroke = s;
-                    seg.fromNotes = true;
-                    undoAction.segments.append(seg);
-                }
-
-                pushUndoAction(undoAction);
-                emit strokesChanged();
-                emit documentModified();
-            }
+            layer->addStroke(m_currentStroke);
+            m_document->markPageDirty(m_activeDrawingPage);
+            pushPageStrokeUndo(m_activeDrawingPage, UndoAction::AddStroke,
+                               m_currentStroke, page->activeLayerIndex);
         }
     }
     
@@ -7382,140 +7339,6 @@ void DocumentViewport::finishStroke()
     // The cache is released on resize or when the widget is hidden.
     
     emit documentModified();
-}
-
-void DocumentViewport::splitStrokeAtNotesBoundary(int pageIndex,
-                                                  QVector<VectorStroke>& pdfParts,
-                                                  QVector<VectorStroke>& notesParts) const
-{
-    pdfParts.clear();
-    notesParts.clear();
-
-    Page* page = m_document ? m_document->page(pageIndex) : nullptr;
-    if (!page || page->size.width() <= 0.0) {
-        // No page / no meaningful boundary: keep everything as one page stroke.
-        pdfParts.append(m_currentStroke);
-        return;
-    }
-    const qreal notesW = sideNotesWidthFor(pageIndex);
-    if (notesW <= 0.0) {
-        // No notes column on this page: nothing to split.
-        pdfParts.append(m_currentStroke);
-        return;
-    }
-    // Split at the body/notes boundary: ink up to there belongs to the page
-    // bitmap and ink beyond it to the notes column.
-    const qreal pageW = notesBoundaryLocalX(page, pageIndex);
-
-    const int n = m_currentStroke.points.size();
-    if (n < 1) return;
-
-    // Fast path: no point crosses the page's right edge.
-    bool anyCrossing = false;
-    for (int i = 1; i < n; ++i) {
-        if ((m_currentStroke.points[i].pos.x() <= pageW)
-                != (m_currentStroke.points[i - 1].pos.x() <= pageW)) {
-            anyCrossing = true;
-            break;
-        }
-    }
-    if (!anyCrossing) {
-        pdfParts.append(m_currentStroke);
-        return;
-    }
-
-    const auto rawInNotes = [pageW](qreal x) { return x > pageW; };
-    const auto newId = []() {
-        return QUuid::createUuid().toString(QUuid::WithoutBraces);
-    };
-
-    // Multiple boundary crossings (page -> notes -> page, and so on) must NOT
-    // connect the exit and re-entry points with a line that cuts straight across
-    // the divider. So instead of building one page + one notes segment (which
-    // glued the two boundary points together), we emit one segment per contiguous
-    // run, flushing at every crossing. Each run shares the interpolated boundary
-    // point with its neighbour so adjacent runs literally touch and the printed
-    // line stays continuous.
-    QVector<QVector<StrokePoint>> pdfRuns;
-    QVector<QVector<StrokePoint>> notesRuns;
-
-    QVector<StrokePoint> curRun;
-    bool curInNotes = rawInNotes(m_currentStroke.points[0].pos.x());
-    StrokePoint seed = m_currentStroke.points[0];
-    if (curInNotes) seed.pos.rx() -= pageW;
-    curRun.append(seed);
-
-    const auto flushRun = [&]() {
-        if (curRun.isEmpty()) return;
-        if (curInNotes) notesRuns.append(curRun);
-        else pdfRuns.append(curRun);
-        curRun.clear();
-    };
-
-    for (int i = 1; i < n; ++i) {
-        const StrokePoint& cur = m_currentStroke.points[i];
-        const bool inNotes = rawInNotes(cur.pos.x());
-
-        if (inNotes == curInNotes) {
-            StrokePoint p = cur;
-            if (inNotes) p.pos.rx() -= pageW;
-            curRun.append(p);
-            continue;
-        }
-
-        // Boundary crossing: interpolate the shared point at x = pageW so the two
-        // neighbouring runs meet exactly (no gap, no overlap). Pressure is
-        // interpolated too so the seam has no thickness notch on the divider line.
-        // The same formula works in both directions (page->notes and notes->page)
-        // because numerator and denominator change sign together.
-        const StrokePoint& p0 = m_currentStroke.points[i - 1];
-        const qreal denom = cur.pos.x() - p0.pos.x();
-        qreal t = (qAbs(denom) < 1e-6) ? 0.0 : (pageW - p0.pos.x()) / denom;
-        t = qBound<qreal>(0.0, t, 1.0);
-
-        StrokePoint bp;                          // boundary point at x = pageW
-        bp.pos = p0.pos + (cur.pos - p0.pos) * t;
-        bp.pressure = p0.pressure + (cur.pressure - p0.pressure) * t;
-        bp.timestamp = cur.timestamp;
-
-        // Close the current run at the boundary (in its local coordinates) and
-        // open the opposite run starting on that same boundary point.
-        StrokePoint bpLocal = bp;
-        if (curInNotes) bpLocal.pos.rx() -= pageW;
-        curRun.append(bpLocal);
-        flushRun();
-
-        curInNotes = !curInNotes;
-        StrokePoint bpNext = bp;
-        if (curInNotes) bpNext.pos.rx() -= pageW;
-        curRun.append(bpNext);
-
-        StrokePoint curFit = cur;
-        if (curInNotes) curFit.pos.rx() -= pageW;
-        curRun.append(curFit);
-    }
-    flushRun();
-
-    for (const QVector<StrokePoint>& run : pdfRuns) {
-        if (run.size() < 2) continue;
-        VectorStroke s;
-        s.id = newId();
-        s.color = m_currentStroke.color;
-        s.baseThickness = m_currentStroke.baseThickness;
-        s.points = run;
-        s.updateBoundingBox();
-        pdfParts.append(s);
-    }
-    for (const QVector<StrokePoint>& run : notesRuns) {
-        if (run.size() < 2) continue;
-        VectorStroke s;
-        s.id = newId();
-        s.color = m_currentStroke.color;
-        s.baseThickness = m_currentStroke.baseThickness;
-        s.points = run;
-        s.updateBoundingBox();
-        notesParts.append(s);
-    }
 }
 
 void DocumentViewport::finishStrokeEdgeless()
@@ -7980,14 +7803,6 @@ void DocumentViewport::handlePointerPress_Lasso(const PointerEvent& pe)
     } else if (pe.pageHit.valid()) {
         pt = pe.pageHit.pagePoint;
         m_lassoSelection.sourcePageIndex = pe.pageHit.pageIndex;
-    } else if (notesPageAtViewport(pe.viewportPos) >= 0) {
-        // Notes-column support: anchor the path to the page the notes column
-        // belongs to and keep the path in page-local coordinates (x may exceed
-        // pageW out into the column). This is how the lasso can begin over the
-        // notes area even though the pointer is not over the page body itself.
-        m_lassoSelection.sourcePageIndex = notesPageAtViewport(pe.viewportPos);
-        QPointF pageOrigin = pagePosition(m_lassoSelection.sourcePageIndex);
-        pt = viewportToDocument(pe.viewportPos) - pageOrigin;
     } else {
         return;  // No valid page hit in paged mode
     }
@@ -13434,10 +13249,6 @@ void DocumentViewport::finalizeLassoSelection()
     // Restore the source page index for paged mode
     m_lassoSelection.sourcePageIndex = savedSourcePageIndex;
 
-    // Reset any notes-stroke selection left over from a previous lasso.
-    m_lassoNotesPage = -1;
-    m_lassoNotesIndices.clear();
-    
     if (m_document->isEdgeless()) {
         // ========== EDGELESS MODE ==========
         // Check strokes across all visible tiles
@@ -13532,31 +13343,6 @@ void DocumentViewport::finalizeLassoSelection()
             if (strokeIntersectsLasso(stroke, m_lassoPath)) {
                 m_lassoSelection.selectedStrokes.append(stroke);
                 m_lassoSelection.originalIndices.append(i);
-            }
-        }
-
-        // ===== Also capture this page's notes-column strokes inside the lasso =====
-        // Notes strokes are stored notes-local (origin is the body/notes
-        // boundary), so translate them to page-local before the hit test.
-        // NOTE: notes strokes are drawn point-by-point and their stored boundingBox
-        // is not maintained, so compute it on the translated copy here; relying on
-        // the stored box would reject every notes stroke and break the selection.
-        const QPointF notesOffset(
-            notesBoundaryLocalX(page, m_lassoSelection.sourcePageIndex), 0);
-        if (m_sideNotesStrokes.contains(m_lassoSelection.sourcePageIndex)) {
-            QVector<VectorStroke>& notes = m_sideNotesStrokes[m_lassoSelection.sourcePageIndex];
-            for (int idx = 0; idx < notes.size(); ++idx) {
-                const VectorStroke& ns = notes[idx];
-                VectorStroke docCopy = ns;
-                for (auto& pt : docCopy.points) pt.pos += notesOffset;
-                docCopy.updateBoundingBox();
-                if (!docCopy.boundingBox.intersects(lassoBounds)) continue;
-                if (strokeIntersectsLasso(docCopy, m_lassoPath)) {
-                    m_lassoNotesPage = m_lassoSelection.sourcePageIndex;
-                    m_lassoNotesIndices.append(idx);            // parallel to selection
-                    m_lassoSelection.selectedStrokes.append(docCopy);
-                    m_lassoSelection.originalIndices.append(-1); // -1 = a notes stroke
-                }
             }
         }
     }
@@ -14699,69 +14485,6 @@ void DocumentViewport::transformStrokePoints(VectorStroke& stroke, const QTransf
     stroke.updateBoundingBox();
 }
 
-namespace {
-
-// Split a polyline (document coordinates) at the vertical line x = bx. Emits
-// one left run and one right run per contiguous crossing. Each run shares its
-// interpolated boundary point with the neighbouring run so adjacent segments
-// touch exactly at x = bx (no gap). Flushing per run matters: a moved stroke
-// that weaves across the divider more than once must not have its disjoint
-// page-side segments joined by a straight line drawn straight across the notes
-// region (the divider-connector bug), and the page/notes parts must both be
-// committed instead of the half beyond the page edge being clipped by the
-// page-size stroke cache.
-void splitDocumentStrokeAtX(const QVector<StrokePoint>& doc, qreal bx,
-                            QVector<QVector<StrokePoint>>& leftRuns,
-                            QVector<QVector<StrokePoint>>& rightRuns)
-{
-    leftRuns.clear();
-    rightRuns.clear();
-    if (doc.isEmpty()) return;
-
-    const auto onLeft = [bx](qreal x) { return x <= bx + 1e-6; };
-
-    QVector<StrokePoint> cur;
-    bool curLeft = onLeft(doc[0].pos.x());
-    StrokePoint seed = doc[0];
-    cur.append(seed);
-
-    const auto flush = [&]() {
-        if (cur.isEmpty()) return;
-        if (curLeft) leftRuns.append(cur);
-        else rightRuns.append(cur);
-        cur.clear();
-    };
-
-    const int n = doc.size();
-    for (int i = 1; i < n; ++i) {
-        const StrokePoint& c = doc[i];
-        const bool cLeft = onLeft(c.pos.x());
-        if (cLeft == curLeft) {
-            cur.append(c);
-            continue;
-        }
-        // Boundary crossing: interpolate the shared point at x = bx.
-        const StrokePoint& p0 = doc[i - 1];
-        const qreal denom = c.pos.x() - p0.pos.x();
-        qreal t = qAbs(denom) < 1e-6 ? 0.0 : (bx - p0.pos.x()) / denom;
-        t = qBound<qreal>(0.0, t, 1.0);
-        StrokePoint bp;
-        bp.pos = p0.pos + (c.pos - p0.pos) * t;
-        bp.pressure = p0.pressure + (c.pressure - p0.pressure) * t;
-        bp.timestamp = c.timestamp;
-        // Close the current run at the boundary, then open the opposite run
-        // starting on the same boundary point.
-        cur.append(bp);
-        flush();
-        curLeft = !curLeft;
-        cur.append(bp);
-        cur.append(c);
-    }
-    flush();
-}
-
-} // namespace
-
 void DocumentViewport::applySelectionTransform()
 {
     if (!m_lassoSelection.isValid() || !m_document) {
@@ -14837,169 +14560,69 @@ void DocumentViewport::applySelectionTransform()
         }
         layer->invalidateStrokeCache();
 
-        // Add transformed strokes. Each selected stroke is relocated according to
-        // its transformed centre: if the centre lands inside some page's notes
-        // column it becomes a notes stroke (stored notes-local), otherwise it is
-        // placed in that page's VectorLayer (stored page-local). This lets a
-        // stroke move freely between the PDF body and the notes column instead
-        // of being confined to where it was created (or vanishing because page
-        // layer strokes are clipped to the page width).
+        // Add transformed strokes. Every selected stroke is an ordinary page
+        // stroke now, so a move only has to decide which page it lands on: the
+        // page sheet covers its own notes column, so one containment test
+        // answers that and a stroke may cross freely between the body and the
+        // column instead of having to be split and routed to two containers.
         QPointF srcOrigin = pagePosition(srcPage);
-        QVector<int> notesSrcToRemove;      // indices into m_sideNotesStrokes[notesPage] (source)
-        int notesSeq = 0;
-        for (int k = 0; k < m_lassoSelection.selectedStrokes.size(); ++k) {
-            const VectorStroke& stroke = m_lassoSelection.selectedStrokes[k];
-            const bool isNotesSource = (k < m_lassoSelection.originalIndices.size()
-                                        && m_lassoSelection.originalIndices[k] == -1);
+        for (const VectorStroke& stroke : m_lassoSelection.selectedStrokes) {
             VectorStroke transformedStroke = stroke;
             transformStrokePoints(transformedStroke, transform);
-            transformedStroke.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
             transformedStroke.updateBoundingBox();
 
             // Document-space centre of the moved stroke.
-            QPointF docCenter = srcOrigin + transformedStroke.boundingBox.center();
+            const QPointF docCenter = srcOrigin + transformedStroke.boundingBox.center();
 
-            // Determine the landing region across all pages.
+            // Landing page: the sheet containing the centre, else the nearest
+            // page by vertical centre so a stroke dropped into a page gap still
+            // lands somewhere sensible.
             int destPage = -1;
-            bool destNotes = false;
             for (int p = 0; p < m_document->pageCount(); ++p) {
                 Page* pp = m_document->page(p);
                 if (!pp) continue;
-                const qreal pw = pp->size.width();
-                const qreal ph = pp->size.height();
-                const qreal nw = sideNotesWidthFor(p);
-                const QPointF po = pagePosition(p);
-                // The page rect already covers its column, so one test decides
-                // the landing page; x says whether the ink landed on the body or
-                // in the notes strip.
-                if (QRectF(po, QSizeF(pw, ph)).contains(docCenter)) {
-                    destPage = p;
-                    destNotes = nw > 0.0
-                        && docCenter.x() >= po.x() + notesBoundaryLocalX(pp, p);
-                    break;
-                }
+                if (pageRect(p).contains(docCenter)) { destPage = p; break; }
             }
             if (destPage < 0) {
-                // Landed in a page gap -- snap to the nearest page by vertical centre.
                 qreal minDist = std::numeric_limits<qreal>::max();
                 for (int p = 0; p < m_document->pageCount(); ++p) {
-                    qreal dist = qAbs(docCenter.y() - pageRect(p).center().y());
+                    const qreal dist = qAbs(docCenter.y() - pageRect(p).center().y());
                     if (dist < minDist) { minDist = dist; destPage = p; }
                 }
                 if (destPage < 0) destPage = srcPage;
-                destNotes = false;
-            }
-
-            // Record source stroke removal. Page-layer sources were already
-            // removed above by id; notes sources are removed after the loop.
-            if (isNotesSource) {
-                if (m_lassoNotesPage >= 0 && notesSeq < m_lassoNotesIndices.size())
-                    notesSrcToRemove.append(m_lassoNotesIndices[notesSeq]);
-                ++notesSeq;
             }
 
             Page* dp = m_document->page(destPage);
             if (!dp) continue;
 
+            // src page-local -> document -> dest page-local, in one step: both
+            // pages are placed in the same document frame the centre came from.
             const QPointF dstOrigin = pagePosition(destPage);
-            const qreal pw = dp->size.width();
-            const qreal bx = dstOrigin.x() + pw;
-            const QPointF dstNotesOrigin = dstOrigin + QPointF(pw, 0);
-            const bool hasNotes = sideNotesWidthFor(destPage) > 0.0;
-
-            // Convert the (src page-local) transformed stroke into document space.
-            QVector<StrokePoint> docPts;
-            docPts.reserve(transformedStroke.points.size());
+            VectorStroke landed;
+            landed.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            landed.color = transformedStroke.color;
+            landed.baseThickness = transformedStroke.baseThickness;
+            landed.points.reserve(transformedStroke.points.size());
             for (const StrokePoint& p : transformedStroke.points) {
                 StrokePoint d = p;
-                d.pos = d.pos + srcOrigin;
-                docPts.append(d);
+                d.pos = d.pos + srcOrigin - dstOrigin;
+                landed.points.append(d);
             }
+            if (landed.points.size() < 2) continue;
+            landed.updateBoundingBox();
 
-            // Append one new page-layer stroke (converted to dest page-local).
-            auto appendPagePart = [&](QVector<StrokePoint>& pts) {
-                if (pts.size() < 2) return;
-                VectorStroke s;
-                s.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-                s.color = transformedStroke.color;
-                s.baseThickness = transformedStroke.baseThickness;
-                s.points = pts;
-                for (auto& pt : s.points) pt.pos -= dstOrigin;
-                s.updateBoundingBox();
-                while (dp->layerCount() <= m_lassoSelection.sourceLayerIndex)
-                    dp->addLayer(QString("Layer %1").arg(dp->layerCount() + 1));
-                VectorLayer* dstLayer = dp->layer(m_lassoSelection.sourceLayerIndex);
-                if (!dstLayer) return;
-                dstLayer->addStroke(s);
-                dstLayer->invalidateStrokeCache();
-                m_document->markPageDirty(destPage);
-                UndoAction::StrokeSegment seg;
-                seg.pageIndex = destPage;
-                seg.stroke = s;
-                undoAction.addedSegments.append(seg);
-            };
+            while (dp->layerCount() <= m_lassoSelection.sourceLayerIndex)
+                dp->addLayer(QString("Layer %1").arg(dp->layerCount() + 1));
+            VectorLayer* dstLayer = dp->layer(m_lassoSelection.sourceLayerIndex);
+            if (!dstLayer) continue;
+            dstLayer->addStroke(landed);
+            dstLayer->invalidateStrokeCache();
+            m_document->markPageDirty(destPage);
 
-            // Append one new notes-column stroke (converted to dest notes-local).
-            auto appendNotesPart = [&](QVector<StrokePoint>& pts) {
-                if (pts.size() < 2) return;
-                VectorStroke s;
-                s.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-                s.color = transformedStroke.color;
-                s.baseThickness = transformedStroke.baseThickness;
-                s.points = pts;
-                for (auto& pt : s.points) pt.pos -= dstNotesOrigin;
-                s.updateBoundingBox();
-                m_sideNotesStrokes[destPage].append(s);
-                m_document->markPageDirty(destPage);
-                if (!m_document->isEdgeless()) emit pageModified(destPage);
-                UndoAction::StrokeSegment seg;
-                seg.pageIndex = destPage;
-                seg.stroke = s;
-                seg.fromNotes = true;
-                undoAction.addedSegments.append(seg);
-            };
-
-            // If this page has a notes column, run the stroke (in document space)
-            // through the boundary splitter. It emits the page part(s) and notes
-            // part(s) separately - one run per contiguous crossing - so a stroke
-            // that straddles (or weaves across) the divider is committed to the
-            // right region(s) instead of half being clipped by the page-size
-            // stroke cache, and disjoint page-side segments are not joined by a
-            // connector line across the notes region. A stroke fully inside one
-            // region still yields exactly one part on that side.
-            if (hasNotes) {
-                QVector<QVector<StrokePoint>> leftRuns, rightRuns;
-                splitDocumentStrokeAtX(docPts, bx, leftRuns, rightRuns);
-                for (QVector<StrokePoint>& r : leftRuns) appendPagePart(r);
-                for (QVector<StrokePoint>& r : rightRuns) appendNotesPart(r);
-            } else if (destNotes) {
-                appendNotesPart(docPts);
-            } else {
-                appendPagePart(docPts);
-            }
-        }
-
-        // Remove the original notes strokes that were moved, so a notes drag is
-        // a move and not an (implicit) copy.
-        if (!notesSrcToRemove.isEmpty() && m_sideNotesStrokes.contains(m_lassoNotesPage)) {
-            QVector<VectorStroke>& ns = m_sideNotesStrokes[m_lassoNotesPage];
-            std::sort(notesSrcToRemove.begin(), notesSrcToRemove.end(), std::greater<int>());
-            for (int idx : notesSrcToRemove) {
-                if (idx >= 0 && idx < ns.size()) {
-                    UndoAction::StrokeSegment seg;
-                    seg.pageIndex = m_lassoNotesPage;
-                    seg.stroke = ns[idx];
-                    seg.fromNotes = true;
-                    undoAction.removedSegments.append(seg);
-                    ns.removeAt(idx);
-                }
-            }
-            if (ns.isEmpty())
-                m_sideNotesStrokes.remove(m_lassoNotesPage);
-            m_document->markPageDirty(m_lassoNotesPage);
-            if (!m_document->isEdgeless())
-                emit pageModified(m_lassoNotesPage);
-            emit documentModified();
+            UndoAction::StrokeSegment seg;
+            seg.pageIndex = destPage;
+            seg.stroke = landed;
+            undoAction.addedSegments.append(seg);
         }
 
         m_document->markPageDirty(srcPage);
@@ -15399,32 +15022,6 @@ void DocumentViewport::deleteSelection()
             m_document->markPageDirty(srcPage);
     }
 
-    // ===== Remove any notes-column strokes captured by the lasso =====
-    // Notes strokes are only available in paged mode. The selection logged
-    // them into m_lassoNotesPage + m_lassoNotesIndices (stored notes-local).
-    if (m_lassoNotesPage >= 0 && m_sideNotesStrokes.contains(m_lassoNotesPage)) {
-        QVector<VectorStroke> notes = m_sideNotesStrokes.value(m_lassoNotesPage);
-        QVector<int> toRemove = m_lassoNotesIndices;
-        // Descending order so removals don't shift earlier indices.
-        std::sort(toRemove.begin(), toRemove.end(),
-                  [](int a, int b) { return a > b; });
-        for (int idx : toRemove) {
-            if (idx < 0 || idx >= notes.size()) continue;
-            UndoAction::StrokeSegment seg;
-            seg.pageIndex = m_lassoNotesPage;
-            seg.stroke = notes[idx];
-            seg.fromNotes = true;
-            undoAction.segments.append(seg);
-            notes.removeAt(idx);
-        }
-        if (notes.isEmpty())
-            m_sideNotesStrokes.remove(m_lassoNotesPage);
-        else
-            m_sideNotesStrokes[m_lassoNotesPage] = notes;
-        if (m_document && !m_document->isEdgeless())
-            m_document->markPageDirty(m_lassoNotesPage);
-    }
-
     if (!undoAction.segments.isEmpty())
         pushUndoAction(undoAction);
     
@@ -15576,10 +15173,6 @@ void DocumentViewport::clearLassoSelection()
     m_lassoPath.clear();
     m_isDrawingLasso = false;
 
-    // Clear any notes-column portion of the selection.
-    m_lassoNotesPage = -1;
-    m_lassoNotesIndices.clear();
-    
     // P1: Reset cache state
     m_lastRenderedLassoIdx = 0;
     m_lassoPathLength = 0;
@@ -18299,7 +17892,6 @@ void DocumentViewport::eraseAt(const PointerEvent& pe)
             UndoAction::StrokeSegment seg;
             seg.pageIndex = pe.pageHit.pageIndex;
             seg.stroke = s;
-            seg.fromNotes = false;
             m_eraserUndoPending.segments.append(seg);
             m_eraserUndoPending.layerIndex = page->activeLayerIndex;
             m_eraserUndoPages.insert(pe.pageHit.pageIndex);
@@ -18379,7 +17971,6 @@ void DocumentViewport::eraseAtEdgeless(QPointF viewportPos)
                     UndoAction::StrokeSegment seg;
                     seg.tileCoord = {tx, ty};
                     seg.stroke = stroke;
-                    seg.fromNotes = false;
                     m_eraserUndoPending.segments.append(seg);
                 }
             }
@@ -19381,20 +18972,8 @@ void DocumentViewport::undo()
             default: break;
         }
     } else if (action.type == UndoAction::TransformSelection) {
-        // Remove added strokes (notes strokes live outside any VectorLayer)
+        // Remove added strokes
         for (const auto& seg : action.addedSegments) {
-            if (seg.fromNotes) {
-                if (m_sideNotesStrokes.contains(seg.pageIndex)) {
-                    QVector<VectorStroke>& notes = m_sideNotesStrokes[seg.pageIndex];
-                    for (int i = notes.size() - 1; i >= 0; --i) {
-                        if (notes[i].id == seg.stroke.id) { notes.removeAt(i); break; }
-                    }
-                    if (notes.isEmpty()) m_sideNotesStrokes.remove(seg.pageIndex);
-                }
-                if (m_document && !m_document->isEdgeless())
-                    m_document->markPageDirty(seg.pageIndex);
-                continue;
-            }
             Page* c = getContainer(m_document, seg, false);
             if (!c) continue;
             VectorLayer* layer = c->layer(action.layerIndex);
@@ -19404,12 +18983,6 @@ void DocumentViewport::undo()
         }
         // Restore removed strokes
         for (const auto& seg : action.removedSegments) {
-            if (seg.fromNotes) {
-                m_sideNotesStrokes[seg.pageIndex].append(seg.stroke);
-                if (m_document && !m_document->isEdgeless())
-                    m_document->markPageDirty(seg.pageIndex);
-                continue;
-            }
             Page* c = getContainer(m_document, seg, true);
             if (!c) continue;
             while (c->layerCount() <= action.layerIndex)
@@ -19461,28 +19034,6 @@ void DocumentViewport::undo()
         }
     } else {
         for (const auto& seg : action.segments) {
-            // Notes-column strokes live outside any VectorLayer.
-            if (seg.fromNotes) {
-                const bool undoingRemoval =
-                    (action.type == UndoAction::RemoveStroke
-                     || action.type == UndoAction::RemoveMultiple);
-                if (undoingRemoval) {
-                    // Undo of a removal = restore the stroke to the column.
-                    m_sideNotesStrokes[seg.pageIndex].append(seg.stroke);
-                } else {
-                    // Undo of an AddStroke = pull the stroke back out.
-                    if (m_sideNotesStrokes.contains(seg.pageIndex)) {
-                        QVector<VectorStroke>& notes = m_sideNotesStrokes[seg.pageIndex];
-                        for (int i = notes.size() - 1; i >= 0; --i) {
-                            if (notes[i].id == seg.stroke.id) { notes.removeAt(i); break; }
-                        }
-                        if (notes.isEmpty()) m_sideNotesStrokes.remove(seg.pageIndex);
-                    }
-                }
-                if (m_document && !m_document->isEdgeless())
-                    m_document->markPageDirty(seg.pageIndex);
-                continue;
-            }
             Page* c = getContainer(m_document, seg,
                                    action.type != UndoAction::AddStroke);
             if (!c) continue;
@@ -19876,20 +19427,8 @@ void DocumentViewport::redo()
             default: break;
         }
     } else if (action.type == UndoAction::TransformSelection) {
-        // Remove original strokes (redo the remove; notes live outside VectorLayer)
+        // Remove original strokes (redo the remove)
         for (const auto& seg : action.removedSegments) {
-            if (seg.fromNotes) {
-                if (m_sideNotesStrokes.contains(seg.pageIndex)) {
-                    QVector<VectorStroke>& notes = m_sideNotesStrokes[seg.pageIndex];
-                    for (int i = notes.size() - 1; i >= 0; --i) {
-                        if (notes[i].id == seg.stroke.id) { notes.removeAt(i); break; }
-                    }
-                    if (notes.isEmpty()) m_sideNotesStrokes.remove(seg.pageIndex);
-                }
-                if (m_document && !m_document->isEdgeless())
-                    m_document->markPageDirty(seg.pageIndex);
-                continue;
-            }
             Page* c = getContainer(m_document, seg, false);
             if (!c) continue;
             VectorLayer* layer = c->layer(action.layerIndex);
@@ -19899,12 +19438,6 @@ void DocumentViewport::redo()
         }
         // Add transformed strokes (redo the add)
         for (const auto& seg : action.addedSegments) {
-            if (seg.fromNotes) {
-                m_sideNotesStrokes[seg.pageIndex].append(seg.stroke);
-                if (m_document && !m_document->isEdgeless())
-                    m_document->markPageDirty(seg.pageIndex);
-                continue;
-            }
             Page* c = getContainer(m_document, seg, true);
             if (!c) continue;
             while (c->layerCount() <= action.layerIndex)
@@ -19956,28 +19489,6 @@ void DocumentViewport::redo()
         }
     } else {
         for (const auto& seg : action.segments) {
-            // Notes-column strokes live outside any VectorLayer.
-            if (seg.fromNotes) {
-                const bool redoingRemoval =
-                    (action.type == UndoAction::RemoveStroke
-                     || action.type == UndoAction::RemoveMultiple);
-                if (redoingRemoval) {
-                    // Redo of a removal = remove the stroke from the column again.
-                    if (m_sideNotesStrokes.contains(seg.pageIndex)) {
-                        QVector<VectorStroke>& notes = m_sideNotesStrokes[seg.pageIndex];
-                        for (int i = notes.size() - 1; i >= 0; --i) {
-                            if (notes[i].id == seg.stroke.id) { notes.removeAt(i); break; }
-                        }
-                        if (notes.isEmpty()) m_sideNotesStrokes.remove(seg.pageIndex);
-                    }
-                } else {
-                    // Redo of an AddStroke = put the stroke back in the column.
-                    m_sideNotesStrokes[seg.pageIndex].append(seg.stroke);
-                }
-                if (m_document && !m_document->isEdgeless())
-                    m_document->markPageDirty(seg.pageIndex);
-                continue;
-            }
             Page* c = getContainer(m_document, seg,
                                    action.type == UndoAction::AddStroke);
             if (!c) continue;
@@ -21490,29 +21001,6 @@ int DocumentViewport::notesDividerPageAtViewport(const QPointF& vpPos) const
     return -1;
 }
 
-void DocumentViewport::clearSideNotesCurrentPage()
-{
-    m_sideNotesStrokes.remove(m_currentPageIndex);
-    update();
-}
-
-int DocumentViewport::notesPageAtViewport(const QPointF& vpPos) const
-{
-    if (!m_document || m_document->isEdgeless()) return -1;
-    QPointF docPt = viewportToDocument(vpPos);
-    for (int i = 0; i < m_document->pageCount(); ++i) {
-        const qreal notesW = sideNotesWidthFor(i);
-        if (notesW <= 0.0) continue;
-        Page* page = m_document->page(i);
-        if (!page || page->size.width() <= 0.0) continue;
-        QPointF pos = pagePosition(i);
-        QRectF notesRect(pos.x() + notesBoundaryLocalX(page, i), pos.y(),
-                         notesW, page->size.height());
-        if (notesRect.contains(docPt)) return i;
-    }
-    return -1;
-}
-
 // ===== Eraser gesture throttling + undo batching (perf) =====
 
 bool DocumentViewport::shouldSkipEraserSample(const QPointF& viewportPos)
@@ -21614,7 +21102,9 @@ void DocumentViewport::saveSideNotes()
     // Only the per-page column widths live here. Notes ink is page content now,
     // so it travels in the page JSON with everything else; the widths are kept
     // here because they are the one part of the column that must be known
-    // without loading the page (layout, divider hit-test).
+    // without loading the page (layout, divider hit-test). The legacy `pages`
+    // array is deliberately not rewritten - the migration below consumes it on
+    // the one occasion it is still present.
     QJsonObject root;
 
     // Persist per-page column widths. A page has a notes column iff a width > 0

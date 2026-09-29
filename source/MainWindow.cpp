@@ -3544,11 +3544,11 @@ void MainWindow::showExportDialog()
         // Create exporter and export
         MuPdfExporter exporter;
         exporter.setDocument(doc);
-        // Notes-only export uses the live viewport data (may include unsaved
-        // strokes/columns) instead of the persisted side_notes.json.
+        // Notes-only export uses the live viewport widths, so unpersisted
+        // columns are included instead of the persisted side_notes.json. The ink
+        // is page content and is read off the document's pages.
         if (options.notesOnly && viewport) {
-            exporter.setSideNotesData(viewport->sideNotesWidths(),
-                                      viewport->sideNotesStrokes());
+            exporter.setSideNotesData(viewport->sideNotesWidths());
         }
         
         QApplication::setOverrideCursor(Qt::WaitCursor);
@@ -9029,18 +9029,16 @@ void MainWindow::toggleSideNotesPanel()
     DocumentViewport* vp = currentViewport();
     if (!vp) return;
 
-    // The notes strokes & per-page widths are loaded once when the document
-    // opens (MainWindow::loadSideNotes), so toggling ONLY shows/hides the
-    // column and must not reload them here. Calling vp->loadSideNotes() on
-    // every click would clear m_sideNotesStrokes and force a full repaint:
-    // a stroke the user just drew is still memory-only (it is committed to
-    // m_sideNotesStrokes without an immediate save), so clearing then
-    // reloading an empty file silently drops it, desyncs the notes undo
-    // history from the cleared map, and re-enters the render path on top of
-    // the just-toggled layout - which crashes on the close-then-reopen cycle
-    // described in the bug report. Only keep the directory wiring (cheap,
-    // so consecutive saves/dir may be set even if the open-time load was
-    // skipped for a doc that opened without notes).
+    // The per-page column widths are loaded once when the document opens
+    // (MainWindow::loadSideNotes), so toggling ONLY shows/hides the column and
+    // must not reload them here. loadSideNotes() clears the width map and
+    // rebuilds it from side_notes.json, and that file lags the in-memory state:
+    // a column the user just created or resized is still memory-only, so
+    // reloading on every click would silently discard it and re-enter the
+    // migration/layout path on top of the just-toggled geometry - which is the
+    // close-then-reopen crash described in the bug report. Only keep the
+    // directory wiring (cheap, so consecutive saves/dir may be set even if the
+    // open-time load was skipped for a doc that opened without notes).
     if (vp->document()) {
         const QString notesDir = vp->document()->notesPath();
         if (!notesDir.isEmpty()) {
