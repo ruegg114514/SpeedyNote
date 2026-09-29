@@ -4081,7 +4081,9 @@ private:
         Type activeType = None;                      ///< Currently active gesture type
         
         // Shared state
-        QPixmap cachedFrame;                         ///< Viewport snapshot for fast transform
+        /// Viewport snapshot for the gesture fast path. Opaque QImage, not
+        /// QPixmap: see grabOpaqueFrameImage(). Also blitted with drawImage().
+        QImage cachedFrame;
         qreal frameDevicePixelRatio = 1.0;           ///< Device pixel ratio when frame was captured
         qreal startZoom = 1.0;                       ///< Zoom level when gesture started
         QPointF startPan;                            ///< Pan offset when gesture started
@@ -4099,7 +4101,7 @@ private:
         
         void reset() {
             activeType = None;
-            cachedFrame = QPixmap();
+            cachedFrame = QImage();
             initialCentroidSet = false;
         }
     };
@@ -4204,6 +4206,16 @@ private:
      * real.
      */
     QPixmap grabOpaqueViewport();
+    /**
+     * @brief Opaque viewport snapshot as a QImage (Format_RGB32).
+     *
+     * The gesture fast path keeps the frame in this form and blits it with
+     * drawImage() so a full-viewport pan frame stays an opaque copy. A QPixmap
+     * may be stored internally as ARGB32_Premultiplied, which would put that
+     * blit - the single largest draw of a pan frame - on the per-pixel
+     * alpha-blend path for a frame that is fully opaque.
+     */
+    QImage grabOpaqueFrameImage();
     
     /**
      * @brief Update the current page index based on pan position.

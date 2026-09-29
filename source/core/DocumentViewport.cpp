@@ -3259,8 +3259,8 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
                 scaledOrigin += panDeltaPixels * relativeScale;
             }
             
-            painter.drawPixmap(QRectF(scaledOrigin, scaledSize), m_gesture.cachedFrame, 
-                              m_gesture.cachedFrame.rect());
+            painter.drawImage(QRectF(scaledOrigin, scaledSize), m_gesture.cachedFrame, 
+                              QRectF(m_gesture.cachedFrame.rect()));
         } else if (m_gesture.activeType == ViewportGestureState::Pan) {
             perfSample.setPath(ViewportPerfMonitor::FramePath::GesturePan);
             // PAN: Shift the cached frame by pan delta
@@ -3278,7 +3278,7 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
             // re-render the regions it no longer covers (the content entering
             // the viewport from off-screen) at the destination pan, so pages
             // scroll in during the drag instead of leaving a blank/stale strip.
-            painter.drawPixmap(panDeltaPixels, m_gesture.cachedFrame);
+            painter.drawImage(panDeltaPixels, m_gesture.cachedFrame);
 
             const QRectF coveredFrame(panDeltaPixels, logicalSize);
             const QRect vpRect = rect();
@@ -5130,7 +5130,7 @@ void DocumentViewport::beginZoomGesture(QPointF centerPoint)
     m_gesture.initialCentroidSet = true;
     
     // Capture current viewport as cached frame for fast scaling
-    m_gesture.cachedFrame = grabOpaqueViewport();
+    m_gesture.cachedFrame = grabOpaqueFrameImage();
     // Store device pixel ratio for correct scaling on high-DPI displays
     m_gesture.frameDevicePixelRatio = m_gesture.cachedFrame.devicePixelRatio();
     
@@ -5267,7 +5267,7 @@ void DocumentViewport::beginPanGesture()
     m_gesture.targetPan = m_panOffset;
     
     // Capture current viewport as cached frame for fast shifting
-    m_gesture.cachedFrame = grabOpaqueViewport();
+    m_gesture.cachedFrame = grabOpaqueFrameImage();
     // Store device pixel ratio for correct positioning on high-DPI displays
     m_gesture.frameDevicePixelRatio = m_gesture.cachedFrame.devicePixelRatio();
     
@@ -18070,38 +18070,53 @@ void DocumentViewport::eraseAtEdgeless(QPointF viewportPos)
 
 QPixmap DocumentViewport::grabOpaqueViewport()
 {
-    if (width() <= 0 || height() <= 0) {
-        return QPixmap();
-    }
-    
-    // Mirrors what grab() does, differing in the format it renders into and in
-    // leaving the child widgets out. Callers all blit this frame translated or
-    // scaled while the overlay children stay live at their fixed positions, so
-    // an included child would show up a second time as a ghost alongside the
-    // real one. render() draws children by default; the flags below say not to.
-    const qreal dpr = devicePixelRatioF();
-    QImage frame(QSize(qRound(width() * dpr), qRound(height() * dpr)),
-                 QImage::Format_RGB32);
+    const QImage frame = grabOpaqueFrameImage();
     if (frame.isNull()) {
         // Allocation failed; the slower snapshot beats none at all. Not grab(),
         // which takes no flags and would bake the overlays back in.
+        const qreal dpr = devicePixelRatioF();
         QPixmap fallback(QSize(qRound(width() * dpr), qRound(height() * dpr)));
         fallback.setDevicePixelRatio(dpr);
         fallback.fill(m_backgroundColor);
         render(&fallback, QPoint(), QRegion(), QWidget::DrawWindowBackground);
         return fallback;
     }
+    QPixmap snapshot = QPixmap::fromImage(frame);
+    // fromImage() may or may not carry the ratio across; callers scale by it.
+    snapshot.setDevicePixelRatio(frame.devicePixelRatio());
+    return snapshot;
+}
+
+QImage DocumentViewport::grabOpaqueFrameImage()
+{
+    if (width() <= 0 || height() <= 0) {
+        return QImage();
+    }
+
+    // Mirrors what grab() does, differing in the format it renders into and in
+    // leaving the child widgets out. Callers all blit this frame translated or
+    // scaled while the overlay children stay live at their fixed positions, so
+    // an included child would show up a second time as a ghost alongside the
+    // real one. render() draws children by default; the flags below say not to.
+    //
+    // Returned as a QImage rather than a QPixmap on purpose: the pan path blits
+    // this frame over the whole viewport once per gesture frame, and a QPixmap
+    // may be stored internally as ARGB32_Premultiplied, which puts that blit on
+    // the per-pixel alpha-blend path even though the frame is fully opaque.
+    // Format_RGB32 through drawImage() keeps it an opaque copy.
+    const qreal dpr = devicePixelRatioF();
+    QImage frame(QSize(qRound(width() * dpr), qRound(height() * dpr)),
+                 QImage::Format_RGB32);
+    if (frame.isNull()) {
+        return QImage();
+    }
     frame.setDevicePixelRatio(dpr);
-    
+
     // RGB32 has no transparency to start from, so any pixel render() leaves
     // untouched would show uninitialized memory rather than blank canvas.
     frame.fill(m_backgroundColor);
     render(&frame, QPoint(), QRegion(), QWidget::DrawWindowBackground);
-    
-    QPixmap snapshot = QPixmap::fromImage(std::move(frame));
-    // fromImage() may or may not carry the ratio across; callers scale by it.
-    snapshot.setDevicePixelRatio(dpr);
-    return snapshot;
+    return frame;
 }
 
 void DocumentViewport::fillBackgroundAround(QPainter& painter, const QRectF& coveredLogical)
@@ -20343,9 +20358,14 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
     
     // 6. Draw page border (optional, for visual separation)
     // CUSTOMIZABLE: Page border color (theme setting)
-    // The border does not need to be redrawn every time the page is rendered. 
-    painter.setPen(QPen(QColor(180, 180, 180), 1.0 / m_zoomLevel));  // Light gray border
-    painter.drawRect(pageRect);
+    // The border does not need to be redrawn every time the page is rendered,
+    // and on an exposed-strip frame it costs an antialiased stroke over a rect
+    // that is mostly outside the (region-clipped) strip. The post-gesture full
+    // repaint draws it once the user stops.
+    if (!m_gestureStripRender) {
+        painter.setPen(QPen(QColor(180, 180, 180), 1.0 / m_zoomLevel));  // Light gray border
+        painter.drawRect(pageRect);
+    }
 }
 
 // ===== Edgeless Mode Rendering (Phase E2) =====
