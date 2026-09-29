@@ -1387,20 +1387,15 @@ Page* Document::page(int index)
     
     // Use find() instead of [] to avoid inserting nullptr if something went wrong
     // (defensive programming - loadPageFromDisk should have inserted it)
+    // NOTE: deliberately no reindex of the layout index here. The on-disk page
+    // JSON is only rewritten when the page is saved, so it can be OLDER than the
+    // index, and mirroring it back would let a reload roll the index to a stale
+    // geometry - which is how a widened page lost its column as far as layout was
+    // concerned. pageSizeAt()/pageBodyWidthAt() prefer a loaded page instead, so
+    // the index only ever has to be right for pages that are not in memory, and
+    // savePageToDisk() refreshes it whenever a page is written.
     it = m_loadedPages.find(uuid);
-    if (it == m_loadedPages.end()) {
-        return nullptr;
-    }
-
-    // First touch after a load: the page's own JSON is the authority on its
-    // body/notes split, so mirror it into the layout index now. This is what
-    // lets the index lag in exactly one direction - a bundle written before the
-    // split was indexed carries no bodyWidth until its pages are touched, and
-    // the notes-column migration touches every page that has a column. Doing it
-    // here rather than on every page() call keeps the hot paths free of a map
-    // lookup.
-    indexPageGeometry(uuid, *it->second);
-    return it->second.get();
+    return it != m_loadedPages.end() ? it->second.get() : nullptr;
 }
 
 const Page* Document::page(int index) const
@@ -1472,8 +1467,19 @@ QSizeF Document::pageSizeAt(int index) const
         return QSizeF();
     }
     
-    // Use cached metadata (avoids loading the full page)
+    // A page that is IN MEMORY is the answer. The index exists so layout can be
+    // computed for pages that are not loaded - it is a cache, and a cache that
+    // disagrees with what it caches produces a page that draws one way and
+    // hit-tests another. That is exactly how a widened page stopped being a work
+    // area: the page object carried the notes column while the index did not,
+    // and the page rect, hit test, pan clamp and content size all read the index.
     QString uuid = m_pageOrder[index];
+    auto loaded = m_loadedPages.find(uuid);
+    if (loaded != m_loadedPages.end() && !loaded->second->size.isEmpty()) {
+        return loaded->second->size;
+    }
+
+    // Not loaded: use cached metadata so layout does not have to load the page
     auto it = m_pageMetadata.find(uuid);
     if (it != m_pageMetadata.end()) {
         return it->second.size;
@@ -1490,12 +1496,21 @@ qreal Document::pageBodyWidthAt(int index) const
         return 0.0;
     }
 
-    // Metadata only, deliberately: the whole point is to answer without loading
-    // the page, for consumers that lay out many pages at once. A page that has
-    // never been touched therefore reports "no column" if its bundle predates
-    // this field, which is the safe direction - the frame falls back to the
-    // sheet and the content is drawn uniformly inside it.
-    auto it = m_pageMetadata.find(m_pageOrder[index]);
+    // Loaded page first, for the same reason as pageSizeAt(): it is the thing
+    // the index is a cache of.
+    const QString uuid = m_pageOrder[index];
+    auto loaded = m_loadedPages.find(uuid);
+    if (loaded != m_loadedPages.end()) {
+        return loaded->second->bodyWidth;
+    }
+
+    // Otherwise the index, deliberately without loading the page: answering
+    // without a load is the point of this accessor, because the thumbnail strip
+    // uses it to lay out many pages at once. A page that has never been loaded
+    // reports "no column" if its bundle predates this field, which is the safe
+    // direction - the frame falls back to the sheet and the content is drawn
+    // uniformly inside it.
+    auto it = m_pageMetadata.find(uuid);
     return it != m_pageMetadata.end() ? it->second.bodyWidth : 0.0;
 }
 

@@ -20911,18 +20911,56 @@ void DocumentViewport::setSideNotesDir(const QString& dir)
 
 bool DocumentViewport::hasSideNotesOnPage(int pageIndex) const
 {
-    return m_sideNotesWidths.value(pageIndex, 0.0) > 0.0;
+    return sideNotesWidthFor(pageIndex) > 0.0;
 }
 
 qreal DocumentViewport::sideNotesWidthFor(int pageIndex) const
 {
+    if (!m_document) return 0.0;
+
+    // The column is page GEOMETRY, so ask the page: its sheet is the body plus
+    // the column, and Page::bodyWidth says where the body ends. Deriving it that
+    // way makes the width impossible to lose - a notebook whose side_notes.json
+    // was written empty still knows which pages carry a column, so the divider
+    // handle stays where the column is, and switching a page's column off
+    // removes that page's own column instead of stacking a second one on top.
+    if (!m_document->isEdgeless()) {
+        const QSizeF sheet = m_document->pageSizeAt(pageIndex);
+        const qreal body = m_document->pageBodyWidthAt(pageIndex);
+        if (sheet.width() > 0.0 && body > 0.0 && body < sheet.width()) {
+            return sheet.width() - body;
+        }
+    }
+
+    // Pages written before the column became part of the page sheet kept the
+    // width only in side_notes.json, which loadSideNotes() reads into this map
+    // for the one-time migration.
     return m_sideNotesWidths.value(pageIndex, 0.0);
+}
+
+QMap<int, qreal> DocumentViewport::sideNotesWidths() const
+{
+    QMap<int, qreal> widths;
+    if (!m_document || m_document->isEdgeless()) {
+        return widths;
+    }
+    for (int i = 0; i < m_document->pageCount(); ++i) {
+        const qreal w = sideNotesWidthFor(i);
+        if (w > 0.0) {
+            widths.insert(i, w);
+        }
+    }
+    return widths;
 }
 
 void DocumentViewport::setSideNotesWidthOnPage(int pageIndex, qreal width)
 {
     if (pageIndex < 0) return;
-    const qreal oldWidth = m_sideNotesWidths.value(pageIndex, 0.0);
+    // Derived rather than read from the map: after a reopen the map can be empty
+    // while the page still carries its column, and treating oldWidth as 0 there
+    // would make the new body the whole sheet - doubling the page on every
+    // resize.
+    const qreal oldWidth = sideNotesWidthFor(pageIndex);
     if (qFuzzyCompare(oldWidth, width)) return;   // No change
 
     // The body is everything the sheet has besides the column, so it is
@@ -21122,8 +21160,13 @@ void DocumentViewport::saveSideNotes()
 
     // Persist per-page column widths. A page has a notes column iff a width > 0
     // entry exists in the map; the column is closed by omitting the page key.
+    // Written from the DERIVED widths, not from m_sideNotesWidths: the map holds
+    // only what was read back from a legacy file, so persisting it would rot this
+    // file into an empty one - which is how a notebook ended up with columns it
+    // no longer admitted to having.
+    const QMap<int, qreal> widths = sideNotesWidths();
     QJsonObject widthsObj;
-    for (auto it = m_sideNotesWidths.begin(); it != m_sideNotesWidths.end(); ++it) {
+    for (auto it = widths.constBegin(); it != widths.constEnd(); ++it) {
         if (it.value() > 0.0) {
             widthsObj[QString::number(it.key())] = it.value();
         }

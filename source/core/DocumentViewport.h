@@ -622,12 +622,13 @@ public:
     qreal sideNotesWidthFor(int pageIndex) const;
 
     /**
-     * @brief All notes-column widths (pageIdx -> width, only entries > 0).
+     * @brief Column widths for every page that has one (pageIdx -> width).
      *
-     * Exposed read-only for PDF notes-only export so live (possibly unsaved)
-     * columns can be handed to the exporter.
+     * Exposed for PDF notes-only export so live (possibly unsaved) columns can
+     * be handed to the exporter. Derived from page geometry like
+     * sideNotesWidthFor(), so it does not depend on side_notes.json existing.
      */
-    const QMap<int, qreal>& sideNotesWidths() const { return m_sideNotesWidths; }
+    QMap<int, qreal> sideNotesWidths() const;
 
     /**
      * @brief Set the width (document units) of a page's notes column.

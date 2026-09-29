@@ -2060,9 +2060,8 @@ void ControlPanelDialog::createStylusTab() {
     PalmRejectionSettings& pr = PalmRejectionSettings::instance();
 
     QLabel *intro = new QLabel(
-        tr("Guards that stop a resting hand from panning, zooming or drawing. "
-           "Switch a guard off to disable it completely, or tune its value. "
-           "Changes apply immediately."), content);
+        tr("用来阻止搁在屏幕上的手掌触发平移、缩放或书写。关掉某一项即可彻底禁用它，"
+           "也可以调整它的数值。改动立即生效。"), content);
     intro->setWordWrap(true);
     intro->setStyleSheet("color: gray; font-size: 10px;");
     layout->addWidget(intro);
@@ -2123,62 +2122,54 @@ void ControlPanelDialog::createStylusTab() {
         values.push_back(value);
     };
 
-    addSection(tr("Stylus vs. touch"));
-    addGuard(tr("Ignore touch while the stylus is in range"),
-             tr("Forces touch gestures off while the pen hovers or presses, and restores "
-                "them once it leaves. The strongest guard, and the only one that is off "
-                "by default."),
+    addSection(tr("笔与触摸"));
+    addGuard(tr("笔在附近时忽略触摸"),
+             tr("笔悬停或落笔期间强制关闭触摸手势，笔离开后恢复。这是最强的一道防线，"
+                "也是唯一默认关闭的一项。"),
              &pr.stylusSuppressEnabled, &pr.stylusRestoreDelayMs,
-             0, 5000, 100, tr(" ms"), tr("Restore delay:"));
-    addGuard(tr("Delay each gesture so the stylus can veto it"),
-             tr("A palm lands as an ordinary touch before the pen is noticed. The gesture "
-                "waits this long before starting; if the pen appears inside the window the "
-                "gesture is cancelled outright. 0 = start immediately."),
+             0, 5000, 100, tr(" ms"), tr("恢复延迟："));
+    addGuard(tr("手势延迟启动，留给笔否决的机会"),
+             tr("手掌落下时通常先被当成普通触摸，随后才发现是笔。手势会等待这段时间再开始；"
+                "若在这段窗口内出现笔，手势直接取消。0 = 立即开始。"),
              &pr.gestureGraceEnabled, &pr.gestureGraceMs,
-             0, 1000, 10, tr(" ms"), tr("Grace window:"));
-    addGuard(tr("Release touch after the stylus stops reporting"),
-             tr("Restarted by every pen event. On expiry the pen has been silent this long "
-                "and touch is released - the safety net for drivers that never send "
-                "TabletRelease."),
+             0, 1000, 10, tr(" ms"), tr("宽限窗口："));
+    addGuard(tr("笔停止上报后释放触摸"),
+             tr("每个笔事件都会重置此计时。超时说明笔已静默这么久，于是释放触摸 —— "
+                "这是为那些从不发送 TabletRelease 的驱动兜底。"),
              &pr.stylusGuardEnabled, &pr.stylusGuardMs,
-             0, 2000, 25, tr(" ms"), tr("Silence allowed:"));
-    addGuard(tr("Release touch after the stylus stops hovering"),
-             tr("Restarted by every tablet event. On expiry the pen counts as gone. This is "
-                "the main release path on Windows/Wacom, whose drivers often omit "
-                "TabletLeaveProximity."),
+             0, 2000, 25, tr(" ms"), tr("允许静默："));
+    addGuard(tr("笔停止悬停后释放触摸"),
+             tr("每个数位板事件都会重置此计时。超时即认为笔已离开。Windows/Wacom 的驱动"
+                "常常不发 TabletLeaveProximity，所以这是主要的释放路径。"),
              &pr.stylusProximityEnabled, &pr.stylusProximityMs,
-             0, 2000, 25, tr(" ms"), tr("Proximity timeout:"));
+             0, 2000, 25, tr(" ms"), tr("接近超时："));
 
-    addSection(tr("Resting hand"));
-    addGuard(tr("Treat a multi-point contact as a resting hand"),
-             tr("This many simultaneous touch points is a hand on the glass, not fingers: "
-                "any in-flight stroke is cancelled and pen input is refused until the hand "
-                "lifts."),
+    addSection(tr("搁手"));
+    addGuard(tr("多点接触判定为搁手"),
+             tr("同时有这么多触摸点，说明是手掌压在屏幕上而不是手指：进行中的笔画会被取消，"
+                "并且拒绝笔输入，直到手掌离开。"),
              &pr.palmContactEnabled, &pr.palmContactPoints,
-             2, 10, 1, QString(), tr("Touch points:"));
-    addGuard(tr("Ignore touch briefly after a gesture is rejected"),
-             tr("Stops the hand settling back down from immediately starting a pan. Also "
-                "covers stale touch state after sleep/wake."),
+             2, 10, 1, QString(), tr("触点数："));
+    addGuard(tr("手势被拒后短暂忽略触摸"),
+             tr("防止手掌重新落下时立刻又开始平移。也覆盖睡眠/唤醒后残留的触摸状态。"),
              &pr.touchCooldownEnabled, &pr.touchCooldownMs,
-             0, 2000, 50, tr(" ms"), tr("Cooldown:"));
+             0, 2000, 50, tr(" ms"), tr("冷却时间："));
 
-    addSection(tr("Gesture stabilisation"));
-    addGuard(tr("Lock a one-finger drag to one axis"),
-             tr("Stops a slightly diagonal swipe from scrolling and drifting at the same "
-                "time."),
+    addSection(tr("手势防抖"));
+    addGuard(tr("单指拖动锁定单一轴向"),
+             tr("避免略微斜的滑动同时产生滚动和漂移。"),
              &pr.scrollAxisLockEnabled, &pr.scrollLockDecidePx,
-             0, 200, 2, tr(" px"), tr("Decide after:"));
-    addGuard(tr("Require a clear two-finger movement before zooming"),
-             tr("Finger distance must change by this much before zoom engages, so a "
-                "two-finger pan does not jitter the zoom level."),
+             0, 200, 2, tr(" px"), tr("判定距离："));
+    addGuard(tr("双指需有明确位移才缩放"),
+             tr("手指间距必须先变化这么多，缩放才会介入，避免双指平移时缩放级别抖动。"),
              &pr.zoomDeadZoneEnabled, &pr.zoomActivationPercent,
-             1, 100, 1, tr(" %"), tr("Distance change:"));
-    addGuard(tr("Recognise a short multi-finger press as a tap"),
-             tr("A press longer than this counts as a gesture instead of a tap."),
+             1, 100, 1, tr(" %"), tr("距离变化："));
+    addGuard(tr("短促的多指按压判定为点按"),
+             tr("按压超过这个时长就按手势处理，不再算点按。"),
              &pr.tapDetectionEnabled, &pr.tapMaxDurationMs,
-             50, 2000, 25, tr(" ms"), tr("Max tap:"));
+             50, 2000, 25, tr(" ms"), tr("最长点按："));
 
-    QPushButton *resetButton = new QPushButton(tr("Reset anti-mistouch to defaults"), content);
+    QPushButton *resetButton = new QPushButton(tr("恢复防误触默认值"), content);
     layout->addWidget(resetButton);
     connect(resetButton, &QPushButton::clicked, this,
             [this, boxes, spins, flags, values]() {
@@ -2194,7 +2185,7 @@ void ControlPanelDialog::createStylusTab() {
     });
 
     layout->addStretch();
-    tabWidget->addTab(stylusTab, tr("Palm Rejection"));
+    tabWidget->addTab(stylusTab, tr("防误触"));
 }
 
 /*
