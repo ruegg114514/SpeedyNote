@@ -9,6 +9,7 @@
 #include "ObjectConstraints.h"      // Page containment for inserted objects
 #include "TouchGestureHandler.h"
 #include "PalmRejectionSettings.h"
+#include "ViewportPerfSettings.h"    // Gesture snapshot resolution knob
 // Note: ShortcutManager.h no longer needed here - all shortcuts handled by MainWindow
 #include "MarkdownNote.h"           // Phase M.2: For markdown note creation
 #include "../layers/VectorLayer.h"
@@ -3278,7 +3279,25 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
             // re-render the regions it no longer covers (the content entering
             // the viewport from off-screen) at the destination pan, so pages
             // scroll in during the drag instead of leaving a blank/stale strip.
-            painter.drawImage(panDeltaPixels, m_gesture.cachedFrame);
+            //
+            // A downsampled gesture frame (ViewportPerfSettings) is smaller
+            // than the viewport, so the point overload - which draws 1:1 in
+            // device pixels - would no longer cover the window. Draw it with
+            // an explicit target rect instead, snapping the delta to the
+            // device pixel grid so the nearest-neighbour upscale does not
+            // shimmer as the fractional sampling phase changes frame to frame.
+            const bool downsampledFrame =
+                m_gesture.frameDevicePixelRatio + 0.001 < devicePixelRatioF();
+            if (downsampledFrame) {
+                const qreal snapDpr = devicePixelRatioF();
+                panDeltaPixels.setX(qRound(panDeltaPixels.x() * snapDpr) / snapDpr);
+                panDeltaPixels.setY(qRound(panDeltaPixels.y() * snapDpr) / snapDpr);
+                painter.drawImage(QRectF(panDeltaPixels, logicalSize),
+                                  m_gesture.cachedFrame,
+                                  QRectF(m_gesture.cachedFrame.rect()));
+            } else {
+                painter.drawImage(panDeltaPixels, m_gesture.cachedFrame);
+            }
 
             const QRectF coveredFrame(panDeltaPixels, logicalSize);
             const QRect vpRect = rect();
@@ -3305,39 +3324,57 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
                 }
                 painter.fillRect(exposedRegion.boundingRect(), m_backgroundColor);
 
-                if (m_document->isEdgeless()) {
-                    // renderEdgelessMode() positions tiles via m_panOffset,
-                    // which is still the gesture-start value during the drag, so
-                    // compensate by the pan delta (== panDeltaPixels) that the
-                    // shifted frame already represents to land at the destination.
-                    painter.translate(panDeltaPixels);
-                    renderEdgelessMode(painter, exposedRegion.boundingRect());
-                } else {
-                    painter.translate(-m_gesture.targetPan.x() * m_zoomLevel,
-                                      -m_gesture.targetPan.y() * m_zoomLevel);
-                    painter.scale(m_zoomLevel, m_zoomLevel);
+                // Low-spec mode: leave the freshly exposed band blank for this
+                // frame instead of re-rendering its content (paper fill, PDF
+                // page image, stroke caches). Measured at ~7 ms per frame on an
+                // Atom-class tablet at full screen - about a third of the paint
+                // budget - and paint is what keeps the frame from fitting into
+                // the next vsync slot. Gesture end repaints the band in full, so
+                // the only cost is a solid background-coloured band trailing the
+                // drag. Deliberately not applied while inertia is gliding (finger
+                // already up): the band would then sit still on screen for the
+                // whole coast, which reads as a rendering fault rather than as
+                // motion blur.
+                const bool inertiaGliding =
+                    m_touchHandler && m_touchHandler->isInertiaActive();
+                const bool skipStrip =
+                    viewportPerf().skipStripDuringPan && !inertiaGliding;
 
-                    // Pages that become visible at the destination position.
-                    // visiblePages() is based on the (still unchanged) start pan,
-                    // so enumerate the pages the destination viewport will show.
-                    ensurePageLayoutCache();
-                    const QRectF destViewRect(
-                        m_gesture.targetPan,
-                        QSizeF(width() / m_zoomLevel, height() / m_zoomLevel));
-                    const QVector<int> destVisible = pagesIntersectingRect(destViewRect);
-                    // Strip repaint: flag so renderPage() can drop the most
-                    // expensive per-frame work (Direct-tier vector redraws) for
-                    // this one paint; the post-gesture full repaint restores it.
-                    m_gestureStripRender = true;
-                    for (int pageIdx : destVisible) {
-                        Page* page = m_document->page(pageIdx);
-                        if (!page) continue;
-                        painter.save();
-                        painter.translate(pagePosition(pageIdx));
-                        renderPage(painter, page, pageIdx);
-                        painter.restore();
+                if (!skipStrip) {
+                    if (m_document->isEdgeless()) {
+                        // renderEdgelessMode() positions tiles via m_panOffset,
+                        // which is still the gesture-start value during the drag, so
+                        // compensate by the pan delta (== panDeltaPixels) that the
+                        // shifted frame already represents to land at the destination.
+                        painter.translate(panDeltaPixels);
+                        renderEdgelessMode(painter, exposedRegion.boundingRect());
+                    } else {
+                        painter.translate(-m_gesture.targetPan.x() * m_zoomLevel,
+                                          -m_gesture.targetPan.y() * m_zoomLevel);
+                        painter.scale(m_zoomLevel, m_zoomLevel);
+
+                        // Pages that become visible at the destination position.
+                        // visiblePages() is based on the (still unchanged) start pan,
+                        // so enumerate the pages the destination viewport will show.
+                        ensurePageLayoutCache();
+                        const QRectF destViewRect(
+                            m_gesture.targetPan,
+                            QSizeF(width() / m_zoomLevel, height() / m_zoomLevel));
+                        const QVector<int> destVisible = pagesIntersectingRect(destViewRect);
+                        // Strip repaint: flag so renderPage() can drop the most
+                        // expensive per-frame work (Direct-tier vector redraws) for
+                        // this one paint; the post-gesture full repaint restores it.
+                        m_gestureStripRender = true;
+                        for (int pageIdx : destVisible) {
+                            Page* page = m_document->page(pageIdx);
+                            if (!page) continue;
+                            painter.save();
+                            painter.translate(pagePosition(pageIdx));
+                            renderPage(painter, page, pageIdx);
+                            painter.restore();
+                        }
+                        m_gestureStripRender = false;
                     }
-                    m_gestureStripRender = false;
                 }
                 painter.restore();
             }
@@ -5129,8 +5166,11 @@ void DocumentViewport::beginZoomGesture(QPointF centerPoint)
     m_gesture.initialCentroid = centerPoint;
     m_gesture.initialCentroidSet = true;
     
-    // Capture current viewport as cached frame for fast scaling
-    m_gesture.cachedFrame = grabOpaqueFrameImage();
+    // Capture current viewport as cached frame for fast scaling. On low-spec
+    // devices the settings may ask for a downsampled snapshot: the drag goes
+    // soft but every gesture frame reads far fewer pixels.
+    m_gesture.cachedFrame =
+        grabOpaqueFrameImage(viewportPerf().gestureFrameScale());
     // Store device pixel ratio for correct scaling on high-DPI displays
     m_gesture.frameDevicePixelRatio = m_gesture.cachedFrame.devicePixelRatio();
     
@@ -5266,8 +5306,10 @@ void DocumentViewport::beginPanGesture()
     m_gesture.startPan = m_panOffset;
     m_gesture.targetPan = m_panOffset;
     
-    // Capture current viewport as cached frame for fast shifting
-    m_gesture.cachedFrame = grabOpaqueFrameImage();
+    // Capture current viewport as cached frame for fast shifting. See
+    // beginZoomGesture() for why the settings may downsample this snapshot.
+    m_gesture.cachedFrame =
+        grabOpaqueFrameImage(viewportPerf().gestureFrameScale());
     // Store device pixel ratio for correct positioning on high-DPI displays
     m_gesture.frameDevicePixelRatio = m_gesture.cachedFrame.devicePixelRatio();
     
@@ -18087,7 +18129,7 @@ QPixmap DocumentViewport::grabOpaqueViewport()
     return snapshot;
 }
 
-QImage DocumentViewport::grabOpaqueFrameImage()
+QImage DocumentViewport::grabOpaqueFrameImage(qreal scale)
 {
     if (width() <= 0 || height() <= 0) {
         return QImage();
@@ -18116,6 +18158,21 @@ QImage DocumentViewport::grabOpaqueFrameImage()
     // untouched would show uninitialized memory rather than blank canvas.
     frame.fill(m_backgroundColor);
     render(&frame, QPoint(), QRegion(), QWidget::DrawWindowBackground);
+
+    // Low-spec gesture mode: hand back a downsampled frame whose logical size
+    // still matches the widget. Deliberately grab-then-scale instead of
+    // rendering into a smaller image directly: QWidget::render()'s behaviour
+    // with a target devicePixelRatio different from the widget's is not
+    // guaranteed across Qt versions, whereas QImage::scaled() has no such
+    // ambiguity. This runs once per gesture, so the full-res grab plus a
+    // nearest-neighbour downscale is cheap; the per-frame saving comes from
+    // every gesture-frame blit reading 1/scale^2 fewer source pixels.
+    if (scale > 0.0 && scale < 0.999) {
+        frame = frame.scaled(QSize(qMax(1, qRound(frame.width() * scale)),
+                                   qMax(1, qRound(frame.height() * scale))),
+                             Qt::IgnoreAspectRatio, Qt::FastTransformation);
+        frame.setDevicePixelRatio(dpr * scale);
+    }
     return frame;
 }
 

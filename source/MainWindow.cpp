@@ -5,6 +5,7 @@
 #include "core/Document.h"          // Phase 3.1: Document class
 #include "core/Page.h"              // Phase P.4.6: For thumbnail rendering
 #include "core/PalmRejectionSettings.h"  // Anti-mistouch guards (configurable)
+#include "core/ViewportPerfSettings.h"   // Gesture snapshot resolution knob
 #include "layers/VectorLayer.h"     // Phase P.4.6: For thumbnail rendering
 #include <QPainter>                 // Phase P.4.6: For thumbnail rendering
 #include "ui/sidebars/LayerPanel.h" // Phase S1: Moved to sidebars folder
@@ -5721,7 +5722,11 @@ void MainWindow::loadUserSettings() {
     
     // Load every anti-mistouch guard (toggles + timings) in one go.
     palmRejection().load();
-    
+
+    // Load viewport performance knobs (gesture snapshot resolution). Read
+    // live at gesture begin, so a load here is all the wiring it needs.
+    viewportPerf().load();
+
     // Load theme settings
     loadThemeSettings();
 }

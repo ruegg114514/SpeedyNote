@@ -131,6 +131,13 @@ private:
     // input code, not Linux-only.
     QWidget *stylusTab;
     void createStylusTab();
+
+    // === Performance tab ===
+    // Backed by ViewportPerfSettings. Currently one knob: the resolution of
+    // the gesture snapshot, which trades drag sharpness for pan/zoom FPS on
+    // low-spec devices.
+    QWidget *perfTab;
+    void createPerformanceTab();
 };
 
 #endif // CONTROLPANELDIALOG_H

@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "core/PalmRejectionSettings.h"
+#include "core/ViewportPerfSettings.h"
 
 // Android/iOS keyboard fix (BUG-A001)
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
@@ -172,6 +173,7 @@ ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
     createThemeTab();
     createLanguageTab();
     createStylusTab();
+    createPerformanceTab();
     createCacheTab();
     createAboutTab();
     
@@ -2186,6 +2188,88 @@ void ControlPanelDialog::createStylusTab() {
 
     layout->addStretch();
     tabWidget->addTab(stylusTab, tr("防误触"));
+}
+
+
+// ===== Performance =====
+//
+// One knob for now: the gesture snapshot resolution, backed by
+// ViewportPerfSettings. A pan/zoom frame must repaint the whole viewport, so
+// on low-spec devices the cap is per-frame memory traffic, not content
+// complexity; capturing the gesture snapshot at a fraction of the device
+// resolution cuts the read side of that traffic by the square of the factor,
+// at the cost of a softer image while the fingers move. The viewport reads
+// the value at gesture begin, so a change applies to the very next drag.
+
+void ControlPanelDialog::createPerformanceTab() {
+    perfTab = new QWidget(this);
+    QVBoxLayout *layout = new QVBoxLayout(perfTab);
+
+    ViewportPerfSettings& vp = ViewportPerfSettings::instance();
+
+    QLabel *intro = new QLabel(
+        tr("低配设备优化。滑动/缩放时每帧都要重写整屏像素，瓶颈在内存带宽；"
+           "把手势期间的画面快照降到更低的分辨率，可以直接减少每帧要搬运的像素，"
+           "帧率随之提高。代价是拖动中画面略模糊，松手后立即恢复清晰。改动立即生效。"),
+        perfTab);
+    intro->setWordWrap(true);
+    intro->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(intro);
+
+    QHBoxLayout *row = new QHBoxLayout();
+    QLabel *label = new QLabel(tr("手势渲染精度："), perfTab);
+    label->setMinimumWidth(150);
+    QComboBox *combo = new QComboBox(perfTab);
+    combo->addItem(tr("100%（默认，最清晰）"), 100);
+    combo->addItem(tr("67%（略模糊，更流畅）"), 67);
+    combo->addItem(tr("50%（低配设备推荐）"), 50);
+    combo->setToolTip(tr("拖动手势期间画面快照的分辨率。数值越低，每帧要搬运的像素越少，"
+                         "帧率越高，代价是拖动中画面更模糊。"));
+    const int idx = combo->findData(vp.gestureFrameScalePercent);
+    combo->setCurrentIndex(idx >= 0 ? idx : 0);
+    row->addWidget(label);
+    row->addWidget(combo);
+    row->addStretch();
+    layout->addLayout(row);
+
+    QLabel *hint = new QLabel(
+        tr("提示：按 F10 打开性能 HUD，用 Pan 一行的 fps / paint 数值验证效果。"),
+        perfTab);
+    hint->setWordWrap(true);
+    hint->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(hint);
+
+    connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [combo](int index) {
+        ViewportPerfSettings& s = ViewportPerfSettings::instance();
+        s.gestureFrameScalePercent = combo->itemData(index).toInt();
+        s.save();
+        // No MainWindow hook needed: DocumentViewport reads the value each
+        // time a gesture begins.
+    });
+
+    // Skip the pan strip repaint: while the finger is moving, the band the
+    // shifted snapshot exposes is filled with the background colour instead of
+    // being re-rendered. Roughly a third of the paint budget on low-end
+    // hardware; the band is restored the moment the gesture ends. Inertia
+    // (finger up, still gliding) always renders the band, so the release
+    // animation looks intact.
+    QCheckBox *skipStripBox = new QCheckBox(
+        tr("拖动时不重绘新露出的边缘（低配设备提速）"), perfTab);
+    skipStripBox->setChecked(vp.skipStripDuringPan);
+    skipStripBox->setToolTip(tr(
+        "手指拖动期间，画面移动后新露出来的那条边缘不去画内容，只填页面底色，"
+        "松手瞬间一次性补全。能省下约三分之一的绘制开销，代价是拖动中会看到一条纯色带。"
+        "惯性滑行阶段（手指已抬起）不受影响，正常渲染。"));
+    layout->addWidget(skipStripBox);
+    connect(skipStripBox, &QCheckBox::toggled, this, [](bool on) {
+        ViewportPerfSettings& s = ViewportPerfSettings::instance();
+        s.skipStripDuringPan = on;
+        s.save();
+    });
+
+    layout->addStretch();
+    tabWidget->addTab(perfTab, tr("性能"));
 }
 
 /*

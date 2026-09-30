@@ -4214,8 +4214,14 @@ private:
      * may be stored internally as ARGB32_Premultiplied, which would put that
      * blit - the single largest draw of a pan frame - on the per-pixel
      * alpha-blend path for a frame that is fully opaque.
+     *
+     * `scale` < 1.0 returns the snapshot downsampled to that fraction of the
+     * device resolution (devicePixelRatio adjusted so its logical size still
+     * matches the widget). Gesture callers pass
+     * ViewportPerfSettings::gestureFrameScale() here to cut the per-frame
+     * memory traffic of the blit on low-spec devices.
      */
-    QImage grabOpaqueFrameImage();
+    QImage grabOpaqueFrameImage(qreal scale = 1.0);
     
     /**
      * @brief Update the current page index based on pan position.
