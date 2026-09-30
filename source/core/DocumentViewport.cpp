@@ -3340,41 +3340,52 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
                 const bool skipStrip =
                     viewportPerf().skipStripDuringPan && !inertiaGliding;
 
-                if (!skipStrip) {
-                    if (m_document->isEdgeless()) {
+                if (m_document->isEdgeless()) {
+                    // Edgeless has no page geometry to fall back on: the flat
+                    // canvas fill above is already the correct backdrop, so
+                    // skipping means drawing nothing more for this frame.
+                    if (!skipStrip) {
                         // renderEdgelessMode() positions tiles via m_panOffset,
                         // which is still the gesture-start value during the drag, so
                         // compensate by the pan delta (== panDeltaPixels) that the
                         // shifted frame already represents to land at the destination.
                         painter.translate(panDeltaPixels);
                         renderEdgelessMode(painter, exposedRegion.boundingRect());
-                    } else {
-                        painter.translate(-m_gesture.targetPan.x() * m_zoomLevel,
-                                          -m_gesture.targetPan.y() * m_zoomLevel);
-                        painter.scale(m_zoomLevel, m_zoomLevel);
-
-                        // Pages that become visible at the destination position.
-                        // visiblePages() is based on the (still unchanged) start pan,
-                        // so enumerate the pages the destination viewport will show.
-                        ensurePageLayoutCache();
-                        const QRectF destViewRect(
-                            m_gesture.targetPan,
-                            QSizeF(width() / m_zoomLevel, height() / m_zoomLevel));
-                        const QVector<int> destVisible = pagesIntersectingRect(destViewRect);
-                        // Strip repaint: flag so renderPage() can drop the most
-                        // expensive per-frame work (Direct-tier vector redraws) for
-                        // this one paint; the post-gesture full repaint restores it.
-                        m_gestureStripRender = true;
-                        for (int pageIdx : destVisible) {
-                            Page* page = m_document->page(pageIdx);
-                            if (!page) continue;
-                            painter.save();
-                            painter.translate(pagePosition(pageIdx));
-                            renderPage(painter, page, pageIdx);
-                            painter.restore();
-                        }
-                        m_gestureStripRender = false;
                     }
+                } else {
+                    painter.translate(-m_gesture.targetPan.x() * m_zoomLevel,
+                                      -m_gesture.targetPan.y() * m_zoomLevel);
+                    painter.scale(m_zoomLevel, m_zoomLevel);
+
+                    // Pages that become visible at the destination position.
+                    // visiblePages() is based on the (still unchanged) start pan,
+                    // so enumerate the pages the destination viewport will show.
+                    ensurePageLayoutCache();
+                    const QRectF destViewRect(
+                        m_gesture.targetPan,
+                        QSizeF(width() / m_zoomLevel, height() / m_zoomLevel));
+                    const QVector<int> destVisible = pagesIntersectingRect(destViewRect);
+                    // Strip repaint: flag so renderPage() can drop the most
+                    // expensive per-frame work (Direct-tier vector redraws) for
+                    // this one paint; the post-gesture full repaint restores it.
+                    m_gestureStripRender = true;
+                    // In the low-spec mode renderPage() additionally stops after
+                    // the background layer, so the band keeps showing paper (and
+                    // a PDF/image background, and ruled lines) while the finger
+                    // moves - only the ink and objects wait for the gesture to
+                    // end. That is what makes the difference between "a page
+                    // scrolling in" and "a grey hole in the canvas".
+                    m_stripBackgroundOnly = skipStrip;
+                    for (int pageIdx : destVisible) {
+                        Page* page = m_document->page(pageIdx);
+                        if (!page) continue;
+                        painter.save();
+                        painter.translate(pagePosition(pageIdx));
+                        renderPage(painter, page, pageIdx);
+                        painter.restore();
+                    }
+                    m_stripBackgroundOnly = false;
+                    m_gestureStripRender = false;
                 }
                 painter.restore();
             }
@@ -20280,7 +20291,18 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
             }
             break;
     }
-    
+
+    // Low-spec gesture mode (see ViewportPerfSettings::skipStripDuringPan):
+    // the freshly exposed band is being repainted once per gesture frame while
+    // the finger moves, so stop here - the page now reads as a page (paper,
+    // PDF/custom background, grid or ruled pattern are all drawn above) and
+    // only the ink and the objects are missing until the gesture ends. That
+    // drops the stroke-cache blit and every object, which is the expensive
+    // part of this strip.
+    if (m_stripBackgroundOnly) {
+        return;
+    }
+
     // 3. Render objects with affinity = -1 (below all stroke layers)
     // This is for objects like pasted test paper images that should appear
     // underneath all strokes.

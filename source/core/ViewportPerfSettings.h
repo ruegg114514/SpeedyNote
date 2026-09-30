@@ -31,15 +31,18 @@ struct ViewportPerfSettings {
     // gestures; the post-gesture full repaint is unaffected.
     int gestureFrameScalePercent = 100;
 
-    // ---- Skip the pan strip repaint (low-spec "blank band" mode) ----
-    // While a pan gesture is actually moving (finger down), do not re-render
-    // the band of content the shifted snapshot exposes: fill it with the
-    // background colour for this frame and let the gesture-end repaint draw
-    // it properly. On an Atom-class tablet that band costs ~7 ms per frame -
-    // roughly a third of the paint budget - and paint is what keeps the frame
-    // from fitting into the next vsync slot. Cost: a solid band trails the
-    // drag. Inertia (finger up, still gliding) deliberately keeps rendering
-    // the band, so the release animation stays visually intact.
+    // ---- Render only the page background in the pan strip ----
+    // While a pan gesture is actually moving (finger down), the band of content
+    // that the shifted snapshot exposes is repainted with the page background
+    // layer only (paper colour, PDF/custom background image, grid or ruled
+    // pattern) instead of a full page composite: ink and objects are dropped
+    // for those frames and restored by the gesture-end repaint. The stroke
+    // cache blit and the objects are the expensive part of that band on
+    // low-end hardware. Visually the incoming content still reads as a page
+    // scrolling in - the band shows paper, and a ruled page even shows its
+    // lines - it just has no ink in it until the finger stops. Inertia (finger
+    // up, still gliding) always renders the band in full, so the release
+    // animation stays intact.
     bool skipStripDuringPan = false;
 
     // ===== Access =====

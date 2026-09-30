@@ -2248,19 +2248,20 @@ void ControlPanelDialog::createPerformanceTab() {
         // time a gesture begins.
     });
 
-    // Skip the pan strip repaint: while the finger is moving, the band the
-    // shifted snapshot exposes is filled with the background colour instead of
-    // being re-rendered. Roughly a third of the paint budget on low-end
-    // hardware; the band is restored the moment the gesture ends. Inertia
-    // (finger up, still gliding) always renders the band, so the release
-    // animation looks intact.
+    // Low-spec pan strip: while the finger is moving, the band the shifted
+    // snapshot exposes is repainted with the page background layer only, so
+    // the incoming content still looks like a page (paper, PDF background,
+    // ruled lines) but has no ink for those frames. Drops the stroke-cache
+    // blit and the objects, which is the expensive part of that band.
     QCheckBox *skipStripBox = new QCheckBox(
-        tr("拖动时不重绘新露出的边缘（低配设备提速）"), perfTab);
+        tr("拖动时新露出的边缘只画页面底纹（低配设备提速）"), perfTab);
     skipStripBox->setChecked(vp.skipStripDuringPan);
     skipStripBox->setToolTip(tr(
-        "手指拖动期间，画面移动后新露出来的那条边缘不去画内容，只填页面底色，"
-        "松手瞬间一次性补全。能省下约三分之一的绘制开销，代价是拖动中会看到一条纯色带。"
-        "惯性滑行阶段（手指已抬起）不受影响，正常渲染。"));
+        "手指拖动期间，画面移动后新露出来的那条边缘只画页面背景"
+        "（纸色、PDF/图片底、网格或横线），不画笔画和对象，松手瞬间一次性补全。"
+        "省掉的是这块区域里最贵的笔画层与对象渲染。\n"
+        "视觉上滑进来的仍然是一页纸（横线本连横线都在），只是拖动过程中暂时没有墨水。\n"
+        "惯性滑行阶段（手指已抬起）不受影响，照常完整渲染。"));
     layout->addWidget(skipStripBox);
     connect(skipStripBox, &QCheckBox::toggled, this, [](bool on) {
         ViewportPerfSettings& s = ViewportPerfSettings::instance();

@@ -4112,6 +4112,13 @@ private:
     /// full render would do - notably Direct-tier vector stroke redraws - is
     /// skipped here and picked up by the post-gesture full repaint.
     bool m_gestureStripRender = false;
+    /// Set together with m_gestureStripRender in the low-spec "skip strip
+    /// content" mode: renderPage() then draws only the page background layer
+    /// (paper colour, PDF/custom background image, grid or ruled pattern) and
+    /// returns before objects and stroke layers. The freshly exposed band
+    /// keeps looking like a page scrolling in - just without ink for the
+    /// frames the finger is moving - instead of showing the canvas colour.
+    bool m_stripBackgroundOnly = false;
     QTimer* m_gestureTimeoutTimer = nullptr;  ///< Fallback gesture end detection
     static constexpr int GESTURE_TIMEOUT_MS = 3000;  ///< Timeout for gesture end fallback (3s)
     bool m_backtickHeld = false;  ///< Track backtick (`) key for deferred vertical pan
