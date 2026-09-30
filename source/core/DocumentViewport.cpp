@@ -3262,6 +3262,56 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
             
             painter.drawImage(QRectF(scaledOrigin, scaledSize), m_gesture.cachedFrame, 
                               QRectF(m_gesture.cachedFrame.rect()));
+
+            // Low-spec mode: a scaled frame can expose a border on any side, and
+            // that border used to stay canvas-grey for the whole pinch - which
+            // reads as a hole punched in the page rather than as motion. Fill it
+            // with the paper colour of the page(s) it belongs to. Flat paper
+            // only, on purpose: these frames run at the pinch rate, so a full
+            // page composite (PDF blit, ink) is exactly what this mode exists to
+            // avoid.
+            if (viewportPerf().skipStripDuringPan && m_document
+                && !m_document->isEdgeless()) {
+                QRegion border(rect());
+                const QRect coveredAligned =
+                    QRectF(scaledOrigin, scaledSize).toAlignedRect().intersected(rect());
+                if (!coveredAligned.isEmpty())
+                    border = border.subtracted(QRegion(coveredAligned));
+                if (!border.isEmpty()) {
+                    ensurePageLayoutCache();
+                    // The scaled frame maps gesture-start viewport coordinates to
+                    // the screen, so a page's rect on screen is
+                    // scaledOrigin + (pagePos - startPan) * startZoom * relativeScale.
+                    // Enumerate the union of the pages visible at both ends of the
+                    // gesture, since the frame can only show those.
+                    QSet<int> candidates;
+                    for (int idx : visiblePages())
+                        candidates.insert(idx);
+                    const qreal targetZoom = m_gesture.targetZoom;
+                    if (targetZoom > 0) {
+                        const QRectF destViewRect(
+                            m_gesture.targetPan,
+                            QSizeF(width() / targetZoom, height() / targetZoom));
+                        for (int idx : pagesIntersectingRect(destViewRect))
+                            candidates.insert(idx);
+                    }
+                    painter.save();
+                    painter.setClipRegion(border);
+                    for (int pageIdx : candidates) {
+                        Page* page = m_document->page(pageIdx);
+                        if (!page) continue;
+                        const QPointF pageTopLeft =
+                            (pagePosition(pageIdx) - m_gesture.startPan) * m_gesture.startZoom;
+                        const QRectF pageOnScreen(
+                            scaledOrigin + pageTopLeft * relativeScale,
+                            QSizeF(page->size.width() * m_gesture.startZoom * relativeScale,
+                                   page->size.height() * m_gesture.startZoom * relativeScale));
+                        if (pageOnScreen.intersects(QRectF(rect())))
+                            painter.fillRect(pageOnScreen, paperColorForPage(page));
+                    }
+                    painter.restore();
+                }
+            }
         } else if (m_gesture.activeType == ViewportGestureState::Pan) {
             perfSample.setPath(ViewportPerfMonitor::FramePath::GesturePan);
             // PAN: Shift the cached frame by pan delta

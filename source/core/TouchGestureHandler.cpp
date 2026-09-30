@@ -582,6 +582,8 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
             const auto& point = *activePoints.first();
             m_lastPos = SN_TP_POS(point);
             m_panActive = true;
+            m_panPendingDelta = QPointF();
+            m_panDeadZonePassed = palmRejection().panDeadZonePx <= 0;
             
             m_velocitySamples.clear();
             m_velocityTimer.start();
@@ -605,7 +607,29 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
             const auto& point = *activePoints.first();
             QPointF currentPos = SN_TP_POS(point);
             QPointF delta = currentPos - m_lastPos;
-            
+            m_lastPos = currentPos;
+
+            // Pan dead zone (PalmRejectionSettings::panDeadZonePx): a resting
+            // finger or palm reports a pixel or two of wobble, and without a
+            // tolerance every wobble drags the canvas - which is what makes a
+            // hand resting on the glass look like the page is shivering. Stay
+            // completely still until the accumulated movement leaves the zone,
+            // then apply the whole pending delta so no real motion is lost.
+            // Velocity sampling is skipped inside the zone as well, so lifting
+            // the finger there cannot kick off inertia from that same noise.
+            if (!m_panDeadZonePassed) {
+                m_panPendingDelta += delta;
+                const qreal deadZone = palmRejection().panDeadZonePx;
+                if (std::sqrt(m_panPendingDelta.x() * m_panPendingDelta.x() +
+                              m_panPendingDelta.y() * m_panPendingDelta.y()) < deadZone) {
+                    event->accept();
+                    return true;
+                }
+                delta = m_panPendingDelta;
+                m_panPendingDelta = QPointF();
+                m_panDeadZonePassed = true;
+            }
+
             // Track velocity for inertia (pixels per ms, negated for correct direction)
             qint64 elapsed = m_velocityTimer.elapsed();
             if (elapsed > 0) {
@@ -634,7 +658,6 @@ bool TouchGestureHandler::handleTouchEvent(QTouchEvent* event)
             // Update pan via deferred API (uses cached frame for smooth display)
             m_viewport->updatePanGesture(panDelta);
             
-            m_lastPos = currentPos;
             event->accept();
             return true;
         }
@@ -924,6 +947,8 @@ void TouchGestureHandler::activatePendingGesture()
         m_lastPos = m_lastTouchPositions.constBegin().value();
         m_panActive = true;
         m_pinchActive = false;
+        m_panPendingDelta = QPointF();
+        m_panDeadZonePassed = palmRejection().panDeadZonePx <= 0;
 
         m_velocitySamples.clear();
         m_velocityTimer.start();
@@ -975,7 +1000,11 @@ void TouchGestureHandler::endTouchPan(bool startInertia)
     m_panActive = false;
     
     // TG.3: Calculate average velocity and potentially start inertia
-        if (startInertia && !m_velocitySamples.isEmpty()) {
+    // PalmRejectionSettings::inertiaEnabled switches the glide off entirely:
+    // the canvas then stops the moment the finger lifts (many users prefer
+    // that on a slippery panel, and it removes the second source of
+    // resting-hand drift - the release gliding on micro-movement noise).
+        if (startInertia && palmRejection().inertiaEnabled && !m_velocitySamples.isEmpty()) {
         // Calculate average velocity from recent samples (pixels per ms)
             QPointF avgVelocity(0, 0);
         for (const QPointF& velocity : m_velocitySamples) {

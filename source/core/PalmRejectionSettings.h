@@ -84,6 +84,24 @@ struct PalmRejectionSettings {
     bool tapDetectionEnabled = true;
     int  tapMaxDurationMs    = 300;
 
+    // ---- 10. Free-scroll inertia ----
+    // A released pan keeps gliding, decaying by INERTIA_FRICTION per frame.
+    // Turning it off makes the canvas stop dead when the finger lifts. Two
+    // reasons to offer this: on a slippery glass panel the glide can feel out
+    // of control, and it is the second half of the "resting hand drift"
+    // complaint - micro-movement of a resting finger produces velocity
+    // samples, and the release then glides on them.
+    bool inertiaEnabled = true;
+
+    // ---- 11. Pan dead zone ----
+    // A resting finger or palm is never perfectly still: the digitiser reports
+    // a pixel or two of wobble, and every wobble used to move the canvas.
+    // With this many pixels of tolerance the canvas does not move at all until
+    // the finger has travelled this far from where the pan started, and no
+    // velocity is sampled inside the zone (so releasing there cannot start
+    // inertia either). 0 = previous behaviour (no tolerance).
+    int panDeadZonePx = 0;
+
     // ===== Access =====
 
     /// Process-wide instance. Main thread only (QSettings and the settings
@@ -141,6 +159,8 @@ struct PalmRejectionSettings {
         zoomActivationPercent  = s.value(QStringLiteral("zoomActivationPercent"), d.zoomActivationPercent).toInt();
         tapDetectionEnabled    = s.value(QStringLiteral("tapDetection"), d.tapDetectionEnabled).toBool();
         tapMaxDurationMs       = s.value(QStringLiteral("tapMaxDurationMs"), d.tapMaxDurationMs).toInt();
+        inertiaEnabled         = s.value(QStringLiteral("inertiaEnabled"), d.inertiaEnabled).toBool();
+        panDeadZonePx          = s.value(QStringLiteral("panDeadZonePx"), d.panDeadZonePx).toInt();
         const bool migrated    = s.value(QStringLiteral("legacyMigrated"), false).toBool();
         s.endGroup();
 
@@ -181,6 +201,8 @@ struct PalmRejectionSettings {
         s.setValue(QStringLiteral("zoomActivationPercent"), zoomActivationPercent);
         s.setValue(QStringLiteral("tapDetection"), tapDetectionEnabled);
         s.setValue(QStringLiteral("tapMaxDurationMs"), tapMaxDurationMs);
+        s.setValue(QStringLiteral("inertiaEnabled"), inertiaEnabled);
+        s.setValue(QStringLiteral("panDeadZonePx"), panDeadZonePx);
         s.endGroup();
     }
 
@@ -203,6 +225,7 @@ struct PalmRejectionSettings {
         scrollLockBreakoutPx  = qBound(0, scrollLockBreakoutPx, 500);
         zoomActivationPercent = qBound(1, zoomActivationPercent, 100);
         tapMaxDurationMs      = qBound(50, tapMaxDurationMs, 2000);
+        panDeadZonePx         = qBound(0, panDeadZonePx, 200);
     }
 };
 

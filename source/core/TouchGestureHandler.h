@@ -166,6 +166,17 @@ private:
     QVector<QPointF> m_velocitySamples;      ///< Recent velocity samples (pixels/ms) for averaging
     QElapsedTimer m_velocityTimer;           ///< Timer for velocity calculation
     static constexpr int MAX_VELOCITY_SAMPLES = 5;  ///< Max samples to keep
+
+    // ===== Pan dead zone (PalmRejectionSettings::panDeadZonePx) =====
+    /// Movement accumulated while the pan is still inside the dead zone. The
+    /// zone exists because a resting finger wobbles by a pixel or two and that
+    /// used to drag the canvas around; while it is active nothing is panned and
+    /// nothing is sampled for inertia.
+    QPointF m_panPendingDelta;
+    /// False until the accumulated movement leaves the dead zone. Reset to
+    /// `panDeadZonePx <= 0` whenever a pan activates, so with the feature off
+    /// the update path behaves exactly as before.
+    bool m_panDeadZonePassed = true;
     
     // ===== Inertia Animation =====
     QTimer* m_inertiaTimer = nullptr;        ///< Timer for inertia animation frames

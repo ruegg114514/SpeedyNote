@@ -2171,10 +2171,48 @@ void ControlPanelDialog::createStylusTab() {
              &pr.tapDetectionEnabled, &pr.tapMaxDurationMs,
              50, 2000, 25, tr(" ms"), tr("最长点按："));
 
+    addSection(tr("滑动手感"));
+
+    QCheckBox *inertiaBox = new QCheckBox(tr("松手后继续滑行（惯性滚动）"), content);
+    inertiaBox->setChecked(pr.inertiaEnabled);
+    inertiaBox->setToolTip(tr(
+        "关闭后，手指一离开屏幕画面立刻停住，不再继续滑行。\n"
+        "如果你觉得滑动手感太“飘”，或者手搁在屏幕上不动时画面会自己轻微漂移，"
+        "可以关掉它。"));
+    layout->addWidget(inertiaBox);
+    connect(inertiaBox, &QCheckBox::toggled, this, [](bool on) {
+        PalmRejectionSettings::instance().inertiaEnabled = on;
+        PalmRejectionSettings::instance().save();
+    });
+
+    QHBoxLayout *deadZoneRow = new QHBoxLayout();
+    QLabel *deadZoneLabel = new QLabel(tr("手指静止抖动容差："), content);
+    deadZoneLabel->setMinimumWidth(150);
+    QSpinBox *deadZoneSpin = new QSpinBox(content);
+    deadZoneSpin->setRange(0, 100);
+    deadZoneSpin->setSingleStep(2);
+    deadZoneSpin->setSuffix(tr(" px"));
+    deadZoneSpin->setValue(pr.panDeadZonePx);
+    deadZoneSpin->setToolTip(tr(
+        "手指或手掌静止放在屏幕上时，触摸屏仍会报告一两像素的抖动，"
+        "以前这些抖动会让画面跟着轻微跳动。\n"
+        "设定容差后，手指移动不超过这么多像素之前画面完全不动"
+        "（超过后一次性补上，不会丢位移），期间也不会累积惯性速度。\n"
+        "0 = 关闭容差（旧行为），推荐 6~10。"));
+    deadZoneRow->addWidget(deadZoneLabel);
+    deadZoneRow->addWidget(deadZoneSpin);
+    deadZoneRow->addStretch();
+    layout->addLayout(deadZoneRow);
+    connect(deadZoneSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+            [](int v) {
+        PalmRejectionSettings::instance().panDeadZonePx = v;
+        PalmRejectionSettings::instance().save();
+    });
+
     QPushButton *resetButton = new QPushButton(tr("恢复防误触默认值"), content);
     layout->addWidget(resetButton);
     connect(resetButton, &QPushButton::clicked, this,
-            [this, boxes, spins, flags, values]() {
+            [this, boxes, spins, flags, values, inertiaBox, deadZoneSpin]() {
         PalmRejectionSettings::instance().resetToDefaults();
         // The vectors alias the (now reset) settings, so reading through them
         // pushes the defaults back into the widgets.
@@ -2183,6 +2221,10 @@ void ControlPanelDialog::createStylusTab() {
             spins[i]->setEnabled(*flags[i]);
             spins[i]->setValue(*values[i]);
         }
+        // Rows built by hand (outside addGuard) push their defaults back here.
+        const PalmRejectionSettings& d = PalmRejectionSettings::instance();
+        inertiaBox->setChecked(d.inertiaEnabled);
+        deadZoneSpin->setValue(d.panDeadZonePx);
         if (mainWindowRef) mainWindowRef->applyPalmRejectionSettings();
     });
 
