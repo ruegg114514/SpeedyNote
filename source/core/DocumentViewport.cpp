@@ -543,6 +543,7 @@ void DocumentViewport::setDocument(Document* doc)
     m_currentPageIndex = 0;
     m_needsPositionRestore = false;  // Reset deferred restore flag for new document
     m_edgelessPositionHistory.clear();  // Clear old position history for new document
+    m_viewBaselineValid = false;     // Re-taken once the view below has settled
     
     // Track if we need to defer update for edgeless position restore
     bool deferUpdateForEdgeless = false;
@@ -572,29 +573,37 @@ void DocumentViewport::setDocument(Document* doc)
                 // Widget not yet visible - restore in showEvent/resizeEvent
                 m_needsPositionRestore = true;
             }
-        } else if (m_document->lastAccessedPage > 0) {
-            m_currentPageIndex = qMin(m_document->lastAccessedPage, 
-                                       m_document->pageCount() - 1);
-            
-            // Defer scrollToPage to next event loop iteration
-            // This ensures the widget has correct dimensions before calculating scroll position
-            if (m_currentPageIndex > 0) {
-                QTimer::singleShot(0, this, [this, pageToRestore = m_currentPageIndex]() {
-                    if (m_document && pageToRestore < m_document->pageCount()) {
-                        scrollToPage(pageToRestore);
-#ifdef SPEEDYNOTE_DEBUG
-                        qDebug() << "Restored last accessed page:" << pageToRestore;
-#endif
-                    }
-                });
-            }
         } else {
-            // New paged document: zoom to fit page width
-            // Deferred to ensure widget has correct dimensions
-            QTimer::singleShot(0, this, [this]() {
-                if (m_document && !m_document->isEdgeless()) {
+            // Paged. The page index is the fallback; a saved view state wins,
+            // because it already encodes where on that page the reader was.
+            m_currentPageIndex = qBound(0, m_document->lastAccessedPage,
+                                        m_document->pageCount() - 1);
+
+            const int pageToRestore = m_currentPageIndex;
+            const bool hasViewState = m_document->hasViewState();
+
+            // Defer to the next event loop iteration: the widget has no usable
+            // dimensions yet, and every branch below (restore, scroll, fit width)
+            // needs them.
+            QTimer::singleShot(0, this, [this, pageToRestore, hasViewState]() {
+                if (!m_document || m_document->isEdgeless()) {
+                    return;
+                }
+                if (hasViewState && applyStoredPagedViewState()) {
+#ifdef SPEEDYNOTE_DEBUG
+                    qDebug() << "Restored paged view state at page" << pageToRestore;
+#endif
+                } else if (pageToRestore > 0 && pageToRestore < m_document->pageCount()) {
+                    scrollToPage(pageToRestore);
+#ifdef SPEEDYNOTE_DEBUG
+                    qDebug() << "Restored last accessed page:" << pageToRestore;
+#endif
+                } else {
+                    // No saved view: fit the page width. Also the correct
+                    // fallback when a saved state could not be applied.
                     zoomToWidth();
                 }
+                takeViewBaseline();
             });
         }
     }
@@ -1784,6 +1793,73 @@ bool DocumentViewport::syncPositionToDocument()
 #endif
 
     return changed;
+}
+
+void DocumentViewport::takeViewBaseline()
+{
+    if (!m_document || m_document->isEdgeless() || width() <= 0 || height() <= 0
+        || m_zoomLevel <= 0.0) {
+        m_viewBaselineValid = false;
+        return;
+    }
+    m_viewBaselineZoom = m_zoomLevel;
+    m_viewBaselineCenter =
+        viewportToDocument(QPointF(width() / 2.0, height() / 2.0));
+    m_viewBaselineValid = true;
+}
+
+bool DocumentViewport::syncPagedViewStateToDocument()
+{
+    if (!m_document || m_document->isEdgeless()) {
+        return false;
+    }
+
+    bool changed = false;
+    if (m_document->lastAccessedPage != m_currentPageIndex) {
+        m_document->lastAccessedPage = m_currentPageIndex;
+        changed = true;
+    }
+
+    // Zoom and the document point under the viewport's centre. Comparing against
+    // the baseline rather than against the document keeps this honest in both
+    // directions: an untouched document reports nothing (so no rewrite), and a
+    // document whose stored state the user has just restored still reports
+    // nothing even though the stored values were "different" a moment ago.
+    if (m_viewBaselineValid && width() > 0 && height() > 0 && m_zoomLevel > 0.0) {
+        const QPointF center = viewportToDocument(QPointF(width() / 2.0, height() / 2.0));
+        const bool moved = qAbs(m_viewBaselineZoom - m_zoomLevel) > 1e-6
+                           || m_viewBaselineCenter != center;
+        if (moved) {
+            m_document->viewZoom = m_zoomLevel;
+            m_document->viewCenter = center;
+            changed = true;
+            // The view is now the recorded one; a second sync is a no-op.
+            m_viewBaselineZoom = m_zoomLevel;
+            m_viewBaselineCenter = center;
+        }
+    }
+
+    return changed;
+}
+
+bool DocumentViewport::applyStoredPagedViewState()
+{
+    if (!m_document || m_document->isEdgeless() || !m_document->hasViewState()) {
+        return false;
+    }
+    if (width() <= 0 || height() <= 0) {
+        return false;   // Nothing to invert the centre against yet
+    }
+
+    // Zoom first: the pan below is the inverse of "centre point" and depends on it.
+    setZoomLevel(qBound(MIN_ZOOM, m_document->viewZoom, MAX_ZOOM));
+
+    const QPointF viewportCenter(width() / 2.0, height() / 2.0);
+    m_panOffset = m_document->viewCenter - viewportCenter / m_zoomLevel;
+    clampPanOffset();
+    update();
+    emit panChanged(m_panOffset);
+    return true;
 }
 
 bool DocumentViewport::applyRestoredEdgelessPosition()
