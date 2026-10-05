@@ -2520,6 +2520,29 @@ public slots:
      * @return true if position was restored, false if no saved position
      */
     bool applyRestoredEdgelessPosition();
+
+    /**
+     * @brief Push the paged view state (page, zoom, viewport centre) into the Document.
+     * @return true if anything changed, false if the document already held the
+     *         same values - the same contract as syncPositionToDocument(), so
+     *         close-time autosave can still skip a rewrite for an untouched doc.
+     */
+    bool syncPagedViewStateToDocument();
+
+    /**
+     * @brief Snapshot the current view, so an unmoved document reports no change.
+     * @return Nothing; clears the baseline when the viewport has no usable geometry.
+     */
+    void takeViewBaseline();
+
+    /**
+     * @brief Restore the paged view state saved by syncPagedViewStateToDocument().
+     *
+     * Applies the zoom first and then the pan, because restoring the pan means
+     * inverting "document point under the viewport centre" and that depends on
+     * the zoom. Returns true when a saved state was applied.
+     */
+    bool applyStoredPagedViewState();
     
     /**
      * @brief Scroll by a delta amount.
@@ -3099,7 +3122,15 @@ private:
     qreal m_zoomLevel = 1.0;
     QPointF m_panOffset;
     int m_currentPageIndex = 0;
-    bool m_needsPositionRestore = false;  ///< BUG FIX: Edgeless position needs restore in showEvent
+    bool m_needsPositionRestore = false;
+
+    /// Snapshot of the view taken when a document was set, or right after the
+    /// view state was last written. A paged document that has not been scrolled
+    /// compares equal to this, which is what keeps "open and close without
+    /// touching anything" free of a document rewrite.
+    qreal m_viewBaselineZoom = 1.0;
+    QPointF m_viewBaselineCenter;
+    bool m_viewBaselineValid = false;  ///< BUG FIX: Edgeless position needs restore in showEvent
 
     // ===== Focus-cache pan/zoom debounce =====
     /// True while pan or zoom is in flight: chooseRenderTier returns Direct

@@ -131,10 +131,16 @@ enum class PdfSourceHealthStatus {
     AvailableExternal,
     AvailableRelative,
     AvailableBundled,
+    /// Readable and usable, but the file's content no longer matches the identity
+    /// this notebook recorded - the PDF was replaced or edited in place. Deliberately
+    /// NOT a failure: the file is right there, and refusing to open the notebook over
+    /// it leaves the user with nothing. It is still reported, because pages bind by
+    /// PDF page index and a replacement that shifted pages has shifted the
+    /// backgrounds with them.
+    AvailableIdentityChanged,
     PartialBundled,
     Missing,
-    Unreadable,
-    IdentityMismatch
+    Unreadable
 };
 
 struct PdfSourceHealth {
@@ -149,8 +155,7 @@ struct PdfSourceHealth {
         return unavailablePages > 0
             && (status == PdfSourceHealthStatus::PartialBundled
             || status == PdfSourceHealthStatus::Missing
-            || status == PdfSourceHealthStatus::Unreadable
-            || status == PdfSourceHealthStatus::IdentityMismatch);
+            || status == PdfSourceHealthStatus::Unreadable);
     }
 };
 
@@ -245,6 +250,19 @@ public:
     // ===== State =====
     bool modified = false;              ///< True if document has unsaved changes
     int lastAccessedPage = 0;           ///< Last viewed page index (for restoring position)
+
+    /**
+     * @brief Saved view state for paged documents (viewZoom == 0 = nothing saved).
+     *
+     * The zoom level plus the document point that was under the centre of the
+     * viewport - the same pair edgeless mode stores for its last position, so
+     * restoring keeps the reader looking at the same place whatever the window
+     * size is now. Page index alone says WHICH page but not WHERE on it, which is
+     * why reopening used to lose the zoom and the position every time.
+     */
+    qreal viewZoom = 0.0;
+    QPointF viewCenter{0.0, 0.0};
+    bool hasViewState() const { return viewZoom > 0.0; }
     
     // ===== Constructors & Rule of Five =====
     
@@ -1936,6 +1954,9 @@ private:
     mutable std::map<QString, qint64> m_pdfProviderPathModifiedTimes;
     mutable QSet<QString> m_pdfProvidersUsingBundled;
     mutable QSet<QString> m_pdfProvidersUsingRelative;
+    /// Sources currently open from a file whose identity has changed (see
+    /// PdfSourceHealthStatus::AvailableIdentityChanged).
+    mutable QSet<QString> m_pdfProvidersIdentityChanged;
     mutable std::map<QString, PdfSourceHealthStatus> m_pdfSourceFailures;
     QSet<QString> m_undoRetainedPdfSourceIds;
 
@@ -1959,6 +1980,9 @@ private:
         PdfSourceHealthStatus failureStatus = PdfSourceHealthStatus::Missing;
         bool bundled = false;
         bool relative = false;
+        /// The file was opened but its hash/size no longer match the recorded
+        /// identity. Carried out so callers can say so without blocking.
+        bool identityChanged = false;
     };
     PdfSourceOpenResult openBestPdfSourceCandidate(const PdfSource& source) const;
     void cachePdfProviderPath(const QString& registryId, const QString& path) const;

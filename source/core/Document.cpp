@@ -286,8 +286,17 @@ Document::PdfSourceOpenResult Document::openBestPdfSourceCandidate(const PdfSour
     }
 
     bool foundExisting = false;
-    bool foundIdentityMismatch = false;
     bool foundUnreadable = false;
+
+    // First choice is a candidate that still matches the recorded identity; a
+    // readable candidate whose identity has changed is kept as the fallback and
+    // used when nothing matches. Replacing or editing the source PDF in place is
+    // an ordinary thing to do - adding a cover, repairing a page - and the
+    // recorded hash is a way to pick between candidates and to RE-FIND a moved
+    // file, not a gate that makes a file that is sitting right there unusable.
+    // Refusing it used to leave the notebook reporting the source as unavailable
+    // and refusing to save.
+    PdfSourceOpenResult mismatchFallback;
     for (const Candidate& candidate : candidates) {
         QFileInfo info(candidate.path);
         if (!info.exists() || !info.isFile()) {
@@ -297,13 +306,10 @@ Document::PdfSourceOpenResult Document::openBestPdfSourceCandidate(const PdfSour
 
         // A bundled mini-PDF intentionally differs from the original full-file
         // identity. Only full external candidates are verified against hash+size.
+        bool identityOk = true;
         if (!candidate.bundled && !source.hash.isEmpty()) {
             const bool sizeMatches = source.size <= 0 || info.size() == source.size;
-            const bool hashMatches = sizeMatches && computePdfHash(candidate.path) == source.hash;
-            if (!hashMatches) {
-                foundIdentityMismatch = true;
-                continue;
-            }
+            identityOk = sizeMatches && computePdfHash(candidate.path) == source.hash;
         }
 
         std::unique_ptr<PdfProvider> provider = PdfProvider::create(candidate.path);
@@ -312,18 +318,28 @@ Document::PdfSourceOpenResult Document::openBestPdfSourceCandidate(const PdfSour
             continue;
         }
 
-        result.provider = std::move(provider);
-        result.path = candidate.path;
-        result.bundled = candidate.bundled;
-        result.relative = candidate.relative;
-        return result;
+        if (identityOk) {
+            result.provider = std::move(provider);
+            result.path = candidate.path;
+            result.bundled = candidate.bundled;
+            result.relative = candidate.relative;
+            return result;
+        }
+
+        if (!mismatchFallback.provider) {
+            mismatchFallback.provider = std::move(provider);
+            mismatchFallback.path = candidate.path;
+            mismatchFallback.bundled = candidate.bundled;
+            mismatchFallback.relative = candidate.relative;
+            mismatchFallback.identityChanged = true;
+        }
     }
 
-    if (foundUnreadable) {
-        result.failureStatus = PdfSourceHealthStatus::Unreadable;
-    } else if (foundIdentityMismatch) {
-        result.failureStatus = PdfSourceHealthStatus::IdentityMismatch;
-    } else if (foundExisting) {
+    if (mismatchFallback.provider) {
+        return mismatchFallback;
+    }
+
+    if (foundUnreadable || foundExisting) {
         result.failureStatus = PdfSourceHealthStatus::Unreadable;
     } else {
         result.failureStatus = PdfSourceHealthStatus::Missing;
@@ -360,6 +376,8 @@ QString Document::pdfPathForSource(const QString& sourceId) const
     else m_pdfProvidersUsingBundled.remove(s->id);
     if (opened.relative) m_pdfProvidersUsingRelative.insert(s->id);
     else m_pdfProvidersUsingRelative.remove(s->id);
+    if (opened.identityChanged) m_pdfProvidersIdentityChanged.insert(s->id);
+    else m_pdfProvidersIdentityChanged.remove(s->id);
     return opened.path;
 }
 
@@ -406,6 +424,8 @@ PdfProvider* Document::providerForSource(const QString& sourceId) const
     else m_pdfProvidersUsingBundled.remove(s->id);
     if (opened.relative) m_pdfProvidersUsingRelative.insert(s->id);
     else m_pdfProvidersUsingRelative.remove(s->id);
+    if (opened.identityChanged) m_pdfProvidersIdentityChanged.insert(s->id);
+    else m_pdfProvidersIdentityChanged.remove(s->id);
     return raw;
 }
 
@@ -497,6 +517,12 @@ QVector<PdfSourceHealth> Document::pdfSourceHealthSnapshot() const
                 health.status = m_pdfProvidersUsingRelative.contains(source.id)
                     ? PdfSourceHealthStatus::AvailableRelative
                     : PdfSourceHealthStatus::AvailableExternal;
+                // Usable either way; the changed identity is reported so the
+                // Sources dialog can say the file is not the one this notebook
+                // was made from.
+                if (m_pdfProvidersIdentityChanged.contains(source.id)) {
+                    health.status = PdfSourceHealthStatus::AvailableIdentityChanged;
+                }
             }
         } else {
             auto failureIt = m_pdfSourceFailures.find(source.id);
@@ -569,6 +595,9 @@ bool Document::locateSource(const QString& sourceId, const QString& newPath)
     clearCachedPdfProvider(source->id);
     cachePdfProviderPath(source->id, source->path);
     m_pdfProviders[source->id] = std::move(provider);
+    // Explicit re-point clears any "this file changed" notice.
+    m_pdfProvidersIdentityChanged.remove(source->id);
+    m_pdfSourceFailures.erase(source->id);
     markModified();
     return true;
 }
@@ -3109,6 +3138,13 @@ QJsonObject Document::toJson() const
     
     // State
     obj["last_accessed_page"] = lastAccessedPage;
+    // View state, written only once something has actually been zoomed or
+    // scrolled, so a document that has never been moved keeps its file shape.
+    if (hasViewState()) {
+        obj["view_zoom"] = viewZoom;
+        obj["view_center_x"] = viewCenter.x();
+        obj["view_center_y"] = viewCenter.y();
+    }
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "Document::toJson: lastAccessedPage =" << lastAccessedPage;
 #endif
@@ -3239,6 +3275,12 @@ std::unique_ptr<Document> Document::fromJson(const QJsonObject& obj)
     
     // State
     doc->lastAccessedPage = obj["last_accessed_page"].toInt(0);
+    // View state. A non-positive or non-finite zoom means "nothing saved" - the
+    // viewport clamps the rest, this only has to refuse to hand it garbage.
+    const qreal savedZoom = obj["view_zoom"].toDouble(0.0);
+    doc->viewZoom = (qIsFinite(savedZoom) && savedZoom > 0.0) ? savedZoom : 0.0;
+    doc->viewCenter = QPointF(obj["view_center_x"].toDouble(0.0),
+                              obj["view_center_y"].toDouble(0.0));
     
     // Default background settings
     if (obj.contains("default_background")) {

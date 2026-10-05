@@ -40,8 +40,9 @@ QString statusText(PdfSourceHealthStatus status)
         return QCoreApplication::translate("PdfSourcesDialog", "Available (embedded copy)");
     case PdfSourceHealthStatus::PartialBundled:
         return QCoreApplication::translate("PdfSourcesDialog", "Embedded copy is incomplete");
-    case PdfSourceHealthStatus::IdentityMismatch:
-        return QCoreApplication::translate("PdfSourcesDialog", "Different file found");
+    case PdfSourceHealthStatus::AvailableIdentityChanged:
+        return QCoreApplication::translate(
+            "PdfSourcesDialog", "Available (file has changed)");
     case PdfSourceHealthStatus::Unreadable:
         return QCoreApplication::translate("PdfSourcesDialog", "Unreadable or damaged");
     case PdfSourceHealthStatus::Missing:

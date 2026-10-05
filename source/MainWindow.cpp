@@ -8306,13 +8306,10 @@ bool MainWindow::syncDocumentPosition(Document* doc, DocumentViewport* vp)
         // lets autosavePositionOnlyChange skip a full bundle rewrite.
         return vp->syncPositionToDocument();
     } else {
-        // Paged: update lastAccessedPage if changed
-        int currentPage = vp->currentPageIndex();
-        if (doc->lastAccessedPage != currentPage) {
-            doc->lastAccessedPage = currentPage;
-            return true;  // Position actually changed
-        }
-        return false;  // Position unchanged
+        // Paged: page index plus the zoom/centre pair that says where on the
+        // page the reader was. Lives in the viewport because only it knows the
+        // viewport geometry the centre is measured against.
+        return vp->syncPagedViewStateToDocument();
     }
 }
 
