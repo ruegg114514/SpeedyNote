@@ -5320,6 +5320,13 @@ void DocumentViewport::beginZoomGesture(QPointF centerPoint)
 
 void DocumentViewport::updateZoomGesture(qreal scaleFactor, QPointF centerPoint)
 {
+    // Every gesture zoom arrives here - touch pinch through TouchGestureHandler,
+    // and trackpad pinch / Ctrl+wheel from event() - which is what makes one
+    // check enough to lock all of them.
+    if (!m_zoomGesturesEnabled) {
+        return;
+    }
+
     // Auto-begin gesture if not already active
     if (!m_gesture.isActive()) {
         beginZoomGesture(centerPoint);
@@ -5585,6 +5592,11 @@ TouchGestureMode DocumentViewport::touchGestureMode() const
         return m_touchHandler->mode();
     }
     return TouchGestureMode::Disabled;
+}
+
+void DocumentViewport::setZoomGesturesEnabled(bool enabled)
+{
+    m_zoomGesturesEnabled = enabled;
 }
 
 bool DocumentViewport::event(QEvent* event)

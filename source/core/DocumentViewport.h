@@ -2702,6 +2702,19 @@ public slots:
      * @return Current touch gesture mode.
      */
     TouchGestureMode touchGestureMode() const;
+
+    /**
+     * @brief Allow or block gesture-driven zoom.
+     * @param enabled False to freeze pinch and Ctrl+wheel zoom.
+     *
+     * Blocks exactly the three paths that can fire without anyone asking for a
+     * zoom: touch pinch, trackpad pinch and Ctrl+wheel. All three funnel through
+     * updateZoomGesture(), so that single check is the whole implementation.
+     * The deliberate ways to zoom - the keyboard shortcuts, Fit Width and Fit
+     * Page - are left alone, because a lock is meant to stop accidents, not to
+     * take the feature away.
+     */
+    void setZoomGesturesEnabled(bool enabled);
     
     // ===== Public Clipboard Operations (Action Bar support) =====
     
@@ -3241,6 +3254,7 @@ private:
     // ===== Touch Gesture Handler =====
     // Touch gesture logic is encapsulated in TouchGestureHandler (see TouchGestureHandler.h)
     TouchGestureHandler* m_touchHandler = nullptr;  ///< Handles touch pan/zoom/tap
+    bool m_zoomGesturesEnabled = true;              ///< Gate for pinch and Ctrl+wheel
     
     // Touch cooldown: reject touch events briefly after becoming visible
     // This prevents crashes from stale touch state after sleep/wake

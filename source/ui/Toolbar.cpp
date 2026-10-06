@@ -179,9 +179,19 @@ void Toolbar::setupUi()
     m_touchGestureButton->setToolTip(tr("Touch Gesture Mode\n0: Off\n1: Y-axis scroll only\n2: Full gestures"));
     mainLayout->addWidget(m_touchGestureButton);
 
+    // --- Lock gesture zoom ---
+    // Next to the touch-gesture control on purpose: both exist to stop input the
+    // reader did not ask for, and a pinch is as easy to trigger with a resting
+    // palm as a pan is. What it costs is worse, though - a stray pan is undone by
+    // scrolling back, a stray pinch silently changes the zoom that was set.
+    m_zoomLockButton = new ToggleButton(this);
+    m_zoomLockButton->setThemedIcon("zoomlock");
+    m_zoomLockButton->setToolTip(tr("Lock Gesture Zoom\nPinch and Ctrl+wheel no longer change the zoom"));
+    mainLayout->addWidget(m_zoomLockButton);
+
     m_page2Widgets = {
         m_ocrExpandable, m_panButton, undoGap,
-        m_undoButton, m_redoButton, touchGap, m_touchGestureButton
+        m_undoButton, m_redoButton, touchGap, m_touchGestureButton, m_zoomLockButton
     };
 
     mainLayout->addStretch(1);
@@ -264,6 +274,9 @@ void Toolbar::connectSignals()
 
     connect(m_touchGestureButton, &ThreeStateButton::stateChanged,
             this, &Toolbar::touchGestureModeChanged);
+
+    connect(m_zoomLockButton, &QPushButton::toggled,
+            this, &Toolbar::zoomLockToggled);
 }
 
 void Toolbar::expandToolButton(ToolType tool)
@@ -413,6 +426,14 @@ void Toolbar::setTouchGestureMode(int mode)
     m_touchGestureButton->setState(mode);
 }
 
+void Toolbar::setZoomLocked(bool locked)
+{
+    // Blocked: syncing the button from the stored setting must not look like a
+    // click and write the setting straight back.
+    const QSignalBlocker blocker(m_zoomLockButton);
+    m_zoomLockButton->setChecked(locked);
+}
+
 void Toolbar::updateTheme(bool darkMode)
 {
     m_darkMode = darkMode;
@@ -451,6 +472,7 @@ void Toolbar::updateTheme(bool darkMode)
     m_undoButton->setDarkMode(darkMode);
     m_redoButton->setDarkMode(darkMode);
     m_touchGestureButton->setDarkMode(darkMode);
+    m_zoomLockButton->setDarkMode(darkMode);
     m_pagerBackButton->setDarkMode(darkMode);
     m_pagerNextButton->setDarkMode(darkMode);
 

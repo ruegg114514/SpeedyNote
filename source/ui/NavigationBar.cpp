@@ -77,7 +77,7 @@ void NavigationBar::setupUi()
     mainLayout->addWidget(m_rightSidebarButton);
 
     m_sideNotesButton = new ToggleButton(this);
-    m_sideNotesButton->setThemedIcon("document");  // Reuse document icon for notes
+    m_sideNotesButton->setThemedIcon("sidenotes");  // A page with its notes column
     m_sideNotesButton->setToolTip(tr("Toggle Side Notes Panel (Ctrl+Shift+N)"));
     mainLayout->addWidget(m_sideNotesButton);
     

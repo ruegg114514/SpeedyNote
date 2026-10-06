@@ -384,6 +384,7 @@ MainWindow::MainWindow(QWidget *parent)
             }
 #endif
             vp->setTouchGestureMode(effectiveMode);
+            vp->setZoomGesturesEnabled(!zoomGesturesLocked);
         }
         
         // Refresh OS window title + NavigationBar filename label from the
@@ -1246,6 +1247,9 @@ void MainWindow::setupUi() {
         }
         setTouchGestureMode(gestureMode);
         // qDebug() << "Toolbar: Touch gesture mode changed to" << mode;
+    });
+    connect(m_toolbar, &Toolbar::zoomLockToggled, this, [this](bool locked) {
+        setZoomGesturesLocked(locked);
     });
     // ------------------ End of Toolbar signal connections ------------------
     
@@ -5697,6 +5701,23 @@ void MainWindow::setTouchGestureMode(TouchGestureMode mode) {
     settings.setValue("touchGestureMode", static_cast<int>(mode));
 }
 
+void MainWindow::setZoomGesturesLocked(bool locked) {
+    zoomGesturesLocked = locked;
+
+    if (DocumentViewport* vp = currentViewport()) {
+        vp->setZoomGesturesEnabled(!locked);
+    }
+
+    // Sync the button so a state loaded from settings, or a later change made
+    // elsewhere, cannot leave it showing the opposite of what is in force.
+    if (m_toolbar) {
+        m_toolbar->setZoomLocked(locked);
+    }
+
+    QSettings settings("SpeedyNote", "App");
+    settings.setValue("zoomGesturesLocked", locked);
+}
+
 void MainWindow::cycleTouchGestureMode() {
     // Cycle: Disabled -> YAxisOnly -> Full -> Disabled
     switch (touchGestureMode) {
@@ -5719,6 +5740,11 @@ void MainWindow::loadUserSettings() {
     int savedMode = settings.value("touchGestureMode", static_cast<int>(TouchGestureMode::Full)).toInt();
     touchGestureMode = static_cast<TouchGestureMode>(savedMode);
     setTouchGestureMode(touchGestureMode);
+
+    // Gesture-zoom lock: off by default, which is how the app behaved before the
+    // button existed.
+    zoomGesturesLocked = settings.value("zoomGesturesLocked", false).toBool();
+    setZoomGesturesLocked(zoomGesturesLocked);
     
     // Load every anti-mistouch guard (toggles + timings) in one go.
     palmRejection().load();

@@ -40,6 +40,7 @@ public:
     void setCurrentTool(ToolType tool);
     void setObjectInsertMode(DocumentViewport::ObjectInsertMode mode);
     void setTouchGestureMode(int mode);
+    void setZoomLocked(bool locked);
     void updateTheme(bool darkMode);
     void setUndoEnabled(bool enabled);
     void setRedoEnabled(bool enabled);
@@ -76,6 +77,7 @@ signals:
     void undoClicked();
     void redoClicked();
     void touchGestureModeChanged(int mode);
+    void zoomLockToggled(bool locked);
     void screenshotRequested();
 
 protected:
@@ -150,6 +152,11 @@ private:
 
     // Tab-specific mode
     ThreeStateButton *m_touchGestureButton;
+
+    /// Freezes gesture-driven zoom: touch pinch, trackpad pinch and Ctrl+wheel.
+    /// Those are the ones that fire by accident. Keyboard zoom and Fit Width
+    /// stay available, being deliberate. See MainWindow::setZoomGesturesLocked.
+    ToggleButton *m_zoomLockButton;
 
     // Overflow paging
     ActionButton *m_pagerBackButton = nullptr;

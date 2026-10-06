@@ -119,10 +119,20 @@ public:
     // int getCurrentPageForCanvas(InkCanvas *canvas);  // MW1.4: Stub - returns 0
 
     TouchGestureMode touchGestureMode = TouchGestureMode::Full;
+    bool zoomGesturesLocked = false;  ///< Gesture pinch and Ctrl+wheel are frozen
     TouchGestureMode previousTouchGestureMode = TouchGestureMode::Full; // Store state before text selection
     TouchGestureMode getTouchGestureMode() const;
     void setTouchGestureMode(TouchGestureMode mode);
     void cycleTouchGestureMode(); // Cycle through: Disabled -> YAxisOnly -> Full -> Disabled
+
+    /**
+     * @brief Freeze or release gesture-driven zoom across every viewport.
+     *
+     * Lives on MainWindow rather than a viewport because it is a preference about
+     * the person using the app, not about a document: it has to survive a tab
+     * switch, a new tab and a restart, which is what the QSettings entry is for.
+     */
+    void setZoomGesturesLocked(bool locked);
 
     // Palm rejection: suppresses touch gestures while the stylus is in range.
     // Available on every platform (the guards live in the input code everywhere,

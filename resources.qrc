@@ -92,6 +92,10 @@
     <file>resources/icons/leftsidebar_reversed.png</file>
     <file>resources/icons/rightsidebar.png</file>
     <file>resources/icons/rightsidebar_reversed.png</file>
+    <file>resources/icons/sidenotes.png</file>
+    <file>resources/icons/sidenotes_reversed.png</file>
+    <file>resources/icons/zoomlock.png</file>
+    <file>resources/icons/zoomlock_reversed.png</file>
     <file>resources/icons/undo.png</file>
     <file>resources/icons/undo_reversed.png</file>
     <file>resources/icons/redo.png</file>
