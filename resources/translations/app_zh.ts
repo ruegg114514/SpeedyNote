@@ -4375,8 +4375,8 @@ Double-click or double-tap to jump to a page</source>
     </message>
     <message>
         <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="44"/>
-        <source>Different file found</source>
-        <translation type="unfinished">找到不同的文件</translation>
+        <source>Available (file has changed)</source>
+        <translation type="unfinished">可用（文件已变化）</translation>
     </message>
     <message>
         <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="46"/>
@@ -4465,8 +4465,58 @@ Double-click or double-tap to jump to a page</source>
     </message>
     <message>
         <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="221"/>
-        <source>The selected PDF is damaged or does not match the original source. No document links were changed.</source>
-        <translation type="unfinished">所选PDF文件已损坏或与原始文件不符。文档链接未做任何更改。</translation>
+        <source>PDF Could Not Be Opened</source>
+        <translation type="unfinished">PDF 无法打开</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>The selected file could not be read as a PDF. No document links were changed.</source>
+        <translation type="unfinished">所选文件无法作为 PDF 读取。未更改任何文档链接。</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>This is not the exact file that was originally linked.</source>
+        <translation type="unfinished">这不是最初关联的那个文件。</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>Linking it anyway is fine when the PDF was only re-saved or its metadata changed. Backgrounds are matched by page number, so a file whose pages moved will show the wrong background behind your annotations.</source>
+        <translation type="unfinished">如果这个 PDF 只是被重新保存过、或元数据变了，直接关联是安全的。页面背景是按页号匹配的，所以页数有位移的文件会让批注底下显示错误的背景。</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>Selected file: %1</source>
+        <translation type="unfinished">选中的文件：%1</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>Pages in this file: %1</source>
+        <translation type="unfinished">此文件页数：%1</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>Pages this notebook uses: %1</source>
+        <translation type="unfinished">笔记本用到的页数：%1</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>Size: %1 originally, %2 in this file</source>
+        <translation type="unfinished">大小：原来 %1，此文件 %2</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>Link Anyway</source>
+        <translation type="unfinished">仍然关联</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>PDF Source Not Linked</source>
+        <translation type="unfinished">PDF 源未关联</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>The selected PDF could not be linked. No document links were changed.</source>
+        <translation type="unfinished">无法关联所选 PDF。未更改任何文档链接。</translation>
     </message>
     <message>
         <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="255"/>

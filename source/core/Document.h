@@ -1208,12 +1208,54 @@ public:
     int notebookPageCountForSource(const QString& sourceId) const;
 
     /**
-     * @brief Locate a moved source without changing its stored identity.
+     * @brief Highest original PDF page number any page of this notebook references.
+     * @param sourceId Empty for the primary source.
+     * @return -1 when no page references the source.
      *
-     * When a hash/size is stored the candidate must match. Legacy hashless sources
-     * establish their identity from the first successfully located file.
+     * Page backgrounds are matched by page number, so this is the count a
+     * replacement file has to be able to cover for every page to keep one.
      */
-    bool locateSource(const QString& sourceId, const QString& newPath);
+    int maxReferencedOriginalPage(const QString& sourceId) const;
+
+    /**
+     * @brief What a candidate file is, measured against a source's stored identity.
+     *
+     * Separate from locateSource() so a caller can say what is wrong with a file -
+     * and offer to override - instead of collapsing every refusal into one message.
+     */
+    struct SourceCandidateProbe {
+        enum class Result {
+            InvalidTarget,  ///< No such source, empty path, or no PDF backend
+            Unreadable,     ///< Exists, but cannot be hashed or opened as a PDF
+            Match,          ///< Same bytes as the stored identity, or the source is hashless
+            Mismatch        ///< A readable PDF, but not the stored file
+        };
+        Result result = Result::InvalidTarget;
+        QString hash;       ///< Candidate fingerprint (empty when unreadable)
+        qint64 size = 0;    ///< Candidate size in bytes
+        int pageCount = 0;  ///< Candidate page count (0 when unreadable)
+    };
+
+    /**
+     * @brief Inspect a candidate file without changing anything.
+     * @param sourceId Empty for the primary source.
+     */
+    SourceCandidateProbe probeSourceCandidate(const QString& sourceId,
+                                              const QString& path) const;
+
+    /**
+     * @brief Point a source at a different file on disk.
+     * @param acceptMismatch Adopt the candidate even when it fails verification,
+     *        rewriting the stored hash/size to match it.
+     *
+     * A stored identity is enforced by default, and a legacy hashless source
+     * establishes its identity from the first file that resolves. Overriding is
+     * the only way to re-point a source whose file has genuinely been replaced or
+     * upgraded: verification can never accept different bytes, so without it the
+     * source keeps insisting on a file the user no longer wants.
+     */
+    bool locateSource(const QString& sourceId, const QString& newPath,
+                      bool acceptMismatch = false);
 
     /**
      * @brief Clear cached runtime resolution so the next health query retries a source.

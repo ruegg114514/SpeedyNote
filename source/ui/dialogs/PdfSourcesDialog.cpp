@@ -12,6 +12,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
@@ -215,12 +216,67 @@ void PdfSourcesDialog::locateSelectedSource()
 void PdfSourcesDialog::handleLocatedPath(const QString& sourceId, const QString& path)
 {
     if (!m_document || path.isEmpty()) return;
-    emit sourcesAboutToChange();
-    if (!m_document->locateSource(sourceId, path)) {
+
+    using Probe = Document::SourceCandidateProbe;
+    const Probe probe = m_document->probeSourceCandidate(sourceId, path);
+
+    if (probe.result == Probe::Result::Unreadable
+        || probe.result == Probe::Result::InvalidTarget) {
         QMessageBox::warning(
-            this, tr("PDF Source Not Matched"),
-            tr("The selected PDF is damaged or does not match the original source. "
+            this, tr("PDF Could Not Be Opened"),
+            tr("The selected file could not be read as a PDF. "
                "No document links were changed."));
+        return;
+    }
+
+    // A mismatch is not proof of the wrong file, because the fingerprint covers
+    // the file's bytes and any other app re-saving it rewrites those without
+    // touching a page. Refusing outright also leaves no way at all to re-point a
+    // source whose file has genuinely been replaced, so name the concrete
+    // differences and let the user decide.
+    bool acceptMismatch = false;
+    if (probe.result == Probe::Result::Mismatch) {
+        const PdfSource* source = m_document->pdfSourceById(sourceId);
+        const qint64 storedSize = source ? source->size : 0;
+        const int referencedTo = m_document->maxReferencedOriginalPage(sourceId) + 1;
+
+        QString details = tr("Selected file: %1").arg(QFileInfo(path).fileName());
+        details += QLatin1Char('\n')
+            + tr("Pages in this file: %1").arg(probe.pageCount);
+        if (referencedTo > 0) {
+            details += QLatin1Char('\n')
+                + tr("Pages this notebook uses: %1").arg(referencedTo);
+        }
+        if (storedSize > 0) {
+            details += QLatin1Char('\n')
+                + tr("Size: %1 originally, %2 in this file")
+                      .arg(locale().formattedDataSize(storedSize),
+                           locale().formattedDataSize(probe.size));
+        }
+
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle(tr("PDF Source Not Matched"));
+        box.setText(tr("This is not the exact file that was originally linked."));
+        box.setInformativeText(
+            tr("Linking it anyway is fine when the PDF was only re-saved or its "
+               "metadata changed. Backgrounds are matched by page number, so a file "
+               "whose pages moved will show the wrong background behind your "
+               "annotations."));
+        box.setDetailedText(details);
+        QPushButton* linkAnyway = box.addButton(tr("Link Anyway"), QMessageBox::AcceptRole);
+        QPushButton* cancel = box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(cancel);
+        box.exec();
+        if (box.clickedButton() != linkAnyway) return;
+        acceptMismatch = true;
+    }
+
+    emit sourcesAboutToChange();
+    if (!m_document->locateSource(sourceId, path, acceptMismatch)) {
+        QMessageBox::warning(
+            this, tr("PDF Source Not Linked"),
+            tr("The selected PDF could not be linked. No document links were changed."));
         emit sourcesChanged();
         return;
     }

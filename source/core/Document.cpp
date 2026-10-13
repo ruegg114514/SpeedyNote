@@ -564,7 +564,59 @@ QString Document::registerSource(const QString& path, const QString& hash, qint6
     return src.id;
 }
 
-bool Document::locateSource(const QString& sourceId, const QString& newPath)
+int Document::maxReferencedOriginalPage(const QString& sourceId) const
+{
+    // An empty id is how the primary source is recorded here, so a plain
+    // comparison against the stored value is the whole lookup.
+    int highest = -1;
+    for (const auto& [uuid, originalPage] : m_pagePdfIndex) {
+        auto sourceIt = m_pagePdfSource.find(uuid);
+        const QString pageSource = sourceIt != m_pagePdfSource.end()
+            ? sourceIt->second : QString();
+        if (pageSource == sourceId && originalPage > highest) {
+            highest = originalPage;
+        }
+    }
+    return highest;
+}
+
+Document::SourceCandidateProbe Document::probeSourceCandidate(
+    const QString& sourceId, const QString& path) const
+{
+    SourceCandidateProbe probe;
+
+    const PdfSource* source = pdfSourceById(sourceId);
+    if (!source || path.isEmpty() || !PdfProvider::isAvailable()) return probe;
+
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile()) return probe;
+
+    probe.hash = computePdfHash(path);
+    probe.size = info.size();
+    if (probe.hash.isEmpty()) {
+        probe.result = SourceCandidateProbe::Result::Unreadable;
+        return probe;
+    }
+
+    std::unique_ptr<PdfProvider> provider = PdfProvider::create(path);
+    if (!provider || !provider->isValid()) {
+        probe.result = SourceCandidateProbe::Result::Unreadable;
+        return probe;
+    }
+    probe.pageCount = provider->pageCount();
+
+    // A source with no stored fingerprint has nothing to disagree with, so
+    // anything readable counts as a match for it.
+    const bool matches = source->hash.isEmpty()
+        || (probe.hash == source->hash
+            && (source->size <= 0 || probe.size == source->size));
+    probe.result = matches ? SourceCandidateProbe::Result::Match
+                           : SourceCandidateProbe::Result::Mismatch;
+    return probe;
+}
+
+bool Document::locateSource(const QString& sourceId, const QString& newPath,
+                            bool acceptMismatch)
 {
     PdfSource* source = pdfSourceById(sourceId);
     if (!source || newPath.isEmpty()) return false;
@@ -574,7 +626,7 @@ bool Document::locateSource(const QString& sourceId, const QString& newPath)
 
     const QString candidateHash = computePdfHash(newPath);
     if (candidateHash.isEmpty()) return false;
-    if (!source->hash.isEmpty()) {
+    if (!acceptMismatch && !source->hash.isEmpty()) {
         if (candidateHash != source->hash
             || (source->size > 0 && info.size() != source->size)) {
             return false;
@@ -584,7 +636,11 @@ bool Document::locateSource(const QString& sourceId, const QString& newPath)
     std::unique_ptr<PdfProvider> provider = PdfProvider::create(newPath);
     if (!provider || !provider->isValid()) return false;
 
-    if (source->hash.isEmpty()) {
+    // The stored fingerprint follows the file. It used to be written only when it
+    // was empty, which left an accepted replacement still claiming to be the old
+    // file: the next open would report it as changed again, and every later
+    // locate would need overriding a second time.
+    if (source->hash.isEmpty() || acceptMismatch) {
         source->hash = candidateHash;
         source->size = info.size();
     }
