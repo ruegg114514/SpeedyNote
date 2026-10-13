@@ -1244,6 +1244,18 @@ public:
                                               const QString& path) const;
 
     /**
+     * @brief Append a page for every PDF page of a source that has none yet.
+     * @param sourceId Empty for the primary source.
+     * @return Number of pages appended, 0 when the source already covers it.
+     *
+     * How a notebook grows with its source. Linking a longer PDF would otherwise
+     * leave the extra pages unreachable: a notebook page is what carries the
+     * annotations for a PDF page, and nothing creates one on its own. Pages are
+     * appended at the end, in PDF order, each bound to the page it stands for.
+     */
+    int extendPdfSourceCoverage(const QString& sourceId);
+
+    /**
      * @brief Point a source at a different file on disk.
      * @param acceptMismatch Adopt the candidate even when it fails verification,
      *        rewriting the stored hash/size to match it.

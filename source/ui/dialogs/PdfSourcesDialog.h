@@ -16,6 +16,10 @@ public:
 signals:
     void sourcesAboutToChange();
     void sourcesChanged();
+    /// The document gained pages, so anything keyed by page count must be rebuilt.
+    /// sourcesChanged() is not enough for that: it drops cached page backgrounds
+    /// but leaves the layout alone.
+    void pagesAdded();
 
 private slots:
     void refreshRows();

@@ -259,10 +259,10 @@ void PdfSourcesDialog::handleLocatedPath(const QString& sourceId, const QString&
         box.setWindowTitle(tr("PDF Source Not Matched"));
         box.setText(tr("This is not the exact file that was originally linked."));
         box.setInformativeText(
-            tr("Linking it anyway is fine when the PDF was only re-saved or its "
-               "metadata changed. Backgrounds are matched by page number, so a file "
-               "whose pages moved will show the wrong background behind your "
-               "annotations."));
+            tr("A notebook page is what carries the annotations for a PDF page, so "
+               "pages this file has and the notebook does not will be added at the "
+               "end. Backgrounds are matched by page number, so if the file's pages "
+               "moved rather than grew, the backgrounds will not line up."));
         box.setDetailedText(details);
         QPushButton* linkAnyway = box.addButton(tr("Link Anyway"), QMessageBox::AcceptRole);
         QPushButton* cancel = box.addButton(QMessageBox::Cancel);
@@ -280,8 +280,25 @@ void PdfSourcesDialog::handleLocatedPath(const QString& sourceId, const QString&
         emit sourcesChanged();
         return;
     }
+
+    // Only when the user chose to adopt a file that failed verification: that is
+    // the "this PDF is now a different document" case, and it is the one where
+    // the notebook has to grow to reach the pages it gained. A source that merely
+    // turned up again elsewhere must not append pages.
+    const int added = acceptMismatch
+        ? m_document->extendPdfSourceCoverage(sourceId)
+        : 0;
+
     refreshRows();
     emit sourcesChanged();
+
+    if (added > 0) {
+        emit pagesAdded();
+        QMessageBox::information(
+            this, tr("PDF Source Linked"),
+            tr("Linked. Added %1 page(s) for the pages this PDF has and the "
+               "notebook did not.").arg(added));
+    }
 }
 
 void PdfSourcesDialog::retrySelectedSource()

@@ -523,6 +523,23 @@ QVector<PdfSourceHealth> Document::pdfSourceHealthSnapshot() const
                 if (m_pdfProvidersIdentityChanged.contains(source.id)) {
                     health.status = PdfSourceHealthStatus::AvailableIdentityChanged;
                 }
+                // Pages the notebook references that this file cannot serve. The
+                // bundled branch has always counted these; without the same count
+                // here, a file that lost pages still reads as plainly Available
+                // and the pages that draw blank never say why.
+                int unserved = 0;
+                PdfProvider* externalProvider = providerForSource(sourceId);
+                const int servedPages =
+                    externalProvider ? externalProvider->pageCount() : 0;
+                auto unservedIt = referencedOriginalPages.constFind(sourceId);
+                if (servedPages > 0 && unservedIt != referencedOriginalPages.cend()) {
+                    for (int originalPage : unservedIt.value()) {
+                        const int resolved =
+                            resolveSourcePageIndex(sourceId, originalPage);
+                        if (resolved < 0 || resolved >= servedPages) ++unserved;
+                    }
+                }
+                health.unavailablePages = unserved;
             }
         } else {
             auto failureIt = m_pdfSourceFailures.find(source.id);
@@ -613,6 +630,68 @@ Document::SourceCandidateProbe Document::probeSourceCandidate(
     probe.result = matches ? SourceCandidateProbe::Result::Match
                            : SourceCandidateProbe::Result::Mismatch;
     return probe;
+}
+
+int Document::extendPdfSourceCoverage(const QString& sourceId)
+{
+    PdfProvider* provider = providerForSource(sourceId);
+    if (!provider || !provider->isValid()) return 0;
+
+    const int filePages = provider->pageCount();
+    if (filePages <= 0) return 0;
+
+    // Which original page numbers already have a notebook page. Read from the
+    // index, which is maintained for every page whether or not it is loaded.
+    QSet<int> covered;
+    for (const auto& [uuid, originalPage] : m_pagePdfIndex) {
+        auto sourceIt = m_pagePdfSource.find(uuid);
+        const QString pageSource = sourceIt != m_pagePdfSource.end()
+            ? sourceIt->second : QString();
+        if (pageSource == sourceId) covered.insert(originalPage);
+    }
+
+    const qreal pointsToPixels = 96.0 / 72.0;
+    int added = 0;
+    for (int originalPage = 0; originalPage < filePages; ++originalPage) {
+        if (covered.contains(originalPage)) continue;
+
+        // Bundled sources serve a different page number than the original one;
+        // an original page that maps nowhere has nothing to show and is skipped.
+        const int providerPage = resolveSourcePageIndex(sourceId, originalPage);
+        if (providerPage < 0 || providerPage >= filePages) continue;
+
+        auto newPage = createDefaultPage();
+        newPage->backgroundType = Page::BackgroundType::PDF;
+        newPage->pdfPageNumber = originalPage;
+        newPage->pdfSourceId = sourceId;
+        const QSizeF points = provider->pageSize(providerPage);
+        if (!points.isEmpty()) {
+            newPage->size = QSizeF(points.width() * pointsToPixels,
+                                   points.height() * pointsToPixels);
+        }
+
+        const QString uuid = newPage->uuid;
+        Page* raw = newPage.get();
+        m_pageOrder.append(uuid);
+        indexPageGeometry(uuid, *raw);
+        m_pagePdfIndex[uuid] = originalPage;
+        if (!sourceId.isEmpty()) m_pagePdfSource[uuid] = sourceId;
+        m_loadedPages[uuid] = std::move(newPage);
+        m_dirtyPages.insert(uuid);
+        ++added;
+    }
+
+    if (added > 0) {
+        invalidateUuidCache();
+        if (m_linkOutlineCacheReady) {
+            // Appended pages contribute no outline entries, but the cache is
+            // keyed by page index, so register each container to keep it whole.
+            const int total = static_cast<int>(m_pageOrder.size());
+            for (int i = total - added; i < total; ++i) m_pageOutline[i] = {};
+        }
+        markModified();
+    }
+    return added;
 }
 
 bool Document::locateSource(const QString& sourceId, const QString& newPath,

@@ -4480,8 +4480,18 @@ Double-click or double-tap to jump to a page</source>
     </message>
     <message>
         <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
-        <source>Linking it anyway is fine when the PDF was only re-saved or its metadata changed. Backgrounds are matched by page number, so a file whose pages moved will show the wrong background behind your annotations.</source>
-        <translation type="unfinished">如果这个 PDF 只是被重新保存过、或元数据变了，直接关联是安全的。页面背景是按页号匹配的，所以页数有位移的文件会让批注底下显示错误的背景。</translation>
+        <source>A notebook page is what carries the annotations for a PDF page, so pages this file has and the notebook does not will be added at the end. Backgrounds are matched by page number, so if the file's pages moved rather than grew, the backgrounds will not line up.</source>
+        <translation type="unfinished">笔记本页是承载 PDF 页批注的地方，所以此文件有、而笔记本还没有的页，会在末尾补上。页面背景是按页号匹配的，所以如果这个文件是页数有位移（而不是在后面增加），背景会对不上。</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>PDF Source Linked</source>
+        <translation type="unfinished">PDF 源已关联</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>
+        <source>Linked. Added %1 page(s) for the pages this PDF has and the notebook did not.</source>
+        <translation type="unfinished">已关联。为此 PDF 有、而笔记本没有的页补上了 %1 页。</translation>
     </message>
     <message>
         <location filename="../../source/ui/dialogs/PdfSourcesDialog.cpp" line="222"/>

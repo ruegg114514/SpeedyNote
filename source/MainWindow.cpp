@@ -3364,6 +3364,12 @@ void MainWindow::showPdfSourcesDialog(DocumentViewport* viewport)
             m_splitViewManager->clearScrollBarSearchMarkers(viewportGuard);
         }
     });
+    connect(&dialog, &PdfSourcesDialog::pagesAdded, this, [viewportGuard, doc]() {
+        if (!viewportGuard || viewportGuard->document() != doc) return;
+        // Same call appendPageToViewport() makes after adding a page: the layout
+        // cache is keyed by page count, so it has to be rebuilt, not just repainted.
+        viewportGuard->notifyDocumentStructureChanged();
+    });
     connect(&dialog, &PdfSourcesDialog::sourcesChanged, this, [this, viewportGuard, doc]() {
         if (!viewportGuard || viewportGuard->document() != doc) return;
         viewportGuard->notifyPdfChanged();
