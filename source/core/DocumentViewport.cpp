@@ -6954,7 +6954,12 @@ bool DocumentViewport::updatePalmRejection(QTouchEvent* touchEvent)
     int down = 0;
     const auto& pts = SN_TOUCH_POINTS(touchEvent);
     for (const auto& tp : pts) {
-        if (tp.state() != Qt::TouchPointReleased) {
+        // SN_TP_RELEASED, not Qt::TouchPointReleased: on Qt6 the point is a
+        // QEventPoint whose state() is QEventPoint::State, a different enum
+        // from the Qt5 Qt::TouchPointState. Comparing across them still
+        // compiled but warned (-Wenum-compare), and would stop compiling the
+        // moment the values diverged.
+        if (tp.state() != SN_TP_RELEASED) {
             ++down;
         }
     }
