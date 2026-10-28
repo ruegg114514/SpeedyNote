@@ -238,6 +238,79 @@ private slots:
             QVERIFY(widget->isVisibleTo(&toolbar));
     }
 
+    // The three deliberate zoom buttons: they exist, they are plain action
+    // buttons (a click is a step, not a state), they carry their own icons, and
+    // each one emits exactly its own signal and nobody else's.
+    void testZoomButtons() {
+        QWidget host;
+        Toolbar toolbar(&host);
+
+        int inCount = 0, outCount = 0, fitCount = 0;
+        connect(&toolbar, &Toolbar::zoomInRequested,  [&inCount]()  { ++inCount;  });
+        connect(&toolbar, &Toolbar::zoomOutRequested, [&outCount]() { ++outCount; });
+        connect(&toolbar, &Toolbar::fitWidthRequested,[&fitCount]() { ++fitCount; });
+
+        ActionButton* buttons[] = {
+            toolbar.m_zoomOutButton,
+            toolbar.m_zoomInButton,
+            toolbar.m_fitWidthButton,
+        };
+        for (ActionButton* button : buttons) {
+            QVERIFY(button);
+            // An ActionButton, not a ToggleButton: nothing here holds state.
+            QVERIFY(!button->isCheckable());
+            QCOMPARE(button->objectName(), QString("ActionButton"));
+            QVERIFY(!button->icon().isNull());
+            // Themed icon resolves in both palettes.
+            button->setDarkMode(true);
+            QVERIFY(!button->icon().isNull());
+            button->setDarkMode(false);
+            QVERIFY(!button->icon().isNull());
+        }
+
+        toolbar.m_zoomOutButton->click();
+        QCOMPARE(outCount, 1);
+        QCOMPARE(inCount, 0);
+        QCOMPARE(fitCount, 0);
+
+        toolbar.m_zoomInButton->click();
+        QCOMPARE(inCount, 1);
+        QCOMPARE(outCount, 1);
+
+        toolbar.m_fitWidthButton->click();
+        QCOMPARE(fitCount, 1);
+        QCOMPARE(inCount, 1);
+
+        // They live on the overflow page with the touch controls, so the zoom
+        // commands stay reachable on a narrow window instead of being dropped.
+        QVERIFY(toolbar.m_page2Widgets.contains(toolbar.m_zoomInButton));
+        QVERIFY(toolbar.m_page2Widgets.contains(toolbar.m_zoomOutButton));
+        QVERIFY(toolbar.m_page2Widgets.contains(toolbar.m_fitWidthButton));
+    }
+
+    // The zoom lock is a toggle and reports its state; MainWindow owns the
+    // behaviour behind it. This only pins the button contract.
+    void testZoomLockButton() {
+        QWidget host;
+        Toolbar toolbar(&host);
+
+        QVERIFY(toolbar.m_manualZoomBlockedButton);
+        QVERIFY(toolbar.m_manualZoomBlockedButton->isCheckable());
+        QCOMPARE(toolbar.m_manualZoomBlockedButton->objectName(), QString("ToggleButton"));
+        QVERIFY(!toolbar.m_manualZoomBlockedButton->icon().isNull());
+
+        QSignalSpy spy(&toolbar, &Toolbar::manualZoomBlockedToggled);
+        toolbar.m_manualZoomBlockedButton->click();
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.takeFirst().at(0).toBool(), true);
+
+        // setManualZoomBlocked() must sync the button without looking like a
+        // click, or the sync would write the setting straight back.
+        toolbar.setManualZoomBlocked(false);
+        QVERIFY(!toolbar.m_manualZoomBlockedButton->isChecked());
+        QCOMPARE(spy.count(), 0);
+    }
+
     // An expanded subtoolbar must keep its width while its page is hidden,
     // otherwise the measurement driving paging collapses and the strip comes
     // back a sliver wide.

@@ -99,3 +99,5 @@ scripts/
 app_icon.rc
 packaging.iss
 android/app-resources/AndroidManifest.xml
+# Local scratch (agent workspace previews, temporary dumps)
+.workbuddy/

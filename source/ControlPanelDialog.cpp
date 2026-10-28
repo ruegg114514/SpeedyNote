@@ -2171,6 +2171,27 @@ void ControlPanelDialog::createStylusTab() {
              &pr.tapDetectionEnabled, &pr.tapMaxDurationMs,
              50, 2000, 25, tr(" ms"), tr("最长点按："));
 
+    // Single-point-only input. A plain checkbox rather than an addGuard() row:
+    // it has no timing, it is a pure on/off. It is also the same value the
+    // toolbar's "禁止手动缩放" button writes, so editing it here must push the
+    // change out through applyPalmRejectionSettings() - that is what keeps the
+    // button from showing the opposite of what is in force.
+    QCheckBox *singleTouchBox =
+        new QCheckBox(tr("只允许单点触控（禁止手动缩放）"), content);
+    singleTouchBox->setChecked(pr.singleTouchOnly);
+    singleTouchBox->setToolTip(tr(
+        "开启后，任何同时出现两个及以上触点的触摸序列都会被整段拒绝，"
+        "直到所有手指离开屏幕。缩放必须用双指，所以这样就从源头上禁掉了手动缩放，"
+        "而单指平移、点击和笔输入完全不受影响。\n"
+        "工具栏上的“禁止手动缩放”按钮就是这一项。+ / - / 适应宽度按钮和键盘快捷键"
+        "始终可用 —— 这个开关拦的是误触，不是功能。"));
+    layout->addWidget(singleTouchBox);
+    connect(singleTouchBox, &QCheckBox::toggled, this, [this](bool on) {
+        PalmRejectionSettings::instance().singleTouchOnly = on;
+        PalmRejectionSettings::instance().save();
+        if (mainWindowRef) mainWindowRef->applyPalmRejectionSettings();
+    });
+
     addSection(tr("滑动手感"));
 
     QCheckBox *inertiaBox = new QCheckBox(tr("松手后继续滑行（惯性滚动）"), content);
@@ -2212,7 +2233,8 @@ void ControlPanelDialog::createStylusTab() {
     QPushButton *resetButton = new QPushButton(tr("恢复防误触默认值"), content);
     layout->addWidget(resetButton);
     connect(resetButton, &QPushButton::clicked, this,
-            [this, boxes, spins, flags, values, inertiaBox, deadZoneSpin]() {
+            [this, boxes, spins, flags, values, inertiaBox, deadZoneSpin,
+             singleTouchBox]() {
         PalmRejectionSettings::instance().resetToDefaults();
         // The vectors alias the (now reset) settings, so reading through them
         // pushes the defaults back into the widgets.
@@ -2225,6 +2247,7 @@ void ControlPanelDialog::createStylusTab() {
         const PalmRejectionSettings& d = PalmRejectionSettings::instance();
         inertiaBox->setChecked(d.inertiaEnabled);
         deadZoneSpin->setValue(d.panDeadZonePx);
+        singleTouchBox->setChecked(d.singleTouchOnly);
         if (mainWindowRef) mainWindowRef->applyPalmRejectionSettings();
     });
 

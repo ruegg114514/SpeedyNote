@@ -384,7 +384,8 @@ MainWindow::MainWindow(QWidget *parent)
             }
 #endif
             vp->setTouchGestureMode(effectiveMode);
-            vp->setZoomGesturesEnabled(!zoomGesturesLocked);
+            vp->setSingleTouchOnly(manualZoomBlocked);
+            vp->setZoomGesturesEnabled(!manualZoomBlocked);
         }
         
         // Refresh OS window title + NavigationBar filename label from the
@@ -1248,8 +1249,19 @@ void MainWindow::setupUi() {
         setTouchGestureMode(gestureMode);
         // qDebug() << "Toolbar: Touch gesture mode changed to" << mode;
     });
-    connect(m_toolbar, &Toolbar::zoomLockToggled, this, [this](bool locked) {
-        setZoomGesturesLocked(locked);
+    connect(m_toolbar, &Toolbar::manualZoomBlockedToggled, this, [this](bool blocked) {
+        setManualZoomBlocked(blocked);
+    });
+    // The deliberate zoom commands. They run through the same viewport methods
+    // the keyboard shortcuts use, so a click and Ctrl++ cannot drift apart.
+    connect(m_toolbar, &Toolbar::zoomInRequested, this, [this]() {
+        if (DocumentViewport* vp = currentViewport()) vp->zoomIn();
+    });
+    connect(m_toolbar, &Toolbar::zoomOutRequested, this, [this]() {
+        if (DocumentViewport* vp = currentViewport()) vp->zoomOut();
+    });
+    connect(m_toolbar, &Toolbar::fitWidthRequested, this, [this]() {
+        if (DocumentViewport* vp = currentViewport()) vp->zoomToWidth();
     });
     // ------------------ End of Toolbar signal connections ------------------
     
@@ -5707,21 +5719,45 @@ void MainWindow::setTouchGestureMode(TouchGestureMode mode) {
     settings.setValue("touchGestureMode", static_cast<int>(mode));
 }
 
-void MainWindow::setZoomGesturesLocked(bool locked) {
-    zoomGesturesLocked = locked;
+void MainWindow::setManualZoomBlocked(bool blocked) {
+    manualZoomBlocked = blocked;
 
-    if (DocumentViewport* vp = currentViewport()) {
-        vp->setZoomGesturesEnabled(!locked);
+    // The lock has two halves and they belong together:
+    //   * singleTouchOnly stops a pinch from ever starting, by refusing any
+    //     touch sequence that carries two or more points (single-finger
+    //     panning keeps working - this is the part the user asked for);
+    //   * setZoomGesturesEnabled freezes the remaining gesture paths that do
+    //     not come through the touchscreen: trackpad pinch and Ctrl+wheel.
+    // The settings value is process-wide, so pushing it to the current viewport
+    // is enough for the first half; the second half is per-viewport state and
+    // is applied to every pane in split view (see the loop below), and to new
+    // viewports as they are created.
+    palmRejection().singleTouchOnly = blocked;
+    palmRejection().save();
+
+    // Push to every pane, not just the active one: a split view has two live
+    // viewports and both accept touch. setSingleTouchOnly() also drops any
+    // sequence either of them has already latched, so unlocking takes effect
+    // immediately instead of at the next finger-lift.
+    auto applyToViewport = [blocked](DocumentViewport* vp) {
+        if (!vp) return;
+        vp->setSingleTouchOnly(blocked);
+        vp->setZoomGesturesEnabled(!blocked);
+    };
+    applyToViewport(currentViewport());
+    if (m_splitViewManager) {
+        applyToViewport(m_splitViewManager->activeViewport());
+        applyToViewport(m_splitViewManager->inactiveViewport());
     }
 
     // Sync the button so a state loaded from settings, or a later change made
     // elsewhere, cannot leave it showing the opposite of what is in force.
     if (m_toolbar) {
-        m_toolbar->setZoomLocked(locked);
+        m_toolbar->setManualZoomBlocked(blocked);
     }
-
-    QSettings settings("SpeedyNote", "App");
-    settings.setValue("zoomGesturesLocked", locked);
+    // No separate QSettings key any more: the value lives in
+    // PalmRejectionSettings::singleTouchOnly, so the toolbar button and the
+    // 防误触 tab edit one setting instead of two that could disagree.
 }
 
 void MainWindow::cycleTouchGestureMode() {
@@ -5747,13 +5783,23 @@ void MainWindow::loadUserSettings() {
     touchGestureMode = static_cast<TouchGestureMode>(savedMode);
     setTouchGestureMode(touchGestureMode);
 
-    // Gesture-zoom lock: off by default, which is how the app behaved before the
-    // button existed.
-    zoomGesturesLocked = settings.value("zoomGesturesLocked", false).toBool();
-    setZoomGesturesLocked(zoomGesturesLocked);
-    
-    // Load every anti-mistouch guard (toggles + timings) in one go.
+    // Load every anti-mistouch guard (toggles + timings) in one go. This has to
+    // happen before the zoom lock below, because the lock IS one of these
+    // guards now (singleTouchOnly) - loading afterwards would overwrite the
+    // value the toolbar just pushed.
     palmRejection().load();
+
+    // Block manual zoom: off by default, which is how the app behaved before
+    // the button existed. It used to be stored under its own key; adopt that
+    // value once, then drop the old key so the two can never disagree.
+    if (settings.contains(QStringLiteral("zoomGesturesLocked"))) {
+        palmRejection().singleTouchOnly =
+            settings.value(QStringLiteral("zoomGesturesLocked")).toBool();
+        palmRejection().save();
+        settings.remove(QStringLiteral("zoomGesturesLocked"));
+    }
+    manualZoomBlocked = palmRejection().singleTouchOnly;
+    setManualZoomBlocked(manualZoomBlocked);
 
     // Load viewport performance knobs (gesture snapshot resolution). Read
     // live at gesture begin, so a load here is all the wiring it needs.
@@ -5786,10 +5832,18 @@ void MainWindow::setPalmRejectionDelay(int delayMs) {
 
 void MainWindow::applyPalmRejectionSettings() {
     // Every guard reads PalmRejectionSettings at decision time, so there is
-    // nothing to push out to the viewports. The one piece of live state that
-    // can go stale is the suppression latch: switching the guard off (or
-    // shortening it) while it is holding touch disabled must release touch now
-    // rather than waiting for the pen to leave range.
+    // nothing to push out to the viewports. The two pieces of live state that
+    // can go stale are the suppression latch and the zoom lock:
+    //   * switching the suppression guard off (or shortening it) while it is
+    //     holding touch disabled must release touch now rather than waiting for
+    //     the pen to leave range;
+    //   * singleTouchOnly is edited both here and by the toolbar button, so a
+    //     change made in the 防误触 tab (including the reset button) has to
+    //     reach the button and every viewport, not just the settings struct.
+    if (manualZoomBlocked != palmRejection().singleTouchOnly) {
+        setManualZoomBlocked(palmRejection().singleTouchOnly);
+    }
+
     if (!palmRejection().stylusSuppressEnabled && m_palmRejectionActive) {
         m_palmRejectionTimer->stop();
         m_palmRejectionActive = false;

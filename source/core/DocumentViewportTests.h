@@ -12,6 +12,7 @@
 #include "Document.h"
 #include "ObjectConstraints.h"
 #include "Page.h"
+#include "PalmRejectionSettings.h"
 #include "../objects/ImageObject.h"
 #include "../objects/LinkObject.h"
 #include "../objects/OcrTextObject.h"
@@ -5427,6 +5428,59 @@ public:
     }
 
     /**
+     * @brief The "block manual zoom" input guard's on/off plumbing.
+     *
+     * The guard itself runs inside event() and needs a real touchscreen to
+     * exercise, but the state it reads is worth pinning on its own: it is shared
+     * with the 防误触 settings tab, and it must survive the other zoom-related
+     * setter being called, which is exactly the bug this replaces (the two used
+     * to be independent and could disagree).
+     */
+    static bool testSingleTouchOnlyGuard() {
+        printf("  testSingleTouchOnlyGuard... ");
+
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+
+        PalmRejectionSettings saved = palmRejection();
+        auto doc = Document::createNew("Single touch guard");
+        DocumentViewport viewport;
+        viewport.setDocument(doc.get());
+
+        // Default is off: the app has never blocked multi-touch out of the box.
+        if (PalmRejectionSettings::defaults().singleTouchOnly)
+            return fail("singleTouchOnly must default to off");
+
+        viewport.setSingleTouchOnly(true);
+        if (!viewport.isSingleTouchOnly())
+            return fail("setSingleTouchOnly(true) did not stick");
+        if (!palmRejection().singleTouchOnly)
+            return fail("the viewport did not write through to the shared settings");
+
+        // The gesture gate is a separate half of the same lock and must not
+        // reset it - it is called right after, every time the lock is applied.
+        viewport.setZoomGesturesEnabled(false);
+        if (!viewport.isSingleTouchOnly())
+            return fail("setZoomGesturesEnabled clobbered the single-touch guard");
+
+        viewport.setZoomGesturesEnabled(true);
+        if (!viewport.isSingleTouchOnly())
+            return fail("re-enabling gesture zoom cleared the single-touch guard");
+
+        // Turning the lock off must clear it immediately, not at the next
+        // finger-lift, or unlocking would appear to do nothing.
+        viewport.setSingleTouchOnly(false);
+        if (viewport.isSingleTouchOnly())
+            return fail("setSingleTouchOnly(false) did not clear the guard");
+
+        palmRejection() = saved;
+        printf("PASSED\n");
+        return true;
+    }
+
+    /**
      * @brief The missing-PDF warning state machine the pane's banner renders.
      *
      * The viewport keeps the state and the pane owns the widget, so this is the
@@ -5656,6 +5710,7 @@ public:
                 "testOverlayChildInputRouting");
         runTest(testGestureSnapshotExcludesChildren,
                 "testGestureSnapshotExcludesChildren");
+        runTest(testSingleTouchOnlyGuard, "testSingleTouchOnlyGuard");
         runTest(testPdfWarningState, "testPdfWarningState");
         runTest(testPdfPlaceholderPaper, "testPdfPlaceholderPaper");
         

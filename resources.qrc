@@ -94,6 +94,12 @@
     <file>resources/icons/rightsidebar_reversed.png</file>
     <file>resources/icons/sidenotes.png</file>
     <file>resources/icons/sidenotes_reversed.png</file>
+    <file>resources/icons/zoomin.png</file>
+    <file>resources/icons/zoomin_reversed.png</file>
+    <file>resources/icons/zoomout.png</file>
+    <file>resources/icons/zoomout_reversed.png</file>
+    <file>resources/icons/fitwidth.png</file>
+    <file>resources/icons/fitwidth_reversed.png</file>
     <file>resources/icons/zoomlock.png</file>
     <file>resources/icons/zoomlock_reversed.png</file>
     <file>resources/icons/undo.png</file>

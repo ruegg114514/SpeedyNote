@@ -22,11 +22,14 @@ class OcrSubToolbar;
  * Toolbar - Tab-specific tool selection and actions with inline subtoolbars.
  *
  * Layout (center-aligned):
- * [Pen(+presets)][Marker(+presets)][Eraser(+presets)][Lasso][Image][Link][ObjectText][Highlighter(+presets)][OCR(+controls)]  gap  [Undo][Redo] [Touch]
+ * [Pen(+presets)][Marker(+presets)][Eraser(+presets)][Lasso][Image][Link][ObjectText][Highlighter(+presets)][OCR(+controls)]  gap  [Undo][Redo] [Touch] [Zoom- Zoom+ FitWidth] [BlockZoom]
  *
  * When a tool is selected its ExpandableToolButton expands to reveal
  * inline preset buttons (colors, thicknesses, toggles).
  * The OCR button is independent and coexists with the active tool's subtoolbar.
+ *
+ * The trailing group splits across two pages when the window is too narrow for
+ * one row; see updatePagination().
  */
 class Toolbar : public QWidget {
     Q_OBJECT
@@ -40,7 +43,7 @@ public:
     void setCurrentTool(ToolType tool);
     void setObjectInsertMode(DocumentViewport::ObjectInsertMode mode);
     void setTouchGestureMode(int mode);
-    void setZoomLocked(bool locked);
+    void setManualZoomBlocked(bool blocked);
     void updateTheme(bool darkMode);
     void setUndoEnabled(bool enabled);
     void setRedoEnabled(bool enabled);
@@ -77,7 +80,10 @@ signals:
     void undoClicked();
     void redoClicked();
     void touchGestureModeChanged(int mode);
-    void zoomLockToggled(bool locked);
+    void manualZoomBlockedToggled(bool blocked);
+    void zoomInRequested();
+    void zoomOutRequested();
+    void fitWidthRequested();
     void screenshotRequested();
 
 protected:
@@ -150,13 +156,26 @@ private:
     ActionButton *m_undoButton;
     ActionButton *m_redoButton;
 
+    /// Deliberate zoom. These are the ways to change the zoom that cannot fire
+    /// by accident: one click each, no gesture to misread. They stay live while
+    /// the zoom lock below is on - that lock removes the accidental paths, it
+    /// does not take zooming away.
+    ActionButton *m_zoomOutButton;
+    ActionButton *m_zoomInButton;
+    ActionButton *m_fitWidthButton;
+
     // Tab-specific mode
     ThreeStateButton *m_touchGestureButton;
 
-    /// Freezes gesture-driven zoom: touch pinch, trackpad pinch and Ctrl+wheel.
-    /// Those are the ones that fire by accident. Keyboard zoom and Fit Width
-    /// stay available, being deliberate. See MainWindow::setZoomGesturesLocked.
-    ToggleButton *m_zoomLockButton;
+    /// Blocks manual (finger-driven) zoom, so a resting palm or a second
+    /// finger cannot rescale the page. It works by rejecting any touch sequence
+    /// that carries two or more points and letting single-point input through
+    /// untouched - the same shape as the anti-mistouch guards - plus the old
+    /// gesture-zoom freeze for pinch and Ctrl+wheel. The +/-/Fit Width buttons
+    /// and the keyboard shortcuts are deliberately left working: the lock is
+    /// there to stop accidents, not to take zooming away.
+    /// See MainWindow::setManualZoomBlocked.
+    ToggleButton *m_manualZoomBlockedButton;
 
     // Overflow paging
     ActionButton *m_pagerBackButton = nullptr;

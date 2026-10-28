@@ -5829,6 +5829,32 @@ and select &quot;Star&quot; to add it here.</source>
 1：仅Y轴滚动
 2：开</translation>
     </message>
+    <message>
+        <location filename="../../source/ui/Toolbar.cpp" line="193"/>
+        <source>Zoom Out (Ctrl+-)</source>
+        <translation type="unfinished">缩小画布 (Ctrl+-)</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/Toolbar.cpp" line="198"/>
+        <source>Zoom In (Ctrl++)</source>
+        <translation type="unfinished">放大画布 (Ctrl++)</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/Toolbar.cpp" line="203"/>
+        <source>Fit Width (Ctrl+2)
+Scales the page so its content fills the window</source>
+        <translation type="unfinished">适应宽度 (Ctrl+2)
+把页面缩放到内容刚好填满窗口</translation>
+    </message>
+    <message>
+        <location filename="../../source/ui/Toolbar.cpp" line="217"/>
+        <source>Block Manual Zoom
+Rejects two or more touch points; single-finger panning still works.
+The + and - buttons keep working</source>
+        <translation type="unfinished">禁止手动缩放
+拒绝两个及以上的触点；单指平移仍然可用。
++ / - / 适应宽度按钮始终可用</translation>
+    </message>
 </context>
 <context>
     <name>UndoDeleteButton</name>

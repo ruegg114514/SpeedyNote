@@ -102,6 +102,16 @@ struct PalmRejectionSettings {
     // inertia either). 0 = previous behaviour (no tolerance).
     int panDeadZonePx = 0;
 
+    // ---- 12. Single-point-only input (the toolbar's "block manual zoom") ----
+    // A pinch needs two fingers, and a hand settling back onto the glass
+    // produces two or more contact points long before the pen is noticed. With
+    // this on, any touch sequence that ever carries two or more points is
+    // voided and latched until every finger lifts, so the canvas accepts
+    // single-point input only. Deliberate zoom - the toolbar's + / - / Fit
+    // Width buttons and the keyboard shortcuts - is untouched: this guards the
+    // surface, not the commands.
+    bool singleTouchOnly = false;
+
     // ===== Access =====
 
     /// Process-wide instance. Main thread only (QSettings and the settings
@@ -161,6 +171,7 @@ struct PalmRejectionSettings {
         tapMaxDurationMs       = s.value(QStringLiteral("tapMaxDurationMs"), d.tapMaxDurationMs).toInt();
         inertiaEnabled         = s.value(QStringLiteral("inertiaEnabled"), d.inertiaEnabled).toBool();
         panDeadZonePx          = s.value(QStringLiteral("panDeadZonePx"), d.panDeadZonePx).toInt();
+        singleTouchOnly        = s.value(QStringLiteral("singleTouchOnly"), d.singleTouchOnly).toBool();
         const bool migrated    = s.value(QStringLiteral("legacyMigrated"), false).toBool();
         s.endGroup();
 
@@ -203,6 +214,7 @@ struct PalmRejectionSettings {
         s.setValue(QStringLiteral("tapMaxDurationMs"), tapMaxDurationMs);
         s.setValue(QStringLiteral("inertiaEnabled"), inertiaEnabled);
         s.setValue(QStringLiteral("panDeadZonePx"), panDeadZonePx);
+        s.setValue(QStringLiteral("singleTouchOnly"), singleTouchOnly);
         s.endGroup();
     }
 

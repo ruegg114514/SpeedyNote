@@ -119,20 +119,35 @@ public:
     // int getCurrentPageForCanvas(InkCanvas *canvas);  // MW1.4: Stub - returns 0
 
     TouchGestureMode touchGestureMode = TouchGestureMode::Full;
-    bool zoomGesturesLocked = false;  ///< Gesture pinch and Ctrl+wheel are frozen
+    /// True while manual (finger-driven) zoom is blocked. Stored as
+    /// PalmRejectionSettings::singleTouchOnly, so the toolbar button and the
+    /// 防误触 settings tab are two views of one value.
+    bool manualZoomBlocked = false;
     TouchGestureMode previousTouchGestureMode = TouchGestureMode::Full; // Store state before text selection
     TouchGestureMode getTouchGestureMode() const;
     void setTouchGestureMode(TouchGestureMode mode);
     void cycleTouchGestureMode(); // Cycle through: Disabled -> YAxisOnly -> Full -> Disabled
 
     /**
-     * @brief Freeze or release gesture-driven zoom across every viewport.
+     * @brief Block or allow manual (finger-driven) zoom across every viewport.
+     *
+     * Two halves, applied together:
+     *   - PalmRejectionSettings::singleTouchOnly makes the viewport refuse any
+     *     touch sequence that carries two or more points. A pinch needs two
+     *     fingers, so it cannot start; single-finger panning, taps and pen
+     *     input are unaffected. This is the 参照防误触 part.
+     *   - setZoomGesturesEnabled(false) on each viewport freezes the gesture
+     *     paths that never touch the touchscreen: trackpad pinch and Ctrl+wheel.
+     *
+     * The toolbar's + / - / Fit Width buttons and the keyboard shortcuts stay
+     * live throughout - the lock removes accidents, not the feature.
      *
      * Lives on MainWindow rather than a viewport because it is a preference about
      * the person using the app, not about a document: it has to survive a tab
-     * switch, a new tab and a restart, which is what the QSettings entry is for.
+     * switch, a new tab and a restart, which is what the persisted settings
+     * value is for.
      */
-    void setZoomGesturesLocked(bool locked);
+    void setManualZoomBlocked(bool blocked);
 
     // Palm rejection: suppresses touch gestures while the stylus is in range.
     // Available on every platform (the guards live in the input code everywhere,

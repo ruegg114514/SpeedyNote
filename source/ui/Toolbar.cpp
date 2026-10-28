@@ -179,19 +179,49 @@ void Toolbar::setupUi()
     m_touchGestureButton->setToolTip(tr("Touch Gesture Mode\n0: Off\n1: Y-axis scroll only\n2: Full gestures"));
     mainLayout->addWidget(m_touchGestureButton);
 
-    // --- Lock gesture zoom ---
+    // --- Zoom (deliberate) ---
+    // Three one-click commands: out, in, and fit width. They sit next to the
+    // touch controls because the lock below is what makes them matter - once
+    // the pinch is blocked, these are the way to zoom without a keyboard. They
+    // are ActionButtons, not ToggleButtons: a click is an instant step, there
+    // is no state to keep.
+    QWidget* zoomGap = createGapWidget(8);
+    mainLayout->addWidget(zoomGap);
+
+    m_zoomOutButton = new ActionButton(this);
+    m_zoomOutButton->setThemedIcon("zoomout");
+    m_zoomOutButton->setToolTip(tr("Zoom Out (Ctrl+-)"));
+    mainLayout->addWidget(m_zoomOutButton);
+
+    m_zoomInButton = new ActionButton(this);
+    m_zoomInButton->setThemedIcon("zoomin");
+    m_zoomInButton->setToolTip(tr("Zoom In (Ctrl++)"));
+    mainLayout->addWidget(m_zoomInButton);
+
+    m_fitWidthButton = new ActionButton(this);
+    m_fitWidthButton->setThemedIcon("fitwidth");
+    m_fitWidthButton->setToolTip(tr("Fit Width (Ctrl+2)\nScales the page so its content fills the window"));
+    mainLayout->addWidget(m_fitWidthButton);
+
+    // --- Block manual zoom ---
     // Next to the touch-gesture control on purpose: both exist to stop input the
     // reader did not ask for, and a pinch is as easy to trigger with a resting
     // palm as a pan is. What it costs is worse, though - a stray pan is undone by
     // scrolling back, a stray pinch silently changes the zoom that was set.
-    m_zoomLockButton = new ToggleButton(this);
-    m_zoomLockButton->setThemedIcon("zoomlock");
-    m_zoomLockButton->setToolTip(tr("Lock Gesture Zoom\nPinch and Ctrl+wheel no longer change the zoom"));
-    mainLayout->addWidget(m_zoomLockButton);
+    // It rejects multi-point touch outright (see PalmRejectionSettings::
+    // singleTouchOnly) rather than only freezing the zoom, so a second finger
+    // can no longer start a pinch in the first place; single-finger panning
+    // still works.
+    m_manualZoomBlockedButton = new ToggleButton(this);
+    m_manualZoomBlockedButton->setThemedIcon("zoomlock");
+    m_manualZoomBlockedButton->setToolTip(tr("Block Manual Zoom\nRejects two or more touch points; single-finger panning still works.\nThe + and - buttons keep working"));
+    mainLayout->addWidget(m_manualZoomBlockedButton);
 
     m_page2Widgets = {
         m_ocrExpandable, m_panButton, undoGap,
-        m_undoButton, m_redoButton, touchGap, m_touchGestureButton, m_zoomLockButton
+        m_undoButton, m_redoButton, touchGap, m_touchGestureButton,
+        zoomGap, m_zoomOutButton, m_zoomInButton, m_fitWidthButton,
+        m_manualZoomBlockedButton
     };
 
     mainLayout->addStretch(1);
@@ -275,8 +305,15 @@ void Toolbar::connectSignals()
     connect(m_touchGestureButton, &ThreeStateButton::stateChanged,
             this, &Toolbar::touchGestureModeChanged);
 
-    connect(m_zoomLockButton, &QPushButton::toggled,
-            this, &Toolbar::zoomLockToggled);
+    connect(m_manualZoomBlockedButton, &QPushButton::toggled,
+            this, &Toolbar::manualZoomBlockedToggled);
+
+    connect(m_zoomInButton, &QPushButton::clicked,
+            this, &Toolbar::zoomInRequested);
+    connect(m_zoomOutButton, &QPushButton::clicked,
+            this, &Toolbar::zoomOutRequested);
+    connect(m_fitWidthButton, &QPushButton::clicked,
+            this, &Toolbar::fitWidthRequested);
 }
 
 void Toolbar::expandToolButton(ToolType tool)
@@ -426,12 +463,12 @@ void Toolbar::setTouchGestureMode(int mode)
     m_touchGestureButton->setState(mode);
 }
 
-void Toolbar::setZoomLocked(bool locked)
+void Toolbar::setManualZoomBlocked(bool blocked)
 {
     // Blocked: syncing the button from the stored setting must not look like a
     // click and write the setting straight back.
-    const QSignalBlocker blocker(m_zoomLockButton);
-    m_zoomLockButton->setChecked(locked);
+    const QSignalBlocker blocker(m_manualZoomBlockedButton);
+    m_manualZoomBlockedButton->setChecked(blocked);
 }
 
 void Toolbar::updateTheme(bool darkMode)
@@ -472,7 +509,10 @@ void Toolbar::updateTheme(bool darkMode)
     m_undoButton->setDarkMode(darkMode);
     m_redoButton->setDarkMode(darkMode);
     m_touchGestureButton->setDarkMode(darkMode);
-    m_zoomLockButton->setDarkMode(darkMode);
+    m_zoomInButton->setDarkMode(darkMode);
+    m_zoomOutButton->setDarkMode(darkMode);
+    m_fitWidthButton->setDarkMode(darkMode);
+    m_manualZoomBlockedButton->setDarkMode(darkMode);
     m_pagerBackButton->setDarkMode(darkMode);
     m_pagerNextButton->setDarkMode(darkMode);
 

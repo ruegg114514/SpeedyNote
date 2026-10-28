@@ -2709,12 +2709,35 @@ public slots:
      *
      * Blocks exactly the three paths that can fire without anyone asking for a
      * zoom: touch pinch, trackpad pinch and Ctrl+wheel. All three funnel through
-     * updateZoomGesture(), so that single check is the whole implementation.
-     * The deliberate ways to zoom - the keyboard shortcuts, Fit Width and Fit
-     * Page - are left alone, because a lock is meant to stop accidents, not to
-     * take the feature away.
+     * updateZoomGesture(), so that single check covers them.
+     *
+     * This is the second half of the toolbar's "block manual zoom"; the first
+     * half is setSingleTouchOnly() below, which stops the pinch from ever
+     * starting. Both are set together by MainWindow::setManualZoomBlocked().
+     * The deliberate ways to zoom - the toolbar's + / - / Fit Width buttons and
+     * the keyboard shortcuts - are left alone, because a lock is meant to stop
+     * accidents, not to take the feature away.
      */
     void setZoomGesturesEnabled(bool enabled);
+
+    /**
+     * @brief Reject multi-point touch, allowing single-point input only.
+     * @param enabled True to void any touch sequence carrying 2+ points.
+     *
+     * This is the input-side half of the toolbar's "block manual zoom": a pinch
+     * is impossible without a second contact point, so refusing every sequence
+     * that ever carries one removes pinch zoom (and two-finger pan) while
+     * leaving single-finger panning, taps and pen input exactly as they were.
+     * The guard lives here, in front of the gesture handler, rather than inside
+     * updateZoomGesture(), because blocking the gesture after it has begun
+     * would still let the pinch capture a frame and fight the page.
+     *
+     * The value itself lives in PalmRejectionSettings::singleTouchOnly so it
+     * persists and sits with the other anti-mistouch guards; this setter just
+     * keeps the per-viewport latch consistent when the switch flips.
+     */
+    void setSingleTouchOnly(bool enabled);
+    bool isSingleTouchOnly() const;
     
     // ===== Public Clipboard Operations (Action Bar support) =====
     
@@ -3178,6 +3201,31 @@ private:
     bool m_palmContactActive = false;
     /// Current down touch-point count across the active touch sequence.
     int m_activeTouchCount = 0;
+
+    /// True once the touch sequence in flight has carried two or more points
+    /// while PalmRejectionSettings::singleTouchOnly is on. The sequence is then
+    /// rejected until every finger lifts: a pinch needs two fingers, so a
+    /// second point appearing is the exact event that has to be refused, and a
+    /// palm that settles back down must not be able to pan with whichever
+    /// finger remains. Latched per sequence rather than evaluated per event,
+    /// because by the time the second point lifts the damage (a rescale) would
+    /// already be done.
+    bool m_multiTouchSequenceRejected = false;
+
+    /// Touch-point IDs down right now, tracked here rather than read from
+    /// TouchGestureHandler. The handler only sees an event after this guard has
+    /// decided to let it through, so its count is one event behind at exactly
+    /// the moment that matters - the TouchBegin carrying the second finger.
+    /// Android makes it worse: a TouchUpdate there often reports only the point
+    /// that moved, so counting points in the current event alone undercounts.
+    QSet<int> m_singleTouchPointIds;
+
+    /// True when the touch sequence in flight began over a floating child
+    /// widget (format bar, inline editor, add-page button). Those sequences
+    /// belong to that widget and are exempt from the single-point guard.
+    /// Separate from m_touchSequenceOnChild because the guard runs earlier in
+    /// event(), before that latch is refreshed for the new sequence.
+    bool m_singleTouchSequenceOnChild = false;
 
     /// Pen-activity watchdog. Restarted on EVERY tablet event (press, move,
     /// release, hover). When it expires, the pen has stopped producing any

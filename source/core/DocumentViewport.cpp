@@ -4860,6 +4860,9 @@ void DocumentViewport::hideEvent(QHideEvent* event)
     }
     m_stylusInProximity = false;
     m_touchSequenceRejected = false;
+    m_multiTouchSequenceRejected = false;
+    m_singleTouchPointIds.clear();
+    m_singleTouchSequenceOnChild = false;
     
     // Also reset touch handler state including inertia
     // This prevents inertia callbacks from accessing invalid widget state
@@ -5599,6 +5602,19 @@ void DocumentViewport::setZoomGesturesEnabled(bool enabled)
     m_zoomGesturesEnabled = enabled;
 }
 
+void DocumentViewport::setSingleTouchOnly(bool enabled)
+{
+    palmRejection().singleTouchOnly = enabled;
+    if (!enabled) {
+        m_multiTouchSequenceRejected = false;
+    }
+}
+
+bool DocumentViewport::isSingleTouchOnly() const
+{
+    return palmRejection().singleTouchOnly;
+}
+
 bool DocumentViewport::event(QEvent* event)
 {
     // ===== Tablet Proximity Events =====
@@ -5681,6 +5697,114 @@ bool DocumentViewport::event(QEvent* event)
             return true;
         }
         
+        // Single-point-only input (PalmRejectionSettings::singleTouchOnly).
+        //
+        // A pinch cannot happen with one finger, so refusing any sequence that
+        // carries a second point removes pinch zoom without touching anything
+        // else. This runs before every other touch consumer - the notes-divider
+        // drag and the gesture handler - so a second finger can never start a
+        // pinch or be mistaken for a resize drag: blocking the zoom later, in
+        // updateZoomGesture(), would still let the gesture capture a frame and
+        // swallow the events.
+        //
+        // A sequence that began on a floating child widget is skipped: that
+        // widget owns its input, and refusing it here would leave a button stuck
+        // in its pressed state. The child-widget latch below is set later in
+        // this same function, so at TouchBegin it still describes the PREVIOUS
+        // sequence - hence the local hit test, which asks the question this
+        // sequence needs answered. Only TouchBegin has to ask; the answer is
+        // remembered for the rest of the sequence.
+        if (event->type() == QEvent::TouchBegin) {
+            m_singleTouchSequenceOnChild = false;
+            if (!SN_TOUCH_POINTS(touchEvent).isEmpty()) {
+                const QPointF touchPos =
+                    SN_TP_POS(SN_TOUCH_POINTS(touchEvent).first());
+                QWidget* child = childAt(touchPos.toPoint());
+                m_singleTouchSequenceOnChild = child && child != this;
+            }
+        }
+
+        // The rejection is latched for the whole sequence. A palm that lands
+        // with three points and then lifts two of them must not turn into a
+        // one-finger pan halfway through, and by the time the extra point lifts
+        // the rescale it caused would already have happened. A plain
+        // single-finger sequence is untouched - it falls straight through to
+        // the normal path below, inertia included.
+        if (palmRejection().singleTouchOnly && !m_singleTouchSequenceOnChild) {
+            // Track IDs here rather than trusting the current event's point
+            // list: Android sends TouchUpdates that carry only the point that
+            // moved, so counting this event alone would see one finger while
+            // two are down.
+            //
+            // A TouchBegin does NOT reset the set. Qt sends one only for the
+            // first finger, but iOS is the exception and begins a new sequence
+            // for each finger - resetting there would forget the first finger
+            // and defeat the whole check. Instead a TouchBegin whose points are
+            // all unknown to us is treated as a new sequence, which recovers
+            // from a TouchEnd the driver swallowed without breaking the
+            // second-finger case.
+            if (event->type() == QEvent::TouchBegin && !m_singleTouchPointIds.isEmpty()) {
+                bool known = false;
+                for (const auto& tp : SN_TOUCH_POINTS(touchEvent)) {
+                    if (m_singleTouchPointIds.contains(tp.id())) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) {
+                    m_singleTouchPointIds.clear();
+                    m_multiTouchSequenceRejected = false;
+                }
+            }
+            for (const auto& tp : SN_TOUCH_POINTS(touchEvent)) {
+                if (tp.state() == SN_TP_RELEASED) {
+                    m_singleTouchPointIds.remove(tp.id());
+                } else {
+                    m_singleTouchPointIds.insert(tp.id());
+                }
+            }
+            if (m_singleTouchPointIds.size() >= 2) {
+                m_multiTouchSequenceRejected = true;
+            }
+
+            const bool sequenceEnded = event->type() == QEvent::TouchEnd
+                                    || event->type() == QEvent::TouchCancel;
+
+            if (m_multiTouchSequenceRejected) {
+                // Tear down whatever the first finger may have started, so the
+                // rejected sequence cannot leave a pan running on one finger.
+                if (m_touchHandler) {
+                    m_touchHandler->cancelActiveGesture();
+                }
+                // A notes-column width drag is a touch consumer of its own and
+                // would otherwise stay latched, resizing the column on the next
+                // unrelated drag.
+                if (m_touchResizeDividerPage >= 0) {
+                    m_touchResizeDividerPage = -1;
+                    saveSideNotes();
+                }
+                if (sequenceEnded) {
+                    m_multiTouchSequenceRejected = false;
+                    m_singleTouchPointIds.clear();
+                    m_singleTouchSequenceOnChild = false;
+                }
+                event->accept();
+                return true;
+            }
+            if (sequenceEnded) {
+                // Clean single-finger sequence: let it through, but forget the
+                // IDs so the next one starts from a known state.
+                m_singleTouchPointIds.clear();
+                m_singleTouchSequenceOnChild = false;
+            }
+        } else if (m_multiTouchSequenceRejected || !m_singleTouchPointIds.isEmpty()) {
+            // The switch was turned off mid-sequence, or the sequence belongs to
+            // a child widget: release the latch and the ID bookkeeping so the
+            // next sequence starts clean.
+            m_multiTouchSequenceRejected = false;
+            m_singleTouchPointIds.clear();
+        }
+
         // Touch cooldown: reject all touch events briefly after becoming visible
         // This prevents crashes from stale touch state after sleep/wake on Android
         if (m_touchCooldownActive) {
