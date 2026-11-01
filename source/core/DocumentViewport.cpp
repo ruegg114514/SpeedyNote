@@ -5911,24 +5911,34 @@ bool DocumentViewport::event(QEvent* event)
             m_touchSequenceRejected = false;
         }
 
-        // Stylus-driven palm rejection. Pen presence is a single two-state
-        // model: while the pen is inside the digitizer's range (hovering OR
-        // pressing - deliberately not distinguished), any canvas touch is a
-        // resting palm, not a gesture. Pressing is always covered because
-        // every pen event sets the proximity flag. The proximity term closes
-        // the gap where the pen is ALREADY hovering over the glass (e.g.
-        // between strokes, or before pen-down) and the hand lands: no new
-        // stylus event arrives to trigger the grace-window veto
-        // (TabletEnterProximity already fired earlier), so without it the
-        // touch activates a pan/zoom even though the pen is clearly present.
-        // The lock is NOT permanent: the proximity watchdog
-        // (the configured proximity timeout) clears it after a long pen silence
-        // (covering stationary hover between strokes), and
-        // TabletLeaveProximity clears it instantly, so finger scrolling
-        // re-enables as soon as the pen truly leaves the glass even if the
-        // driver never sends TabletLeaveProximity. The >=3-point palm
-        // path above covers multi-touch resting hands regardless.
-        if (m_touchSequenceRejected || m_stylusInProximity) {
+        // Stylus-driven palm rejection.
+        //
+        // The pen is DOWN (writing / erasing / highlighting): a canvas touch is
+        // a palm resting on the glass and must not pan the page under the nib.
+        // That is unconditional - it is the case this whole guard exists for.
+        //
+        // The pen is merely HOVERING (lifted, still inside the digitizer's
+        // range): this must NOT veto touch by itself. A Wacom pen stays in
+        // range for several centimetres and continuous hover TabletMove events
+        // keep restarting the proximity watchdog, so treating hover as a veto
+        // locks finger scrolling out for as long as the pen is anywhere near
+        // the glass. The concrete symptom: write a stroke, lift the pen, swipe
+        // with a finger - the whole first swipe is swallowed and the page
+        // stutters, then it works; write again and it stutters again.
+        // Hover IS allowed to suppress touch when the reader opted into that:
+        // PalmRejectionSettings::stylusSuppressEnabled ("笔在附近时忽略触摸"),
+        // which is off by default precisely because it costs finger scrolling.
+        //
+        // The per-sequence latch (m_touchSequenceRejected) still covers the
+        // pen ARRIVING mid-touch - TabletEnterProximity / pen-down sets it, so
+        // a hand that lands while the pen comes in stays rejected until it
+        // lifts. The >=3-point palm path above covers a resting hand
+        // regardless of the pen, and multi-touch never needs the pen at all.
+        const bool penIsWriting =
+            m_pointerActive && m_activeSource == PointerEvent::Stylus;
+        const bool hoverSuppressesTouch =
+            palmRejection().stylusSuppressEnabled && m_stylusInProximity;
+        if (m_touchSequenceRejected || penIsWriting || hoverSuppressesTouch) {
             if (m_touchHandler) {
                 m_touchHandler->cancelActiveGesture();
             }
@@ -7427,12 +7437,6 @@ void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
     m_activeDrawingPage = -1;
     m_hardwareEraserActive = false;  // Clear hardware eraser state
     // Note: Don't clear m_lastPointerPos - keep it for eraser cursor during hover
-
-    // Pen presence is untouched here on purpose: after pen-up the pen is still
-    // in range (hovering), so m_stylusInProximity keeps rejecting touch - the
-    // hand resting on the glass stays rejected until it lifts and the pen
-    // leaves. There is no 200ms settle window to manage; the single "pen
-    // present" flag covers the whole transition.
 
     // Pre-load stroke caches after interaction (but NOT PDF cache - it causes thrashing during rapid strokes)
     // PDF cache is preloaded during scroll/zoom, not during drawing

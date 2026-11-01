@@ -3242,20 +3242,17 @@ private:
     QTimer* m_stylusActivityGuard = nullptr;
     // Interval is PalmRejectionSettings::stylusGuardMs (0 switches it off).
 
-    /// THE single "pen present" state. True while the stylus is inside the
-    /// digitizer's proximity range - whether it is hovering or pressing is
-    /// deliberately NOT distinguished: a press is just a hover with contact,
-    /// and every pen event (press, move, release, hover) sets this true, so
-    /// writing is always covered. Palm rejection needs exactly two states:
-    /// the pen is in the hand (touch = resting palm, reject) or it is not
-    /// (touch = deliberate gesture, allow). Driven by TabletEnterProximity /
-    /// any tablet event, cleared by TabletLeaveProximity or the proximity
-    /// watchdog timeout. This MUST persist across stationary hover: the pen
-    /// being held still produces no tablet events, so a short timeout here
-    /// would silently re-enable touch mid-hover and a hand landing right
-    /// after would pan/zoom the canvas (the "it still moves while the pen is
-    /// in range" bug). Only the proximity watchdog below may clear it, and
-    /// only after a silence long enough to outlast a between-stroke pause.
+    /// True while the stylus is inside the digitizer's proximity range.
+    /// Set by TabletEnterProximity and by every tablet event; cleared by
+    /// TabletLeaveProximity or the proximity watchdog timeout.
+    ///
+    /// This is NOT the touch veto. It only feeds the optional
+    /// PalmRejectionSettings::stylusSuppressEnabled guard ("笔在附近时忽略触摸",
+    /// off by default). Hover is a several-centimetre bubble the pen sits in
+    /// for as long as it is held near the glass, so vetoing touch on it alone
+    /// swallows the first finger swipe after every stroke. The veto that
+    /// actually means "a palm would be landing right now" is the pen being
+    /// physically down - see DocumentViewport::event()'s touch branch.
     bool m_stylusInProximity = false;
     /// Restarts on EVERY tablet event and clears m_stylusInProximity when it
     /// expires. This is the reliable "pen left" detector: Windows Wacom
