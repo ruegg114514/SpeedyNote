@@ -4885,17 +4885,12 @@ void DocumentViewport::hideEvent(QHideEvent* event)
 void DocumentViewport::showEvent(QShowEvent* event)
 {
 #ifdef SPEEDYNOTE_DEBUG
-    qDebug() << "[DocumentViewport] showEvent - starting touch cooldown";
+    qDebug() << "[DocumentViewport] showEvent - resetting touch state";
 #endif
     
-    // Start touch cooldown period
-    // After sleep/wake or tab switching, Android may send stale touch events
-    // that can crash Qt's touch event processing. Reject all touch events
-    // for a brief period to let the system stabilize.
-    m_touchCooldownActive = true;
-    m_touchCooldownTimer.start();
-    
-    // Also ensure touch handler is reset
+    // Reset all touch state. After sleep/wake or tab switching, Android may
+    // send stale touch events; resetting the handler drops the ID bookkeeping
+    // they would otherwise corrupt.
     if (m_touchHandler) {
         m_touchHandler->reset();
     }
@@ -4936,10 +4931,6 @@ void DocumentViewport::onApplicationStateChanged(Qt::ApplicationState state)
             m_gesture.reset();
             m_gestureTimeoutTimer->stop();
         }
-        
-        // Start touch cooldown - reject touches briefly to let system stabilize
-        m_touchCooldownActive = true;
-        m_touchCooldownTimer.start();
     }
 }
 #endif
@@ -5805,26 +5796,6 @@ bool DocumentViewport::event(QEvent* event)
             m_singleTouchPointIds.clear();
         }
 
-        // Touch cooldown: reject all touch events briefly after becoming visible
-        // This prevents crashes from stale touch state after sleep/wake on Android
-        if (m_touchCooldownActive) {
-            if (palmRejection().touchCooldownEnabled
-                && m_touchCooldownTimer.elapsed() < palmRejection().touchCooldownMs) {
-#ifdef SPEEDYNOTE_DEBUG
-                qDebug() << "[DocumentViewport] Touch event rejected - cooldown active"
-                         << "elapsed:" << m_touchCooldownTimer.elapsed() << "ms";
-#endif
-                event->accept();  // Accept but ignore
-                return true;
-            } else {
-                // Cooldown expired
-                m_touchCooldownActive = false;
-#ifdef SPEEDYNOTE_DEBUG
-                qDebug() << "[DocumentViewport] Touch cooldown ended";
-#endif
-            }
-        }
-        
         // Notes-divider resize via touch. When the finger starts (or drifts
         // onto) a divider grip, resizing the notes column must win over the pan
         // gesture: otherwise the PDF pans together with the finger while the

@@ -59,13 +59,7 @@ struct PalmRejectionSettings {
     bool palmContactEnabled = true;
     int  palmContactPoints  = 3;
 
-    // ---- 6. Touch cooldown ----
-    // Touch input is ignored for this long after a gesture was rejected, so the
-    // hand settling back down cannot immediately re-trigger a pan.
-    bool touchCooldownEnabled = true;
-    int  touchCooldownMs      = 300;
-
-    // ---- 7. Single-finger scroll axis lock ----
+    // ---- 6. Single-finger scroll axis lock ----
     // Locks a one-finger drag to one axis so a slightly diagonal swipe does not
     // scroll and drift at once. `breakout` is how far off-axis the finger must
     // travel before the lock releases.
@@ -73,18 +67,18 @@ struct PalmRejectionSettings {
     int  scrollLockDecidePx    = 10;
     int  scrollLockBreakoutPx  = 36;
 
-    // ---- 8. Pinch zoom dead zone ----
+    // ---- 7. Pinch zoom dead zone ----
     // Finger distance must change by this percentage before zoom engages, so a
     // two-finger pan does not jitter the zoom level.
     bool zoomDeadZoneEnabled   = true;
     int  zoomActivationPercent = 10;
 
-    // ---- 9. Multi-touch tap detection ----
+    // ---- 8. Multi-touch tap detection ----
     // Longest press that still counts as a tap rather than a pan/pinch.
     bool tapDetectionEnabled = true;
     int  tapMaxDurationMs    = 300;
 
-    // ---- 10. Free-scroll inertia ----
+    // ---- 9. Free-scroll inertia ----
     // A released pan keeps gliding, decaying by INERTIA_FRICTION per frame.
     // Turning it off makes the canvas stop dead when the finger lifts. Two
     // reasons to offer this: on a slippery glass panel the glide can feel out
@@ -93,7 +87,7 @@ struct PalmRejectionSettings {
     // samples, and the release then glides on them.
     bool inertiaEnabled = true;
 
-    // ---- 11. Pan dead zone ----
+    // ---- 10. Pan dead zone ----
     // A resting finger or palm is never perfectly still: the digitiser reports
     // a pixel or two of wobble, and every wobble used to move the canvas.
     // With this many pixels of tolerance the canvas does not move at all until
@@ -102,7 +96,7 @@ struct PalmRejectionSettings {
     // inertia either). 0 = previous behaviour (no tolerance).
     int panDeadZonePx = 0;
 
-    // ---- 12. Single-point-only input (the toolbar's "block manual zoom") ----
+    // ---- 11. Single-point-only input (the toolbar's "block manual zoom") ----
     // A pinch needs two fingers, and a hand settling back onto the glass
     // produces two or more contact points long before the pen is noticed. With
     // this on, any touch sequence that ever carries two or more points is
@@ -129,7 +123,6 @@ struct PalmRejectionSettings {
     int effectiveGestureGraceMs() const { return gestureGraceEnabled ? gestureGraceMs : 0; }
     int effectiveStylusGuardMs() const { return stylusGuardEnabled ? stylusGuardMs : 0; }
     int effectiveStylusProximityMs() const { return stylusProximityEnabled ? stylusProximityMs : 0; }
-    int effectiveTouchCooldownMs() const { return touchCooldownEnabled ? touchCooldownMs : 0; }
 
     /// Fractional finger-distance change needed to engage pinch zoom. Zero when
     /// the zoom guards are off, so nothing is swallowed.
@@ -160,8 +153,6 @@ struct PalmRejectionSettings {
         stylusProximityMs      = s.value(QStringLiteral("stylusProximityMs"), d.stylusProximityMs).toInt();
         palmContactEnabled     = s.value(QStringLiteral("palmContact"), d.palmContactEnabled).toBool();
         palmContactPoints      = s.value(QStringLiteral("palmContactPoints"), d.palmContactPoints).toInt();
-        touchCooldownEnabled   = s.value(QStringLiteral("touchCooldown"), d.touchCooldownEnabled).toBool();
-        touchCooldownMs        = s.value(QStringLiteral("touchCooldownMs"), d.touchCooldownMs).toInt();
         scrollAxisLockEnabled  = s.value(QStringLiteral("scrollAxisLock"), d.scrollAxisLockEnabled).toBool();
         scrollLockDecidePx     = s.value(QStringLiteral("scrollLockDecidePx"), d.scrollLockDecidePx).toInt();
         scrollLockBreakoutPx   = s.value(QStringLiteral("scrollLockBreakoutPx"), d.scrollLockBreakoutPx).toInt();
@@ -203,8 +194,6 @@ struct PalmRejectionSettings {
         s.setValue(QStringLiteral("stylusProximityMs"), stylusProximityMs);
         s.setValue(QStringLiteral("palmContact"), palmContactEnabled);
         s.setValue(QStringLiteral("palmContactPoints"), palmContactPoints);
-        s.setValue(QStringLiteral("touchCooldown"), touchCooldownEnabled);
-        s.setValue(QStringLiteral("touchCooldownMs"), touchCooldownMs);
         s.setValue(QStringLiteral("scrollAxisLock"), scrollAxisLockEnabled);
         s.setValue(QStringLiteral("scrollLockDecidePx"), scrollLockDecidePx);
         s.setValue(QStringLiteral("scrollLockBreakoutPx"), scrollLockBreakoutPx);
@@ -232,7 +221,6 @@ struct PalmRejectionSettings {
         stylusGuardMs         = qBound(0, stylusGuardMs, 2000);
         stylusProximityMs     = qBound(0, stylusProximityMs, 2000);
         palmContactPoints     = qBound(2, palmContactPoints, 10);
-        touchCooldownMs       = qBound(0, touchCooldownMs, 2000);
         scrollLockDecidePx    = qBound(0, scrollLockDecidePx, 200);
         scrollLockBreakoutPx  = qBound(0, scrollLockBreakoutPx, 500);
         zoomActivationPercent = qBound(1, zoomActivationPercent, 100);

@@ -3300,12 +3300,6 @@ private:
     // Touch gesture logic is encapsulated in TouchGestureHandler (see TouchGestureHandler.h)
     TouchGestureHandler* m_touchHandler = nullptr;  ///< Handles touch pan/zoom/tap
     bool m_zoomGesturesEnabled = true;              ///< Gate for pinch and Ctrl+wheel
-    
-    // Touch cooldown: reject touch events briefly after becoming visible
-    // This prevents crashes from stale touch state after sleep/wake
-    QElapsedTimer m_touchCooldownTimer;
-    bool m_touchCooldownActive = false;
-    // Duration is PalmRejectionSettings::touchCooldownMs (0 switches it off).
 
     /// True while the touch sequence in flight began on a child widget. Only
     /// TouchBegin carries a position we can hit-test, so the routing decision

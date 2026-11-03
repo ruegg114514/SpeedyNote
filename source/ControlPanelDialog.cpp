@@ -2152,10 +2152,6 @@ void ControlPanelDialog::createStylusTab() {
                 "并且拒绝笔输入，直到手掌离开。"),
              &pr.palmContactEnabled, &pr.palmContactPoints,
              2, 10, 1, QString(), tr("触点数："));
-    addGuard(tr("手势被拒后短暂忽略触摸"),
-             tr("防止手掌重新落下时立刻又开始平移。也覆盖睡眠/唤醒后残留的触摸状态。"),
-             &pr.touchCooldownEnabled, &pr.touchCooldownMs,
-             0, 2000, 50, tr(" ms"), tr("冷却时间："));
 
     addSection(tr("手势防抖"));
     addGuard(tr("单指拖动锁定单一轴向"),
