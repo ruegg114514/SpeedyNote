@@ -62,11 +62,17 @@ canvas says "Added to Memos" and the gallery shows the new thumbnail.
 * The right sidebar's right-side button now opens a two-tab panel:
   **Memos** (default) and **Notes** (the pre-existing markdown notes tree and
   search).
-* The gallery lists memos newest-first as a thumbnail grid whose column count
-  follows the sidebar width (1–4 columns), with title + timestamp.
+* The gallery lists memos newest-first, one card per row. A card is as wide as
+  the sidebar content and its thumbnail height follows the memo's own aspect
+  ratio (width / aspect), capped at 60% of the visible gallery height so one
+  very tall page cannot eat the whole list; a tall memo keeps its full image and
+  is scaled down (letterboxed inside the card) instead of being cropped. Title
+  and timestamp sit under the thumbnail.
 * Hover reveals a `×` (the window asks for confirmation); the context menu has
   Open / Rename… / Delete… and, when the memo records a source page, "Go to
   source page".
+* Double-click the title (or use the context menu) to rename a memo in place;
+  Enter commits, Esc cancels, clicking elsewhere commits.
 * Clicking a thumbnail closes the sidebar (so the card lands on the full-width
   page) and opens the floating card.
 

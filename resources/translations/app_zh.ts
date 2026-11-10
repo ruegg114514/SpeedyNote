@@ -6001,6 +6001,10 @@ The + and - buttons keep working</source>
         <source>Memo title:</source>
         <translation type="unfinished">随记标题：</translation>
     </message>
+    <message>
+        <source>Double-click to rename</source>
+        <translation type="unfinished">双击重命名</translation>
+    </message>
 </context>
 <context>
     <name>MemoEntry</name>

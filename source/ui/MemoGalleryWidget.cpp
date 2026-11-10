@@ -17,6 +17,7 @@
 #include <QHBoxLayout>
 #include <QImage>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
@@ -29,6 +30,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QSizePolicy>
 #include <QString>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -62,17 +64,18 @@ namespace {
 // ============================================================================
 // Geometry
 // ============================================================================
-// The card width is fixed: the responsive behaviour is "how many 132 px tiles
-// fit", never "how large is a tile". A sidebar can be dragged between 220 and
-// 600 px, and tiles that changed size while dragging would re-decode/re-scale
-// every thumbnail on every pixel of the drag.
-constexpr int kCardWidth = 132;
-constexpr int kThumbWidth = kCardWidth - 8;  ///< Card margins are 4 px per side
-constexpr int kThumbHeight = 96;
+// One memo per row. The card takes the full sidebar content width and derives
+// its thumbnail height from the memo's own aspect ratio, so a wide screenshot
+// gets a short strip and a tall handwriting page gets a taller picture - while
+// a very tall memo is capped (see kThumbMaxHeightRatio) and scaled down instead
+// of eating the whole sidebar.
+constexpr int kCardPadding = 6;          ///< Space inside the card frame
 constexpr int kGridMargin = 10;
 constexpr int kGridSpacing = 10;
-constexpr int kMaxColumns = 4;
 constexpr int kCardRadius = 10;
+constexpr int kThumbMinHeight = 96;
+/// Tallest thumbnail, as a fraction of the visible gallery height.
+constexpr qreal kThumbMaxHeightRatio = 0.6;
 
 /// Dynamic property holding a card's position in the newest-first order. The
 /// grid layout is the only handle the resize filter has on the cards, and
@@ -161,13 +164,66 @@ QPoint mouseLocalPos(const QMouseEvent* event)
 #endif
 }
 
-/// How many 132 px tiles fit into @p viewportWidth, clamped to 1..kMaxColumns.
-int columnsForViewport(int viewportWidth)
+/// Tallest a thumbnail may become for a @p viewportHeight px tall gallery.
+int maxThumbnailHeightFor(int viewportHeight)
 {
-    const int usableWidth = viewportWidth - 2 * kGridMargin;
-    const int columns = (usableWidth + kGridSpacing) / (kCardWidth + kGridSpacing);
-    return qBound(1, columns, kMaxColumns);
+    return qMax(kThumbMinHeight,
+                qRound(qMax(1, viewportHeight) * kThumbMaxHeightRatio));
 }
+
+/// Single-line title label that keeps its full text and elides to the width the
+/// layout gives it (the card width changes with the sidebar, so the elision has
+/// to be recomputed on every resize).
+///
+/// It also owns the double-click rename gesture and deliberately swallows single
+/// clicks: a click on the title must not open the memo, or the first half of a
+/// double-click would already have opened a floating card.
+class ElidedTitleLabel final : public QLabel {
+public:
+    explicit ElidedTitleLabel(QWidget* parent = nullptr)
+        : QLabel(parent)
+    {
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        setTextInteractionFlags(Qt::NoTextInteraction);
+    }
+
+    void setFullText(const QString& text)
+    {
+        m_fullText = text;
+        setToolTip(text);
+        updateElidedText();
+    }
+    QString fullText() const { return m_fullText; }
+
+    /// Invoked on double-click (the card replaces the label with an editor).
+    std::function<void()> onDoubleClick;
+
+protected:
+    void resizeEvent(QResizeEvent* event) override
+    {
+        QLabel::resizeEvent(event);
+        updateElidedText();
+    }
+
+    void mousePressEvent(QMouseEvent* event) override { event->accept(); }
+
+    void mouseDoubleClickEvent(QMouseEvent* event) override
+    {
+        event->accept();
+        if (onDoubleClick) {
+            onDoubleClick();
+        }
+    }
+
+private:
+    void updateElidedText()
+    {
+        QLabel::setText(fontMetrics().elidedText(m_fullText, Qt::ElideRight,
+                                                 qMax(0, width())));
+    }
+
+    QString m_fullText;
+};
 
 // ============================================================================
 // MemoCard - one thumbnail tile
@@ -179,6 +235,7 @@ int columnsForViewport(int viewportWidth)
 class MemoCard final : public QFrame {
 public:
     using IdHandler = std::function<void(const QString&)>;
+    using RenameHandler = std::function<void(const QString&, const QString&)>;
     using ContextHandler = std::function<void(const QString&, const QPoint&)>;
 
     MemoCard(const MemoEntry& entry, const QImage& image, bool darkMode,
@@ -188,12 +245,19 @@ public:
 
     void setOpenHandler(IdHandler handler) { m_openHandler = std::move(handler); }
     void setDeleteHandler(IdHandler handler) { m_deleteHandler = std::move(handler); }
+    void setRenameHandler(RenameHandler handler) { m_renameHandler = std::move(handler); }
     void setContextMenuHandler(ContextHandler handler) { m_contextMenuHandler = std::move(handler); }
+
+    /// Cap for the thumbnail height; recomputed by the gallery whenever the
+    /// visible height changes (the tall-image limit is relative to it).
+    void setMaxThumbnailHeight(int height);
+    int maxThumbnailHeight() const { return m_maxThumbnailHeight; }
 
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     bool event(QEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
@@ -203,12 +267,23 @@ private:
     void applyTheme();
     void setHovered(bool hovered);
     void positionDeleteButton();
+    void updateThumbnail();
 
-    QPixmap renderedThumbnail(const QImage& image) const;
-    QPixmap placeholderThumbnail() const;
+    void beginTitleEdit();
+    void finishTitleEdit(bool commit);
+
+    /// Thumbnail pixmap for a @p width x @p height box, preserving the memo's
+    /// aspect ratio (the unused axis is letterboxed by the label's centre
+    /// alignment, which is what "very tall memo, capped height" looks like).
+    QPixmap buildThumbnail(int width, int height) const;
+    QPixmap buildPlaceholder(int width, int height) const;
 
     QString m_memoId;
     QString m_fullTitle;
+    QImage m_image;
+    qreal m_imageAspect = 4.0 / 3.0;
+    int m_maxThumbnailHeight = 320;
+
     bool m_hovered = false;
 
     /// True between a left press on the card and its release; a release outside
@@ -217,12 +292,14 @@ private:
 
     MemoColors m_colors;
     QLabel* m_thumbnailLabel = nullptr;
-    QLabel* m_titleLabel = nullptr;
+    ElidedTitleLabel* m_titleLabel = nullptr;
     QLabel* m_dateLabel = nullptr;
     QToolButton* m_deleteButton = nullptr;
+    QLineEdit* m_titleEditor = nullptr;
 
     IdHandler m_openHandler;
     IdHandler m_deleteHandler;
+    RenameHandler m_renameHandler;
     ContextHandler m_contextMenuHandler;
 };
 
@@ -231,50 +308,69 @@ MemoCard::MemoCard(const MemoEntry& entry, const QImage& image, bool darkMode,
     : QFrame(parent)
     , m_memoId(entry.id)
     , m_fullTitle(entry.title.isEmpty() ? memoString("Untitled memo") : entry.title)
+    , m_image(image)
     , m_colors(memoColorsFor(darkMode))
 {
+    if (!image.isNull() && image.height() > 0) {
+        m_imageAspect = qreal(image.width()) / qreal(image.height());
+    }
+    if (!qIsFinite(m_imageAspect) || m_imageAspect <= 0.01) {
+        m_imageAspect = 4.0 / 3.0;
+    }
+
     setObjectName(QStringLiteral("MemoCard"));
     setCursor(Qt::PointingHandCursor);
     // The card paints its own background (see paintEvent), but WA_Hover is what
     // arms QEvent::Enter/Leave for the hover-only delete button.
     setAttribute(Qt::WA_Hover, true);
     setContextMenuPolicy(Qt::DefaultContextMenu);
-    setFixedWidth(kCardWidth);
+    // One card per row: take whatever width the column gives us, keep the height
+    // the layout computes from the thumbnail + two text lines.
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     setToolTip(m_fullTitle);
 
     buildUi(entry, image);
     applyTheme();
 }
 
+void MemoCard::setMaxThumbnailHeight(int height)
+{
+    const int clamped = qMax(kThumbMinHeight, height);
+    if (m_maxThumbnailHeight == clamped) {
+        return;
+    }
+    m_maxThumbnailHeight = clamped;
+    updateThumbnail();
+}
+
 void MemoCard::buildUi(const MemoEntry& entry, const QImage& image)
 {
+    Q_UNUSED(image);
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setContentsMargins(kCardPadding, kCardPadding, kCardPadding, kCardPadding);
     layout->setSpacing(4);
-    // The tile is a fixed-width card whose height is whatever the three text/
-    // image rows need; SetFixedSize keeps the layout from stretching it later.
-    layout->setSizeConstraint(QLayout::SetFixedSize);
+    // No SetFixedSize: the card is as wide as the column and as tall as its
+    // rows (the thumbnail's height is driven by the card width, see
+    // updateThumbnail()).
 
     // ---- Thumbnail ----
     m_thumbnailLabel = new QLabel(this);
     m_thumbnailLabel->setObjectName(QStringLiteral("MemoThumbnail"));
     m_thumbnailLabel->setAlignment(Qt::AlignCenter);
-    m_thumbnailLabel->setFixedSize(kThumbWidth, kThumbHeight);
+    m_thumbnailLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_thumbnailLabel->setMinimumHeight(kThumbMinHeight);
     // Clicks must reach the card itself; labels would otherwise eat the press
     // (and the tooltip of the card would never show).
     m_thumbnailLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    // Document::memoImage() is the single source of truth: it serves both the
-    // persisted PNG and bytes that are still only in memory.
-    m_thumbnailLabel->setPixmap(renderedThumbnail(image));
     layout->addWidget(m_thumbnailLabel);
 
     // ---- Title (single elided line, full text in the tooltip) ----
-    m_titleLabel = new QLabel(this);
+    m_titleLabel = new ElidedTitleLabel(this);
     m_titleLabel->setObjectName(QStringLiteral("MemoCardTitle"));
-    m_titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    const QFontMetrics titleMetrics(m_titleLabel->font());
-    m_titleLabel->setText(titleMetrics.elidedText(m_fullTitle, Qt::ElideRight, kThumbWidth));
-    m_titleLabel->setToolTip(m_fullTitle);
+    m_titleLabel->setFullText(m_fullTitle);
+    m_titleLabel->onDoubleClick = [this]() { beginTitleEdit(); };
+    m_titleLabel->setToolTip(
+        QStringLiteral("%1\n%2").arg(m_fullTitle, memoString("Double-click to rename")));
     layout->addWidget(m_titleLabel);
 
     // ---- Date ----
@@ -303,6 +399,21 @@ void MemoCard::buildUi(const MemoEntry& entry, const QImage& image)
 
     positionDeleteButton();
 }
+
+void MemoCard::updateThumbnail()
+{
+    if (!m_thumbnailLabel) {
+        return;
+    }
+    const int contentWidth = qMax(40, width() - 2 * kCardPadding);
+    const qreal naturalHeight = qreal(contentWidth) / m_imageAspect;
+    const int maxHeight = qMax(kThumbMinHeight, m_maxThumbnailHeight);
+    const int thumbHeight = qBound(kThumbMinHeight, qRound(naturalHeight), maxHeight);
+
+    m_thumbnailLabel->setFixedHeight(thumbHeight);
+    m_thumbnailLabel->setPixmap(buildThumbnail(contentWidth, thumbHeight));
+}
+
 
 void MemoCard::applyTheme()
 {
@@ -352,36 +463,40 @@ void MemoCard::applyTheme()
     update();
 }
 
-QPixmap MemoCard::renderedThumbnail(const QImage& image) const
+QPixmap MemoCard::buildThumbnail(int width, int height) const
 {
-    if (image.isNull()) return placeholderThumbnail();
+    if (m_image.isNull() || width <= 0 || height <= 0) {
+        return buildPlaceholder(width, height);
+    }
 
-    // Scale to device pixels so the (cached) pixmap stays crisp on HiDPI; the
-    // device pixel ratio is carried on the pixmap, so QLabel still lays it out
-    // as a kThumbWidth x kThumbHeight box.
+    // Scale to device pixels so the pixmap stays crisp on HiDPI; the ratio is
+    // carried on the pixmap, so QLabel lays it out at the requested logical size.
     const qreal dpr = devicePixelRatioF();
-    const QSize target(qRound(kThumbWidth * dpr), qRound(kThumbHeight * dpr));
-    QImage scaled = image.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    if (scaled.isNull()) return placeholderThumbnail();
+    const QSize target(qRound(width * dpr), qRound(height * dpr));
+    QImage scaled = m_image.scaled(target, Qt::KeepAspectRatio,
+                                   Qt::SmoothTransformation);
+    if (scaled.isNull()) {
+        return buildPlaceholder(width, height);
+    }
     scaled.setDevicePixelRatio(dpr);
     QPixmap pixmap = QPixmap::fromImage(scaled);
-    // fromImage() does not always carry the ratio over; state it explicitly so
-    // the label keeps its logical 124x96 box on HiDPI screens.
+    // fromImage() does not always carry the ratio over; state it explicitly.
     pixmap.setDevicePixelRatio(dpr);
     return pixmap;
 }
 
-QPixmap MemoCard::placeholderThumbnail() const
+QPixmap MemoCard::buildPlaceholder(int width, int height) const
 {
+    const QSize logical(qMax(1, width), qMax(1, height));
     const qreal dpr = devicePixelRatioF();
-    QPixmap pixmap(QSize(qRound(kThumbWidth * dpr), qRound(kThumbHeight * dpr)));
+    QPixmap pixmap(logical * dpr);
     pixmap.setDevicePixelRatio(dpr);
     pixmap.fill(Qt::transparent);
 
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    const QRectF box(0.5, 0.5, kThumbWidth - 1.0, kThumbHeight - 1.0);
+    const QRectF box(0.5, 0.5, logical.width() - 1.0, logical.height() - 1.0);
     painter.setPen(QPen(m_colors.thumbBorder, 1.0));
     painter.setBrush(m_colors.placeholderBg);
     painter.drawRoundedRect(box, 6.0, 6.0);
@@ -415,6 +530,12 @@ void MemoCard::resizeEvent(QResizeEvent* event)
 {
     QFrame::resizeEvent(event);
     positionDeleteButton();
+    // The card width follows the sidebar, so the thumbnail's height (derived
+    // from the memo's aspect ratio) and the scaled pixmap change with it.
+    updateThumbnail();
+    if (m_titleEditor && m_titleLabel) {
+        m_titleEditor->setGeometry(m_titleLabel->geometry());
+    }
 }
 
 void MemoCard::positionDeleteButton()
@@ -486,17 +607,92 @@ void MemoCard::contextMenuEvent(QContextMenuEvent* event)
     QFrame::contextMenuEvent(event);
 }
 
+bool MemoCard::eventFilter(QObject* watched, QEvent* event)
+{
+    if (m_titleEditor && watched == m_titleEditor) {
+        if (event->type() == QEvent::KeyPress) {
+            auto* key = static_cast<QKeyEvent*>(event);
+            if (key->key() == Qt::Key_Escape) {
+                finishTitleEdit(false);
+                return true;
+            }
+        }
+    }
+    return QFrame::eventFilter(watched, event);
+}
+
+void MemoCard::beginTitleEdit()
+{
+    if (!m_titleLabel || m_titleEditor) {
+        return;
+    }
+    auto* editor = new QLineEdit(this);
+    editor->setObjectName(QStringLiteral("MemoTitleEditor"));
+    editor->setText(m_fullTitle);
+    editor->selectAll();
+    // A line edit needs a couple of pixels more than the elided label it covers;
+    // the card is tall enough (the date row sits below with spacing).
+    const QRect labelRect = m_titleLabel->geometry();
+    editor->setGeometry(labelRect.adjusted(-4, -3, 4, 3));
+    editor->setStyleSheet(QStringLiteral(
+        "QLineEdit#MemoTitleEditor {"
+        "  border: 1px solid #0078d4;"
+        "  border-radius: 4px;"
+        "  padding: 1px 4px;"
+        "  background: %1;"
+        "  color: %2;"
+        "  font-size: 13px;"
+        "}")
+        .arg(m_colors.cardBg.name(), m_colors.text.name()));
+    editor->installEventFilter(this);
+    editor->raise();
+    editor->show();
+    editor->setFocus(Qt::MouseFocusReason);
+
+    m_titleEditor = editor;
+    // editingFinished also fires on focus loss, so clicking elsewhere commits.
+    connect(editor, &QLineEdit::editingFinished, this, [this]() {
+        finishTitleEdit(true);
+    });
+}
+
+void MemoCard::finishTitleEdit(bool commit)
+{
+    if (!m_titleEditor) {
+        return;
+    }
+    QLineEdit* editor = m_titleEditor;
+    m_titleEditor = nullptr;
+    const QString typed = editor->text().trimmed();
+    editor->hide();
+    editor->deleteLater();
+
+    if (commit && !typed.isEmpty() && typed != m_fullTitle) {
+        m_fullTitle = typed;
+        if (m_titleLabel) {
+            m_titleLabel->setFullText(typed);
+            m_titleLabel->setToolTip(QStringLiteral("%1\n%2")
+                .arg(typed, memoString("Double-click to rename")));
+        }
+        setToolTip(typed);
+        if (m_renameHandler) {
+            m_renameHandler(m_memoId, typed);
+        }
+    }
+}
+
 // ============================================================================
 // Grid re-flow
 // ============================================================================
 /**
- * @brief Re-place every card held by @p grid for a @p viewportWidth px viewport.
+ * @brief Re-place every card held by @p grid: one card per row, full width.
  *
- * The cards are the grid's items; they are taken out and re-added so the column
- * count can follow the sidebar width. Stretch factors are reset first, otherwise
- * the absorbing row/column from the previous flow keeps its share of the space.
+ * The cards are taken out and re-added so a stale stretch/row state cannot
+ * survive a rebuild. Cards are stretched across the single column (no alignment
+ * flags), so their width follows the sidebar and their thumbnail height follows
+ * the width (see MemoCard::updateThumbnail()).
  */
-void relayoutMemoGrid(QGridLayout* grid, int viewportWidth)
+void relayoutMemoGrid(QGridLayout* grid)
 {
     if (!grid) return;
 
@@ -516,18 +712,34 @@ void relayoutMemoGrid(QGridLayout* grid, int viewportWidth)
     for (int row = 0; row < grid->rowCount(); ++row) grid->setRowStretch(row, 0);
     for (int column = 0; column < grid->columnCount(); ++column) grid->setColumnStretch(column, 0);
 
-    const int columns = columnsForViewport(viewportWidth);
     for (int index = 0; index < cards.size(); ++index) {
-        grid->addWidget(cards.at(index), index / columns, index % columns,
-                        Qt::AlignTop | Qt::AlignHCenter);
+        grid->addWidget(cards.at(index), index, 0);
     }
+    grid->setColumnStretch(0, 1);
 
     // An empty trailing row soaks up the extra height when the viewport is taller
-    // than the grid, which keeps the tiles packed against the header.
-    const int usedRows = cards.isEmpty()
-        ? 0
-        : static_cast<int>((cards.size() + columns - 1) / columns);
-    grid->setRowStretch(usedRows, 1);
+    // than the grid, which keeps the cards packed against the header.
+    grid->setRowStretch(cards.size(), 1);
+}
+
+/**
+ * @brief Push the current visible height into every card, so a very tall memo
+ *        cannot make one card eat the whole gallery.
+ *
+ * Cards own the thumbnail height (it also depends on their width), so the limit
+ * is only a cap; MemoCard::updateThumbnail() clamps against it.
+ */
+void applyThumbnailLimits(QGridLayout* grid, int viewportHeight)
+{
+    if (!grid) return;
+    const int limit = maxThumbnailHeightFor(viewportHeight);
+    for (int i = 0; i < grid->count(); ++i) {
+        QLayoutItem* item = grid->itemAt(i);
+        if (!item) continue;
+        if (auto* card = dynamic_cast<MemoCard*>(item->widget())) {
+            card->setMaxThumbnailHeight(limit);
+        }
+    }
 }
 
 /**
@@ -643,11 +855,14 @@ void MemoGalleryWidget::setupUi()
     m_emptyLabel->hide();
     m_rootLayout->addWidget(m_emptyLabel, 1);
 
-    // The column count depends on the viewport width, which only the scroll area
-    // knows about; an event filter is the one hook that needs no header change.
+    // Card width/height both follow the scroll area's viewport (width drives the
+    // card width, height drives the tall-thumbnail cap), and only the scroll
+    // area knows its viewport size. An event filter is the one hook that needs
+    // no header change.
     auto* resizeFilter = new ViewportResizeFilter([this]() {
         if (!m_scrollArea || !m_gridLayout) return;
-        relayoutMemoGrid(m_gridLayout, m_scrollArea->viewport()->width());
+        relayoutMemoGrid(m_gridLayout);
+        applyThumbnailLimits(m_gridLayout, m_scrollArea->viewport()->height());
     }, this);
     m_scrollArea->viewport()->installEventFilter(resizeFilter);
 }
@@ -820,17 +1035,22 @@ void MemoGalleryWidget::refresh()
         card->setDeleteHandler([this](const QString& memoId) {
             emit memoDeleteRequested(memoId);
         });
+        card->setRenameHandler([this](const QString& memoId, const QString& newTitle) {
+            emit memoRenameRequested(memoId, newTitle);
+        });
         card->setContextMenuHandler(showContextMenu);
 
         // Insert into the grid so the re-flow helper (and the resize filter,
         // which only reaches the layout) can find it again.
-        m_gridLayout->addWidget(card, 0, 0, Qt::AlignTop | Qt::AlignHCenter);
+        m_gridLayout->addWidget(card, 0, 0);
     }
 
-    // The real column count follows the viewport; a resize while the sidebar is
-    // hidden is corrected by the filter right after the first show.
-    const int viewportWidth = m_scrollArea ? m_scrollArea->viewport()->width() : 0;
-    relayoutMemoGrid(m_gridLayout, viewportWidth);
+    // One card per row; the width comes from the viewport and the height from
+    // each memo's aspect ratio. A rebuild while the sidebar is hidden is
+    // corrected by the resize filter right after the first show.
+    relayoutMemoGrid(m_gridLayout);
+    applyThumbnailLimits(m_gridLayout,
+                         m_scrollArea ? m_scrollArea->viewport()->height() : 0);
 }
 
 void MemoGalleryWidget::clearCards()
