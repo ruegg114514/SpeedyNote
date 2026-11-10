@@ -9765,29 +9765,128 @@ void DocumentViewport::captureScreenAndInsert()
     emit screenCaptureFinished();
 
     if (result == QDialog::Accepted) {
+        const ScreenClipWidget::Action action = clip.action();
         const QPixmap region = clip.capturedRegion();
         const QRect sel = clip.selectionRect();
         if (!region.isNull() && !sel.isEmpty()) {
-            // The selection is in viewport logical coordinates; translate it
-            // into document coordinates so the inserted image lands exactly
-            // where the user captured it on the page.
-            const QPointF docTopLeft = viewportToDocument(
-                QPointF(sel.topLeft()));
-            const QSizeF docSize(sel.width() / m_zoomLevel,
-                                 sel.height() / m_zoomLevel);
-            insertPreparedImage(region.toImage(), QByteArray(), QByteArray(),
-                                docTopLeft, docSize);
+            const bool insertOnPage = (action == ScreenClipWidget::Action::InsertOnly
+                                       || action == ScreenClipWidget::Action::MemoKeep);
 
-            // Switch to the object-select tool so the newly inserted image is
-            // instantly draggable / resizable. insertPreparedImage() already
-            // selected the object, and entering ObjectSelect does NOT clear the
-            // current selection, so the user can move/scale the shot right away
-            // instead of being dropped back to the pen / hand tool.
-            if (m_currentTool != ToolType::ObjectSelect) {
-                setCurrentTool(ToolType::ObjectSelect);
+            if (insertOnPage) {
+                // The selection is in viewport logical coordinates; translate it
+                // into document coordinates so the inserted image lands exactly
+                // where the user captured it on the page.
+                const QPointF docTopLeft = viewportToDocument(
+                    QPointF(sel.topLeft()));
+                const QSizeF docSize(sel.width() / m_zoomLevel,
+                                     sel.height() / m_zoomLevel);
+                insertPreparedImage(region.toImage(), QByteArray(), QByteArray(),
+                                    docTopLeft, docSize);
+
+                // Switch to the object-select tool so the newly inserted image is
+                // instantly draggable / resizable. insertPreparedImage() already
+                // selected the object, and entering ObjectSelect does NOT clear the
+                // current selection, so the user can move/scale the shot right away
+                // instead of being dropped back to the pen / hand tool.
+                if (m_currentTool != ToolType::ObjectSelect) {
+                    setCurrentTool(ToolType::ObjectSelect);
+                }
+            }
+
+            if (action == ScreenClipWidget::Action::MemoKeep
+                || action == ScreenClipWidget::Action::MemoCut) {
+                // One PNG per confirmation; the gallery renders it and the
+                // floating card can be opened from there. The title is left
+                // empty so Document gives it the localised timestamped default.
+                const int sourcePage = m_document->isEdgeless()
+                    ? -1 : currentPageIndex();
+                const MemoEntry memo = m_document->addMemo(
+                    region.toImage(), QString(), MemoEntry::Kind::Screenshot,
+                    sourcePage);
+                if (memo.isValid()) {
+                    emit documentModified();
+                    emit memosChanged();
+                }
             }
         }
     }
+}
+
+void DocumentViewport::addLassoSelectionToMemo(bool removeFromPage)
+{
+    if (!m_document || !m_lassoSelection.isValid()
+        || m_lassoSelection.selectedStrokes.isEmpty()) {
+        return;
+    }
+
+    // Bake the live transform (rotate / scale / move) exactly like copy does,
+    // so what the user sees is what lands in the memo.
+    const QTransform transform = buildSelectionTransform();
+
+    QVector<VectorStroke> strokes;
+    strokes.reserve(m_lassoSelection.selectedStrokes.size());
+    QRectF bounds;
+    for (const VectorStroke& stroke : m_lassoSelection.selectedStrokes) {
+        VectorStroke transformed = stroke;
+        transformStrokePoints(transformed, transform);
+        transformed.updateBoundingBox();
+        bounds = bounds.isNull() ? transformed.boundingBox
+                                 : bounds.united(transformed.boundingBox);
+        strokes.append(transformed);
+    }
+    if (strokes.isEmpty() || bounds.isEmpty()) {
+        return;
+    }
+
+    // The bounding boxes already carry 2x thickness of padding. Render at two
+    // device pixels per document unit so a card kept at page scale is sharp;
+    // cap the longest side so a huge multi-page selection cannot allocate a
+    // monster image.
+    constexpr qreal TARGET_SCALE = 2.0;
+    constexpr qreal MAX_SIDE_PX = 3072.0;
+    qreal scale = TARGET_SCALE;
+    const qreal longest = qMax(bounds.width(), bounds.height());
+    if (longest * scale > MAX_SIDE_PX) {
+        scale = MAX_SIDE_PX / longest;
+    }
+    if (scale <= 0.0) {
+        return;
+    }
+
+    QImage image(qCeil(bounds.width() * scale),
+                 qCeil(bounds.height() * scale),
+                 QImage::Format_ARGB32_Premultiplied);
+    if (image.isNull()) {
+        return;
+    }
+    image.fill(Qt::transparent);
+    {
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        painter.scale(scale, scale);
+        painter.translate(-bounds.topLeft());
+        for (const VectorStroke& stroke : strokes) {
+            VectorLayer::renderStroke(painter, stroke);
+        }
+    }
+
+    const int sourcePage = m_document->isEdgeless()
+        ? -1 : m_lassoSelection.sourcePageIndex;
+    const MemoEntry memo = m_document->addMemo(
+        image, QString(), MemoEntry::Kind::Handwriting, sourcePage);
+
+    if (removeFromPage) {
+        // deleteSelection() pushes the undo entry and clears the selection, so
+        // the material visibly leaves the page in one step.
+        deleteSelection();
+    }
+
+    if (memo.isValid()) {
+        emit documentModified();
+        emit memosChanged();
+    }
+    update();
 }
 
 void DocumentViewport::deleteSelectedObjects()

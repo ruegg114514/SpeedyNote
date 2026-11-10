@@ -1679,8 +1679,27 @@ public:
      * selection overlay over the viewport, and inserts the confirmed region
      * as an ImageObject at the exact document position where it was captured.
      * Never leaves the app or touches the desktop.
+     *
+     * The overlay also offers the memo (随记) actions: "keep" inserts the image
+     * and stores a copy as a memo, "cut" stores the copy only and leaves the
+     * page untouched. Memos are created through Document::addMemo().
      */
     void captureScreenAndInsert();
+
+    /**
+     * @brief Store the current lasso selection as a memo (随记).
+     *
+     * Renders the selection - including any live rotation/scale/move transform
+     * - into a transparent PNG (2 device pixels per document unit, capped at
+     * 3072 px per side) so the card stays crisp when the page is zoomed.
+     *
+     * @param removeFromPage true = cut into the memo (the strokes are removed
+     *        from the page as one undoable action); false = the strokes stay on
+     *        the page and only a copy is kept.
+     *
+     * No-op when there is no lasso selection.
+     */
+    void addLassoSelectionToMemo(bool removeFromPage);
     
     /**
      * @brief Delete all currently selected objects.
@@ -2817,6 +2836,15 @@ signals:
      * canceled). The host window re-shows itself on this.
      */
     void screenCaptureFinished();
+
+    /**
+     * @brief Emitted after a memo (随记) was added to this viewport's document.
+     *
+     * The host refreshes the sidebar gallery and may show a transient hint.
+     * Memos are document state, so this is deliberately separate from
+     * documentModified() (which fires for every stroke).
+     */
+    void memosChanged();
     
     /**
      * @brief Emitted when a specific page's content changes (for targeted thumbnail refresh).

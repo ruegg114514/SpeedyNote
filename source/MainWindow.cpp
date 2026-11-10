@@ -23,6 +23,8 @@
 #include "ui/actionbars/LassoActionBar.h"
 #include "ui/actionbars/ObjectSelectActionBar.h"
 #include "ui/actionbars/PagePanelActionBar.h"
+#include "ui/MemoManager.h"      // Memos (随记): floating cards over the page
+#include "core/MemoEntry.h"      // Memos (随记): entries + default titles
 #include "objects/LinkObject.h"  // For LinkSlot slot state access
 #include "core/MarkdownNote.h"   // Phase M.3: For loading markdown notes
 #include "core/NotebookLibrary.h" // Phase P.4.6: For saving thumbnails
@@ -550,7 +552,21 @@ MainWindow::MainWindow(QWidget *parent)
                 // This triggers cleanup of undo stacks and other document-related
                 // data structures while the document is still valid.
                 vp->setDocument(nullptr);
-                
+
+                // Memos (随记): the gallery and the floating cards hold raw
+                // Document/Viewport pointers. Drop both before the tab is closed
+                // (closeTab() deletes the viewport right after this handler), and
+                // do it directly instead of through updateMemoContext() so no
+                // card manager keeps the soon-to-die viewport installed.
+                if (vp == currentViewport()) {
+                    if (m_memoManager) {
+                        m_memoManager->setContext(nullptr, nullptr);
+                    }
+                    if (markdownNotesSidebar) {
+                        markdownNotesSidebar->setDocument(nullptr);
+                    }
+                }
+
                 m_documentManager->closeDocument(doc);
             }
         }
@@ -1270,6 +1286,9 @@ void MainWindow::setupUi() {
     
     // Setup action bars
     setupActionBars();
+
+    // Memos (随记): floating-card manager + right-sidebar gallery wiring
+    setupMemos();
     
     // PDF Search: Setup search bar
     setupPdfSearch();
@@ -4582,6 +4601,12 @@ void MainWindow::connectPerViewportSignals(DocumentViewport* vp)
     connect(vp, &DocumentViewport::addPageRequested,
             this, &MainWindow::handleAddPageRequest,
             Qt::UniqueConnection);
+    // Memos (随记): a memo added from the screenshot or lasso tool refreshes
+    // the right-sidebar gallery. UniqueConnection needs a member slot, not a
+    // lambda, hence the dedicated handler.
+    connect(vp, &DocumentViewport::memosChanged,
+            this, &MainWindow::onMemosChanged,
+            Qt::UniqueConnection);
 }
 
 void MainWindow::refreshDestinationAfterImport(DocumentViewport* destVp, int destIndex)
@@ -5255,6 +5280,12 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event) {
     // The event filter was installed on m_canvasContainer, so compare with that directly
     if (obj == m_canvasContainer && event->type() == QEvent::Resize) {
         updateScrollbarPositions();  // SB1: repositions the action bar + PDF search bar
+        // Memos (随记): floating cards are positioned in viewport coordinates,
+        // so a canvas resize (sidebar toggle, window resize, split view) has to
+        // re-anchor them before the next paint.
+        if (m_memoManager) {
+            m_memoManager->updateHostGeometry(activeViewportRectInCanvas());
+        }
         return false; // Let the event propagate
     }
 
@@ -6163,6 +6194,12 @@ void MainWindow::setupActionBars()
             vp->deleteLassoSelection();
         }
     });
+    connect(m_lassoActionBar, &LassoActionBar::addToMemoRequested,
+            this, [this](bool removeFromPage) {
+        if (DocumentViewport* vp = currentViewport()) {
+            vp->addLassoSelectionToMemo(removeFromPage);
+        }
+    });
     connect(m_lassoActionBar, &LassoActionBar::recolorRequested,
             this, [this](const QColor& color) {
         if (DocumentViewport* vp = currentViewport()) {
@@ -6299,6 +6336,231 @@ void MainWindow::updateActionBarPosition()
     
     // Ensure it's raised above viewport content
     m_actionBarContainer->raise();
+}
+
+// =========================================================================
+// Memos (随记) - gallery wiring + floating-card manager
+// =========================================================================
+
+void MainWindow::setupMemos()
+{
+    if (!m_canvasContainer) {
+        qWarning() << "setupMemos: canvasContainer not yet created";
+        return;
+    }
+
+    m_memoManager = new MemoManager(m_canvasContainer, this);
+    m_memoManager->setDarkMode(isDarkMode());
+
+    // The memo is NOT opened automatically (a card popping up mid-stroke is
+    // worse than a quiet confirmation), so this chip is the feedback that the
+    // capture actually landed in the gallery.
+    m_memoHint = new QLabel(m_canvasContainer);
+    m_memoHint->setObjectName("MemoHint");
+    m_memoHint->setAlignment(Qt::AlignCenter);
+    m_memoHint->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    m_memoHint->setStyleSheet(QStringLiteral(
+        "QLabel#MemoHint { background: rgba(32, 32, 32, 218); color: white;"
+        " border-radius: 15px; padding: 7px 18px; font-size: 13px; }"));
+    m_memoHint->hide();
+
+    m_memoHintTimer = new QTimer(this);
+    m_memoHintTimer->setSingleShot(true);
+    m_memoHintTimer->setInterval(1700);
+    connect(m_memoHintTimer, &QTimer::timeout, this, [this]() {
+        if (m_memoHint) {
+            m_memoHint->hide();
+        }
+    });
+
+    // Gallery actions -> window
+    connect(markdownNotesSidebar, &MarkdownNotesSidebar::memoOpenRequested,
+            this, &MainWindow::openMemoCard);
+    connect(markdownNotesSidebar, &MarkdownNotesSidebar::importMemoImageRequested,
+            this, &MainWindow::importMemoImage);
+    connect(markdownNotesSidebar, &MarkdownNotesSidebar::memoLocateRequested,
+            this, [this](int pageIndex) {
+        if (DocumentViewport* vp = currentViewport()) {
+            vp->scrollToPage(pageIndex);
+        }
+    });
+    connect(markdownNotesSidebar, &MarkdownNotesSidebar::memoRenameRequested,
+            this, [this](const QString& memoId, const QString& title) {
+        DocumentViewport* vp = currentViewport();
+        if (!vp || !vp->document()) {
+            return;
+        }
+        if (!vp->document()->renameMemo(memoId, title)) {
+            return;
+        }
+        emit vp->documentModified();
+        if (m_memoManager) {
+            m_memoManager->handleMemoRenamed(memoId, title);
+        }
+        if (markdownNotesSidebar) {
+            markdownNotesSidebar->refreshMemos();
+        }
+    });
+    connect(markdownNotesSidebar, &MarkdownNotesSidebar::memoDeleteRequested,
+            this, [this](const QString& memoId) {
+        DocumentViewport* vp = currentViewport();
+        if (!vp || !vp->document()) {
+            return;
+        }
+        const MemoEntry* entry = vp->document()->memoById(memoId);
+        if (!entry) {
+            return;
+        }
+        const auto reply = QMessageBox::question(
+            this, tr("Delete Memo"),
+            tr("Delete \"%1\"? The image is removed from this notebook.")
+                .arg(entry->title),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (reply != QMessageBox::Yes) {
+            return;
+        }
+        vp->document()->removeMemo(memoId);
+        emit vp->documentModified();
+        if (m_memoManager) {
+            m_memoManager->handleMemoRemoved(memoId);
+        }
+        if (markdownNotesSidebar) {
+            markdownNotesSidebar->refreshMemos();
+        }
+    });
+
+    // Follow the active document: cards belong to whatever notebook is in front.
+    connect(m_splitViewManager, &SplitViewManager::activeViewportChanged,
+            this, [this](DocumentViewport*) { updateMemoContext(); });
+    connect(m_splitViewManager, &SplitViewManager::activePaneChanged,
+            this, [this](SplitViewManager::Pane) { updateMemoContext(); });
+    connect(m_splitViewManager, &SplitViewManager::splitStateChanged,
+            this, [this](bool) {
+        updateMemoContext();
+        m_memoManager->updateHostGeometry(activeViewportRectInCanvas());
+    });
+
+    updateMemoContext();
+}
+
+void MainWindow::updateMemoContext()
+{
+    DocumentViewport* vp = currentViewport();
+    Document* document = vp ? vp->document() : nullptr;
+
+    if (m_memoManager) {
+        m_memoManager->setContext(document, vp);
+        m_memoManager->updateHostGeometry(activeViewportRectInCanvas());
+        m_memoManager->setDarkMode(isDarkMode());
+    }
+    if (markdownNotesSidebar) {
+        markdownNotesSidebar->setDocument(document);
+    }
+}
+
+QRect MainWindow::activeViewportRectInCanvas() const
+{
+    if (!m_canvasContainer) {
+        return QRect();
+    }
+    const DocumentViewport* vp = currentViewport();
+    if (!vp) {
+        return m_canvasContainer->rect();
+    }
+    const QPoint topLeft = vp->mapTo(m_canvasContainer, QPoint(0, 0));
+    return QRect(topLeft, vp->size()).intersected(m_canvasContainer->rect());
+}
+
+void MainWindow::openMemoCard(const QString& memoId)
+{
+    DocumentViewport* vp = currentViewport();
+    if (!vp || !vp->document() || !m_memoManager) {
+        return;
+    }
+
+    // Close the sidebar first: the card opens over the page, and the page
+    // should get its full width back while the reader looks at the card.
+    if (markdownNotesSidebar && markdownNotesSidebar->isVisible()) {
+        toggleMarkdownNotesSidebar();
+    }
+
+    // Let the splitter finish handing the canvas its new width before placing
+    // the card (its remembered geometry is in viewport coordinates).
+    QTimer::singleShot(0, this, [this, memoId]() {
+        if (!m_memoManager) {
+            return;
+        }
+        m_memoManager->updateHostGeometry(activeViewportRectInCanvas());
+        m_memoManager->openMemo(memoId);
+    });
+}
+
+void MainWindow::importMemoImage()
+{
+    DocumentViewport* vp = currentViewport();
+    if (!vp || !vp->document()) {
+        return;
+    }
+
+    const QStringList files = QFileDialog::getOpenFileNames(
+        this, tr("Import Images as Memos"), QString(),
+        tr("Images (*.png *.jpg *.jpeg *.bmp *.webp *.gif);;All Files (*)"));
+    if (files.isEmpty()) {
+        return;
+    }
+
+    int added = 0;
+    for (const QString& path : files) {
+        const QImage image(path);
+        if (image.isNull()) {
+            continue;
+        }
+        const MemoEntry memo = vp->document()->addMemo(
+            image, QString(), MemoEntry::Kind::Imported,
+            vp->document()->isEdgeless() ? -1 : vp->currentPageIndex());
+        if (memo.isValid()) {
+            ++added;
+        }
+    }
+    if (added == 0) {
+        return;
+    }
+    emit vp->documentModified();
+
+    if (markdownNotesSidebar) {
+        if (!markdownNotesSidebar->isVisible()) {
+            toggleMarkdownNotesSidebar();
+        }
+        markdownNotesSidebar->setMemoMode(true);
+    }
+    showMemoAddedHint();
+}
+
+void MainWindow::showMemoAddedHint()
+{
+    if (!m_memoHint || !m_canvasContainer) {
+        return;
+    }
+    m_memoHint->setText(tr("Added to Memos"));
+    m_memoHint->adjustSize();
+
+    const QRect area = activeViewportRectInCanvas();
+    const int x = area.x() + (area.width() - m_memoHint->width()) / 2;
+    const int y = area.y() + area.height() - m_memoHint->height() - 28;
+    m_memoHint->move(qMax(area.x() + 8, x), qMax(area.y() + 8, y));
+    m_memoHint->raise();
+    m_memoHint->show();
+    if (m_memoHintTimer) {
+        m_memoHintTimer->start();
+    }
+}
+
+void MainWindow::onMemosChanged()
+{
+    if (markdownNotesSidebar) {
+        markdownNotesSidebar->refreshMemos();
+    }
+    showMemoAddedHint();
 }
 
 // =========================================================================
@@ -9086,6 +9348,11 @@ void MainWindow::toggleMarkdownNotesSidebar() {
     // Phase M.3: Load notes when sidebar becomes visible
     if (markdownNotesSidebarVisible) {
         refreshNotesOutline();
+        // Memos (随记): the gallery is the sidebar's default page, so it has to
+        // be populated (and pointed at the active document) on every open.
+        // updateMemoContext() ends up in the gallery's setDocument(), which
+        // rebuilds the grid, so no separate refresh is needed.
+        updateMemoContext();
     }
     
     // Force immediate layout update so canvas repositions correctly
@@ -9106,8 +9373,11 @@ void MainWindow::toggleMarkdownNotesSidebar() {
     updateActionBarPosition();
     // Reposition floating tabs after layout settles
     QTimer::singleShot(0, this, [this]() {
-        // REMOVED S1: positionLeftSidebarTabs() removed - floating tabs replaced by LeftSidebarContainer
-        // MW2.2: Removed dial container positioning
+        // Memos (随记): the canvas changed width, so cards stored relative to
+        // the viewport have to be re-anchored once the splitter settled.
+        if (m_memoManager) {
+            m_memoManager->updateHostGeometry(activeViewportRectInCanvas());
+        }
     });
 }
 

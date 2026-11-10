@@ -16,6 +16,7 @@
 // ============================================================================
 
 #include "Page.h"
+#include "MemoEntry.h"
 #include "../pdf/PdfProvider.h"
 #include "../ui/sidebars/LinkOutlineEntry.h"
 
@@ -522,6 +523,70 @@ public:
      * Phase M.1: Used for cascade delete when clearing LinkSlots or deleting LinkObjects.
      */
     bool deleteNoteFile(const QString& noteId);
+
+    // ========================================================================
+    // Memos (随记) - notebook-wide free-form snippets kept aside
+    // ========================================================================
+    // A memo is a screenshot region, a lasso-cut piece of handwriting, or an
+    // imported image, stored as a PNG under assets/memos/ and listed in
+    // document.json["memos"]. The gallery in the right sidebar and the floating
+    // cards over the page are both views of this list; nothing about the
+    // notebook's pages changes when a memo is created.
+
+    /// Path to the assets/memos directory. Creates it when a bundle path is
+    /// set; empty when the document has never been saved.
+    QString memosPath() const;
+
+    /// Every memo of this notebook, in creation order (oldest first).
+    const QVector<MemoEntry>& memos() const { return m_memos; }
+
+    /// One memo by id, or null when the id is unknown.
+    const MemoEntry* memoById(const QString& memoId) const;
+
+    /**
+     * @brief Absolute path of a memo's PNG (empty when it has no image file).
+     *
+     * Resolves against the current bundle path, so it is only meaningful after
+     * the document has been saved somewhere; memos created earlier are served
+     * from memory by memoImage().
+     */
+    QString memoImagePath(const MemoEntry& entry) const;
+
+    /**
+     * @brief Decode a memo's image (disk first, then the pending in-memory copy).
+     *
+     * Returns a null QImage when the file is missing or unreadable, which the
+     * gallery renders as a "missing image" placeholder.
+     */
+    QImage memoImage(const QString& memoId) const;
+
+    /**
+     * @brief Add a memo for @p image and return it.
+     *
+     * The PNG is written to assets/memos immediately when the document has a
+     * bundle path; otherwise the bytes stay in MemoEntry::pendingImage until
+     * the first saveBundle() creates the directory. The document is marked
+     * modified either way, so the memo is persisted by the next save.
+     *
+     * @param image      Material to keep; a null image is rejected.
+     * @param title      Display title (empty = a timestamped kind title).
+     * @param kind       Where the material came from.
+     * @param sourcePage 0-based notebook page it was captured from, -1 unknown.
+     * @return The new entry, or an invalid one when @p image was null.
+     */
+    MemoEntry addMemo(const QImage& image, const QString& title,
+                      MemoEntry::Kind kind, int sourcePage = -1);
+
+    /// Persist the floating card's last position/size/rotation. No-op (and no
+    /// modification flag) when the value did not actually change.
+    bool updateMemoFloat(const QString& memoId, const QRectF& cardRect,
+                         qreal rotation);
+
+    /// Rename a memo. Returns false for an unknown id or an empty title.
+    bool renameMemo(const QString& memoId, const QString& title);
+
+    /// Delete a memo and its image file. Returns false for an unknown id.
+    bool removeMemo(const QString& memoId);
 
     /**
      * @brief Enumerate every LinkObject with at least one markdown slot.
@@ -2150,6 +2215,12 @@ private:
     bool m_lazyLoadEnabled = false;                 ///< True after loading from bundle
     std::unique_ptr<QThreadPool> m_imageWritePool;  ///< Bounded pool isolated from PDF/render jobs
     QVector<PendingImageWrite> m_pendingImageWrites;
+
+    // ===== Memos (随记) =====
+    /// Notebook-wide snippets kept aside (screenshots, cut handwriting, imported
+    /// images). Persisted in document.json["memos"]; images live under
+    /// assets/memos/. Creation order, oldest first.
+    QVector<MemoEntry> m_memos;
 
     bool m_ocrTextVisible = false;  ///< Persisted as "ocr_show_text"
     bool m_ocrDarkMode = false;

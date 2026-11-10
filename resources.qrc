@@ -102,6 +102,10 @@
     <file>resources/icons/fitwidth_reversed.png</file>
     <file>resources/icons/zoomlock.png</file>
     <file>resources/icons/zoomlock_reversed.png</file>
+    <file>resources/icons/memo_keep.png</file>
+    <file>resources/icons/memo_keep_reversed.png</file>
+    <file>resources/icons/memo_cut.png</file>
+    <file>resources/icons/memo_cut_reversed.png</file>
     <file>resources/icons/undo.png</file>
     <file>resources/icons/undo_reversed.png</file>
     <file>resources/icons/redo.png</file>

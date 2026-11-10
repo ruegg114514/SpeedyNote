@@ -75,17 +75,15 @@ void ScreenClipWidget::paintEvent(QPaintEvent* event)
     font.setPointSizeF(12);
     font.setBold(true);
     painter.setFont(font);
-    const QString hint = tr("Drag to select a region  ·  Enter / double-click to confirm  ·  Esc to cancel");
+    const QString hint = tr("Drag to select a region  ·  Enter / double-click inserts on the page  ·  Esc cancels");
     const QRect hintRect(0, 16, width(), 24);
     painter.setPen(QColor(0, 0, 0, 180));
     painter.drawText(hintRect.translated(1, 1), Qt::AlignHCenter, hint);
     painter.setPen(Qt::white);
     painter.drawText(hintRect, Qt::AlignHCenter, hint);
 
-    // Tablet-friendly Confirm / Cancel buttons pinned to the bottom centre.
-    // Hit-tested in mousePressEvent so they work with touch taps too.
-    const QRect cancelRect = cancelButtonRect();
-    const QRect confirmRect = confirmButtonRect();
+    // Tablet-friendly action buttons pinned to the bottom centre. Hit-tested
+    // in mousePressEvent so they work with touch taps too.
     const bool canConfirm = hasValidSelection();
 
     QFont btnFont = painter.font();
@@ -93,53 +91,67 @@ void ScreenClipWidget::paintEvent(QPaintEvent* event)
     btnFont.setBold(true);
     painter.setFont(btnFont);
 
-    // Cancel (left)
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(80, 80, 80, 225));
-    painter.drawRoundedRect(cancelRect, 10, 10);
-    painter.setPen(Qt::white);
-    painter.drawText(cancelRect, Qt::AlignCenter, tr("Cancel"));
+    struct ButtonStyle {
+        QString text;
+        QColor fill;
+        bool enabled;
+    };
+    const ButtonStyle buttons[ButtonCount] = {
+        { tr("Cancel"),      QColor(80, 80, 80, 225),           true      },
+        { tr("Confirm"),     QColor(0, 120, 215, canConfirm ? 235 : 110), canConfirm },
+        { tr("Memo (keep)"), QColor(46, 125, 50, canConfirm ? 235 : 110), canConfirm },
+        { tr("Memo (cut)"),  QColor(179, 89, 0, canConfirm ? 235 : 110),  canConfirm },
+    };
 
-    // Confirm (right) - dimmed until a real region has been dragged.
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(canConfirm ? QColor(0, 120, 215, 235)
-                                : QColor(0, 120, 215, 110));
-    painter.drawRoundedRect(confirmRect, 10, 10);
-    painter.setPen(canConfirm ? Qt::white : QColor(255, 255, 255, 150));
-    painter.drawText(confirmRect, Qt::AlignCenter, tr("Confirm"));
+    for (int i = 0; i < ButtonCount; ++i) {
+        const QRect rect = actionButtonRect(i);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(buttons[i].fill);
+        painter.drawRoundedRect(rect, 10, 10);
+        painter.setPen(buttons[i].enabled ? Qt::white : QColor(255, 255, 255, 150));
+        painter.drawText(rect, Qt::AlignCenter, buttons[i].text);
+    }
 }
 
-QRect ScreenClipWidget::cancelButtonRect() const
+QRect ScreenClipWidget::actionButtonRect(int index) const
 {
-    const int btnW = 110;
+    // Four buttons share the available width; narrow windows (phones) shrink
+    // them rather than letting the row run off the overlay.
+    const int gap = 12;
+    const int margin = 20;
     const int btnH = 46;
-    const int gap = 14;
-    const int totalW = btnW * 2 + gap;
+    const int available = qMax(240, width() - margin * 2 - gap * (ButtonCount - 1));
+    const int btnW = qBound(64, available / ButtonCount, 150);
+    const int totalW = btnW * ButtonCount + gap * (ButtonCount - 1);
     const int left = (width() - totalW) / 2;
     const int top = height() - btnH - 28;
-    return QRect(left, top, btnW, btnH);
-}
-
-QRect ScreenClipWidget::confirmButtonRect() const
-{
-    const QRect cancel = cancelButtonRect();
-    return QRect(cancel.right() + 14, cancel.top(),
-                 cancel.width(), cancel.height());
+    return QRect(left + index * (btnW + gap), top, btnW, btnH);
 }
 
 void ScreenClipWidget::mousePressEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::LeftButton) {
         // Buttons take priority: a tap on them confirms/cancels instead of
-        // starting a new drag, which is what tablet users expect.
-        if (confirmButtonRect().contains(event->pos())) {
-            if (hasValidSelection()) {
-                accept();
+        // starting a new drag, which is what tablet users expect. The memo
+        // buttons share the same "needs a real region" rule as Confirm.
+        for (int i = 0; i < ButtonCount; ++i) {
+            if (!actionButtonRect(i).contains(event->pos())) {
+                continue;
             }
-            return;
-        }
-        if (cancelButtonRect().contains(event->pos())) {
-            reject();
+            if (i == CancelButton) {
+                reject();
+                return;
+            }
+            if (!hasValidSelection()) {
+                return;  // Dimmed button: ignore the tap, keep the overlay open
+            }
+            switch (i) {
+            case ConfirmButton:  m_action = Action::InsertOnly; break;
+            case MemoKeepButton: m_action = Action::MemoKeep;   break;
+            case MemoCutButton:  m_action = Action::MemoCut;     break;
+            default: break;
+            }
+            accept();
             return;
         }
         m_anchor = event->pos();
@@ -179,6 +191,7 @@ void ScreenClipWidget::mouseDoubleClickEvent(QMouseEvent* event)
     // Guard with a minimum size: a stray double-click after a failed tiny
     // drag leaves a 1x1 residue selection that must not confirm a capture.
     if (m_selection.width() >= 4 && m_selection.height() >= 4) {
+        m_action = Action::InsertOnly;
         accept();
     }
 }
@@ -191,6 +204,7 @@ void ScreenClipWidget::keyPressEvent(QKeyEvent* event)
     }
     if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
         if (!m_selection.isEmpty()) {
+            m_action = Action::InsertOnly;
             accept();
         }
         return;

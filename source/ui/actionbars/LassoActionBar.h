@@ -101,6 +101,17 @@ signals:
     void deleteRequested();
 
     /**
+     * @brief Emitted when one of the two "add selection to memo" buttons is
+     *        clicked.
+     *
+     * @param removeFromPage True for "cut into memo": the selection is removed
+     *        from the page (one undoable action) before being stored as a memo.
+     *        False for "keep in place": the strokes stay where they are and a
+     *        copy goes into the memo.
+     */
+    void addToMemoRequested(bool removeFromPage);
+
+    /**
      * @brief Emitted on first click of the recolor swatch, or after the
      *        user picks a color via the editor (re-apply with new color).
      * @param color The swatch color to apply to every selected stroke.
@@ -120,6 +131,8 @@ private:
     ActionBarButton* m_copyButton = nullptr;
     ActionBarButton* m_cutButton = nullptr;
     ActionBarButton* m_pasteButton = nullptr;
+    ActionBarButton* m_memoKeepButton = nullptr;
+    ActionBarButton* m_memoCutButton = nullptr;
     ActionBarButton* m_deleteButton = nullptr;
 
     QColor m_overrideColor;        ///< Last color pushed into the swatch (pen color or dialog result)

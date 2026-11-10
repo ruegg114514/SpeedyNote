@@ -35,7 +35,10 @@
 #include "../text/MarkdownNoteEntry.h"            // NoteDisplayData
 #include "sidebars/LinkOutlineEntry.h"
 
+class Document;
+class MemoGalleryWidget;
 class NotesTreePanel;
+class QButtonGroup;
 
 class MarkdownNotesSidebar : public QWidget {
     Q_OBJECT
@@ -43,6 +46,21 @@ class MarkdownNotesSidebar : public QWidget {
 public:
     explicit MarkdownNotesSidebar(QWidget* parent = nullptr);
     ~MarkdownNotesSidebar() override;
+
+    // ---------- Memos (随记) ----------
+    /// Point the memo gallery at the active document (nullptr = no document).
+    /// Safe to call every time the active document changes.
+    void setDocument(Document* document);
+
+    /// Rebuild the memo thumbnail grid from the current document.
+    void refreshMemos();
+
+    /// True while the sidebar shows the memo gallery (the other page is the
+    /// markdown notes tree).
+    bool isMemoMode() const { return m_memoMode; }
+
+    /// Switch between the memo gallery (true) and the markdown notes (false).
+    void setMemoMode(bool memoMode);
 
     // ---------- Outline ----------
     /// Where the panel resolves note IDs to .md files.  Safe to call every
@@ -108,6 +126,13 @@ signals:
     void searchRequested(const QString& query, int fromPage, int toPage);
     void reloadNotesRequested();
 
+    // Memos (随记) - forwarded from the gallery
+    void memoOpenRequested(const QString& memoId);
+    void memoDeleteRequested(const QString& memoId);
+    void memoRenameRequested(const QString& memoId, const QString& newTitle);
+    void memoLocateRequested(int pageIndex);
+    void importMemoImageRequested();
+
 private slots:
     void onSearchButtonClicked();
     void onExitSearchClicked();
@@ -115,8 +140,10 @@ private slots:
 
 private:
     void setupUi();
+    void setupMemoModeSwitch();
     void setupSearchUi();
     void applyStyle();
+    void applyModeSwitchStyle();
     void performSearch();
     void updateSearchRangeDefaults();
 
@@ -127,6 +154,15 @@ private:
 
     // Main layout
     QVBoxLayout* mainLayout = nullptr;
+
+    // Mode switch: [Memos] [Notes]
+    QWidget*     modeSwitch       = nullptr;
+    QPushButton* memoModeButton   = nullptr;
+    QPushButton* notesModeButton  = nullptr;
+    QButtonGroup* modeButtonGroup = nullptr;
+
+    // Memo gallery (随记)
+    MemoGalleryWidget* memoGallery = nullptr;
 
     // Search UI
     QWidget*    searchContainer   = nullptr;
@@ -155,6 +191,11 @@ private:
 
     bool isDarkMode = false;
     bool isEdgeless = false;
+
+    /// True while the memo gallery is the visible page of this sidebar. The
+    /// gallery is the default page: the sidebar is the memos browser now, and
+    /// the markdown notes tree is one tab away.
+    bool m_memoMode = true;
 
     // Search state
     bool searchMode = false;

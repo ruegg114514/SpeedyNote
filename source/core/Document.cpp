@@ -3307,7 +3307,17 @@ QJsonObject Document::toJson() const
     
     // Page count (for quick info without loading pages)
     obj["page_count"] = pageCount();
-    
+
+    // Memos (随记). Written only when the notebook has any, so a document that
+    // never used the feature keeps the same document.json shape as before.
+    if (!m_memos.isEmpty()) {
+        QJsonArray memosArray;
+        for (const MemoEntry& entry : m_memos) {
+            memosArray.append(entry.toJson());
+        }
+        obj["memos"] = memosArray;
+    }
+
     return obj;
 }
 
@@ -3443,7 +3453,21 @@ std::unique_ptr<Document> Document::fromJson(const QJsonObject& obj)
         ? (obj["pdf_invert_dark"].toBool() ? 1 : 0) : -1;
     doc->pdfInvertIncludeImagesOverride = obj.contains("pdf_invert_include_images")
         ? (obj["pdf_invert_include_images"].toBool() ? 1 : 0) : -1;
-    
+
+    // Memos (随记). Entries without an id are unusable, so they are dropped
+    // rather than surfacing as nameless gallery rows.
+    doc->m_memos.clear();
+    if (obj.contains("memos") && obj["memos"].isArray()) {
+        const QJsonArray memosArray = obj["memos"].toArray();
+        doc->m_memos.reserve(memosArray.size());
+        for (const QJsonValue& value : memosArray) {
+            const MemoEntry entry = MemoEntry::fromJson(value.toObject());
+            if (entry.isValid()) {
+                doc->m_memos.append(entry);
+            }
+        }
+    }
+
     // Note: Pages are NOT loaded here - call loadPagesFromJson() separately
     // or use fromFullJson() to load everything
     
@@ -4398,6 +4422,153 @@ bool Document::deleteNoteFile(const QString& noteId)
     return true;  // File didn't exist, consider it successfully "deleted"
 }
 
+// ===== Memos (随记) =====
+
+QString Document::memosPath() const
+{
+    const QString assets = assetsPath();
+    if (assets.isEmpty()) {
+        return QString();
+    }
+    const QString memos = assets + "/memos";
+    QDir().mkpath(memos);
+    return memos;
+}
+
+const MemoEntry* Document::memoById(const QString& memoId) const
+{
+    for (const MemoEntry& entry : m_memos) {
+        if (entry.id == memoId) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+QString Document::memoImagePath(const MemoEntry& entry) const
+{
+    if (m_bundlePath.isEmpty() || entry.imageFile.isEmpty()) {
+        return QString();
+    }
+    return m_bundlePath + "/assets/" + entry.imageFile;
+}
+
+QImage Document::memoImage(const QString& memoId) const
+{
+    const MemoEntry* entry = memoById(memoId);
+    if (!entry) {
+        return QImage();
+    }
+    const QString path = memoImagePath(*entry);
+    if (!path.isEmpty() && QFileInfo::exists(path)) {
+        QImage image;
+        if (image.load(path)) {
+            return image;
+        }
+    }
+    // A memo created before the first save has no file yet; its bytes are still
+    // in memory, and the gallery/floating card must show it all the same.
+    return entry->pendingImage;
+}
+
+MemoEntry Document::addMemo(const QImage& image, const QString& title,
+                            MemoEntry::Kind kind, int sourcePage)
+{
+    if (image.isNull()) {
+        return MemoEntry();
+    }
+
+    MemoEntry entry;
+    entry.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    entry.imageFile = QStringLiteral("memos/") + entry.id + QStringLiteral(".png");
+    entry.created = QDateTime::currentDateTime();
+    entry.kind = kind;
+    entry.sourcePage = sourcePage;
+    entry.title = title.trimmed();
+    if (entry.title.isEmpty()) {
+        entry.title = memoDefaultTitle(kind, entry.created);
+    }
+
+    // Write the PNG now when there is somewhere to put it. A document that has
+    // never been saved keeps the bytes in the entry and saveBundle() flushes
+    // them; this mirrors how ImageObject defers assets for unsaved documents.
+    bool written = false;
+    const QString memosDir = memosPath();
+    if (!memosDir.isEmpty()) {
+        QSaveFile file(memosDir + "/" + entry.id + ".png");
+        if (file.open(QIODevice::WriteOnly)) {
+            written = image.save(&file, "PNG") && file.commit();
+        }
+    }
+    if (!written) {
+        entry.pendingImage = image;
+    }
+
+    m_memos.append(entry);
+    markModified();
+    return entry;
+}
+
+bool Document::updateMemoFloat(const QString& memoId, const QRectF& cardRect,
+                               qreal rotation)
+{
+    for (MemoEntry& entry : m_memos) {
+        if (entry.id != memoId) {
+            continue;
+        }
+        const bool unchanged =
+            entry.floatRect == cardRect
+            && qFuzzyCompare(entry.floatRotation + 1.0, rotation + 1.0);
+        if (unchanged) {
+            return false;
+        }
+        entry.floatRect = cardRect;
+        entry.floatRotation = rotation;
+        markModified();
+        return true;
+    }
+    return false;
+}
+
+bool Document::renameMemo(const QString& memoId, const QString& title)
+{
+    const QString trimmed = title.trimmed();
+    if (trimmed.isEmpty()) {
+        return false;
+    }
+    for (MemoEntry& entry : m_memos) {
+        if (entry.id != memoId) {
+            continue;
+        }
+        if (entry.title == trimmed) {
+            return false;
+        }
+        entry.title = trimmed;
+        markModified();
+        return true;
+    }
+    return false;
+}
+
+bool Document::removeMemo(const QString& memoId)
+{
+    for (int i = 0; i < m_memos.size(); ++i) {
+        if (m_memos[i].id != memoId) {
+            continue;
+        }
+        // Pending-only memos have an imageFile name but no file yet; removing it
+        // is a harmless no-op in that case.
+        const QString path = memoImagePath(m_memos[i]);
+        if (!path.isEmpty() && QFileInfo::exists(path)) {
+            QFile::remove(path);
+        }
+        m_memos.removeAt(i);
+        markModified();
+        return true;
+    }
+    return false;
+}
+
 // ============================================================================
 // Link Outline Cache (Phase M.9)
 // ============================================================================
@@ -4860,6 +5031,61 @@ bool Document::saveBundle(const QString& path, bool finalize)
     if (!QDir().mkpath(path + "/assets/images")) {
         qWarning() << "Cannot create assets/images directory" << path;
         return false;
+    }
+
+    // Memos (随记) keep their PNGs in assets/memos/. Create the directory on
+    // every save so a notebook that gained its first memo can write it here.
+    if (!QDir().mkpath(path + "/assets/memos")) {
+        qWarning() << "Cannot create assets/memos directory" << path;
+        m_bundlePath = oldBundlePath;
+        return false;
+    }
+
+    // Save As must carry the memos' PNGs to the new bundle. Their metadata is
+    // in document.json, which is rewritten below; an image left behind would
+    // show up as a broken card in the new location.
+    if (savingToNewLocation) {
+        const QString oldMemosPath = oldBundlePath + "/assets/memos";
+        const QString newMemosPath = path + "/assets/memos";
+        QDir oldMemosDir(oldMemosPath);
+        if (oldMemosDir.exists()) {
+            const QStringList memoFiles = oldMemosDir.entryList(QDir::Files);
+            for (const QString& fileName : memoFiles) {
+                const QString oldFilePath = oldMemosPath + "/" + fileName;
+                const QString newFilePath = newMemosPath + "/" + fileName;
+                if (!QFile::exists(newFilePath)
+                    && !copyAtomically(oldFilePath, newFilePath)) {
+                    qWarning() << "Failed to copy memo" << oldFilePath
+                               << "to" << newFilePath;
+                    m_bundlePath = oldBundlePath;
+                    return false;
+                }
+            }
+        }
+    }
+
+    // A memo added to a never-saved document still carries its PNG in memory.
+    // Flush those now, before toJson() writes the list that references them.
+    // The bytes are kept after the write (cheap - these are the only memos that
+    // ever hold one) so a later Save As to a different bundle can write them
+    // again, and a failed save still leaves a readable memo in memory.
+    for (MemoEntry& entry : m_memos) {
+        if (entry.pendingImage.isNull()) {
+            continue;
+        }
+        const QString memoPath =
+            path + "/assets/memos/" + entry.id + ".png";
+        if (QFileInfo::exists(memoPath)) {
+            continue;
+        }
+        QSaveFile file(memoPath);
+        if (!file.open(QIODevice::WriteOnly)
+            || !entry.pendingImage.save(&file, "PNG")
+            || !file.commit()) {
+            qWarning() << "Cannot write memo image" << memoPath;
+            m_bundlePath = oldBundlePath;
+            return false;
+        }
     }
 
     // Copy existing assets before saveUnsavedImages(). Otherwise every loaded

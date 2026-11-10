@@ -73,7 +73,7 @@ void NavigationBar::setupUi()
     
     m_rightSidebarButton = new ToggleButton(this);
     m_rightSidebarButton->setThemedIcon("rightsidebar");
-    m_rightSidebarButton->setToolTip(tr("Toggle Markdown Notes"));
+    m_rightSidebarButton->setToolTip(tr("Toggle Memos / Notes"));
     mainLayout->addWidget(m_rightSidebarButton);
 
     m_sideNotesButton = new ToggleButton(this);

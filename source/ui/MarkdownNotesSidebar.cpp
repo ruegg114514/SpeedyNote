@@ -1,11 +1,14 @@
 #include "MarkdownNotesSidebar.h"
 
+#include "MemoGalleryWidget.h"
 #include "sidebars/NotesTreePanel.h"
 
 #include <QApplication>
+#include <QButtonGroup>
 #include <QDebug>
 #include <QFile>
 #include <QPalette>
+#include <QSignalBlocker>
 
 // ============================================================================
 // Construction
@@ -30,6 +33,8 @@ void MarkdownNotesSidebar::setupUi()
     mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
+
+    setupMemoModeSwitch();
 
     setupSearchUi();
 
@@ -68,10 +73,93 @@ void MarkdownNotesSidebar::setupUi()
     emptyLabel->setWordWrap(true);
     emptyLabel->hide();
 
+    // Memo gallery (随记) - the sidebar's default page.
+    memoGallery = new MemoGalleryWidget(this);
+    connect(memoGallery, &MemoGalleryWidget::memoOpenRequested,
+            this, &MarkdownNotesSidebar::memoOpenRequested);
+    connect(memoGallery, &MemoGalleryWidget::memoDeleteRequested,
+            this, &MarkdownNotesSidebar::memoDeleteRequested);
+    connect(memoGallery, &MemoGalleryWidget::memoRenameRequested,
+            this, &MarkdownNotesSidebar::memoRenameRequested);
+    connect(memoGallery, &MemoGalleryWidget::memoLocateRequested,
+            this, &MarkdownNotesSidebar::memoLocateRequested);
+    connect(memoGallery, &MemoGalleryWidget::importImageRequested,
+            this, &MarkdownNotesSidebar::importMemoImageRequested);
+    memoGallery->setDarkMode(isDarkMode);
+
+    mainLayout->addWidget(modeSwitch);
     mainLayout->addWidget(searchContainer);
     mainLayout->addWidget(notesTreePanel, 1);
     mainLayout->addWidget(scrollArea, 1);
     mainLayout->addWidget(emptyLabel);
+    mainLayout->addWidget(memoGallery, 1);
+
+    // Start on the memo page. The markdown notes tree is one tab away; its
+    // outline/search state is rebuilt when the tab is selected.
+    setMemoMode(true);
+}
+
+void MarkdownNotesSidebar::setupMemoModeSwitch()
+{
+    modeSwitch = new QWidget(this);
+    modeSwitch->setObjectName("SidebarModeSwitch");
+    auto* row = new QHBoxLayout(modeSwitch);
+    row->setContentsMargins(12, 10, 12, 4);
+    row->setSpacing(6);
+
+    memoModeButton = new QPushButton(tr("Memos"), modeSwitch);
+    memoModeButton->setObjectName("SidebarModeButton");
+    memoModeButton->setCheckable(true);
+    memoModeButton->setChecked(true);
+    memoModeButton->setMinimumHeight(32);
+    memoModeButton->setCursor(Qt::PointingHandCursor);
+    memoModeButton->setToolTip(tr("Memos: screenshots and handwriting kept aside"));
+
+    notesModeButton = new QPushButton(tr("Notes"), modeSwitch);
+    notesModeButton->setObjectName("SidebarModeButton");
+    notesModeButton->setCheckable(true);
+    notesModeButton->setMinimumHeight(32);
+    notesModeButton->setCursor(Qt::PointingHandCursor);
+    notesModeButton->setToolTip(tr("Markdown notes linked to annotations"));
+
+    modeButtonGroup = new QButtonGroup(this);
+    modeButtonGroup->setExclusive(true);
+    modeButtonGroup->addButton(memoModeButton, 0);
+    modeButtonGroup->addButton(notesModeButton, 1);
+
+    row->addWidget(memoModeButton);
+    row->addWidget(notesModeButton);
+    row->addStretch(1);
+
+    connect(memoModeButton, &QPushButton::clicked,
+            this, [this]() { setMemoMode(true); });
+    connect(notesModeButton, &QPushButton::clicked,
+            this, [this]() { setMemoMode(false); });
+
+    applyModeSwitchStyle();
+}
+
+void MarkdownNotesSidebar::applyModeSwitchStyle()
+{
+    if (!modeSwitch) {
+        return;
+    }
+    const QString border = isDarkMode ? QStringLiteral("#4a4a4a")
+                                      : QStringLiteral("#d0d5dd");
+    const QString text = isDarkMode ? QStringLiteral("#d0d5dd")
+                                    : QStringLiteral("#475467");
+    const QString hover = isDarkMode ? QStringLiteral("#3a3a3a")
+                                     : QStringLiteral("#f2f4f7");
+    modeSwitch->setStyleSheet(QStringLiteral(
+        "QWidget#SidebarModeSwitch { background: transparent; }"
+        "QPushButton#SidebarModeButton {"
+        "  border: 1px solid %1; border-radius: 16px; padding: 3px 16px;"
+        "  color: %2; background: transparent; font-size: 13px; }"
+        "QPushButton#SidebarModeButton:hover:!checked { background: %3; }"
+        "QPushButton#SidebarModeButton:checked {"
+        "  background: #0078d4; border-color: #0078d4; color: white;"
+        "  font-weight: bold; }")
+        .arg(border, text, hover));
 }
 
 void MarkdownNotesSidebar::setupSearchUi()
@@ -204,6 +292,7 @@ void MarkdownNotesSidebar::applyStyle()
     if (searchButton) searchButton->setIcon(QIcon(zoomIconPath));
 
     if (notesTreePanel) notesTreePanel->setDarkMode(isDarkMode);
+    applyModeSwitchStyle();
 }
 
 void MarkdownNotesSidebar::setDarkMode(bool darkMode)
@@ -211,6 +300,57 @@ void MarkdownNotesSidebar::setDarkMode(bool darkMode)
     if (isDarkMode == darkMode) return;
     isDarkMode = darkMode;
     applyStyle();
+    if (memoGallery) memoGallery->setDarkMode(darkMode);
+}
+
+// ============================================================================
+// Memos (随记)
+// ============================================================================
+
+void MarkdownNotesSidebar::setDocument(Document* document)
+{
+    if (memoGallery) {
+        memoGallery->setDocument(document);
+    }
+}
+
+void MarkdownNotesSidebar::refreshMemos()
+{
+    if (memoGallery) {
+        memoGallery->refresh();
+    }
+}
+
+void MarkdownNotesSidebar::setMemoMode(bool memoMode)
+{
+    m_memoMode = memoMode;
+
+    if (memoModeButton && notesModeButton) {
+        // The buttons are an exclusive group; syncing them from code must not
+        // loop back into setMemoMode() through their clicked() signals.
+        const QSignalBlocker blockMemo(memoModeButton);
+        const QSignalBlocker blockNotes(notesModeButton);
+        memoModeButton->setChecked(memoMode);
+        notesModeButton->setChecked(!memoMode);
+    }
+
+    if (searchContainer) searchContainer->setVisible(!memoMode);
+    if (memoGallery) memoGallery->setVisible(memoMode);
+
+    if (memoMode) {
+        if (notesTreePanel) notesTreePanel->hide();
+        if (scrollArea) scrollArea->hide();
+        if (emptyLabel) emptyLabel->hide();
+        if (memoGallery) memoGallery->refresh();
+        return;
+    }
+
+    // Back to the markdown notes page: restore whichever view it was in.
+    if (searchMode) {
+        showSearchResultsView();
+    } else {
+        showOutlineView();
+    }
 }
 
 // ============================================================================
@@ -227,6 +367,13 @@ void MarkdownNotesSidebar::setOutline(const QVector<LinkOutlineEntry>& entries,
 {
     if (!notesTreePanel) return;
     notesTreePanel->setOutline(entries, edgeless);
+
+    // The memo gallery owns the visible page right now; keep the freshly
+    // built outline parked until the notes tab is selected.
+    if (m_memoMode) {
+        notesTreePanel->hide();
+        return;
+    }
 
     if (!searchMode) {
         showOutlineView();
@@ -255,6 +402,7 @@ void MarkdownNotesSidebar::updateLinkObject(const QString& linkObjectId,
 
 void MarkdownNotesSidebar::openNote(const QString& linkObjectId, int slotIndex)
 {
+    setMemoMode(false);
     if (searchMode) exitSearchMode();
     showOutlineView();
     if (notesTreePanel) notesTreePanel->openNote(linkObjectId, slotIndex);
@@ -263,6 +411,7 @@ void MarkdownNotesSidebar::openNote(const QString& linkObjectId, int slotIndex)
 void MarkdownNotesSidebar::openNoteById(const QString& linkObjectId,
                                          const QString& noteId)
 {
+    setMemoMode(false);
     if (searchMode) exitSearchMode();
     showOutlineView();
     if (notesTreePanel) notesTreePanel->openNoteById(linkObjectId, noteId);
@@ -331,6 +480,11 @@ void MarkdownNotesSidebar::updateSearchRangeDefaults()
 
 void MarkdownNotesSidebar::showOutlineView()
 {
+    if (m_memoMode) {
+        // The memo page is in front; the caller (setMemoMode) decides when the
+        // notes page becomes visible again.
+        return;
+    }
     if (notesTreePanel && notesTreePanel->hasOutline()) {
         emptyLabel->hide();
         notesTreePanel->show();
@@ -437,6 +591,8 @@ void MarkdownNotesSidebar::performSearch()
 void MarkdownNotesSidebar::displaySearchResults(
     const QList<NoteDisplayData>& results)
 {
+    setMemoMode(false);
+
     // Rebuild the flat list.
     for (MarkdownNoteEntry* entry : searchResultEntries) {
         scrollLayout->removeWidget(entry);

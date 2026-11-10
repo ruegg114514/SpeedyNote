@@ -13,6 +13,7 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QHash>
+#include <QRect>
 #include <set>
 #include <QSpinBox>
 #include "pdf/PdfSearchEngine.h"  // SBS2: PdfSearchMatch complete type for scan aggregate
@@ -89,6 +90,7 @@ enum class TouchGestureMode {
 // Forward declarations
 class QTreeWidgetItem;
 class QProgressDialog;
+class QLabel;
 class DocumentViewport;
 class LayerPanel;
 class PagePanel;
@@ -101,6 +103,7 @@ namespace Poppler {
 // Forward declarations
 class LauncherWindow;
 class SplitViewManager;
+class MemoManager;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -682,6 +685,34 @@ private:
      * signal path.
      */
     void refreshNotesOutline();
+
+    // ---- Memos (随记) ----
+    /// Create the floating-card manager, the sidebar gallery wiring and the
+    /// transient "added to memos" hint. Runs once, after the canvas and the
+    /// action bars exist.
+    void setupMemos();
+
+    /// Point the card manager + gallery at the active viewport's document and
+    /// tell the manager where that viewport currently sits in the canvas.
+    void updateMemoContext();
+
+    /// The active viewport's rectangle in m_canvasContainer coordinates (the
+    /// coordinate space floating cards live in).
+    QRect activeViewportRectInCanvas() const;
+
+    /// Open a memo as a floating card, closing the sidebar first so the card
+    /// lands on the full-width page.
+    void openMemoCard(const QString& memoId);
+
+    /// File-dialog import of an image file as a memo.
+    void importMemoImage();
+
+    /// Transient bottom-centre hint confirming that a memo was added (the card
+    /// itself is not opened automatically).
+    void showMemoAddedHint();
+
+    /// A viewport reported a new memo: refresh the gallery and confirm it.
+    void onMemosChanged();
     
     /**
      * @brief Phase M.3: Navigate to and select a LinkObject on the current page.
@@ -795,6 +826,11 @@ private:
     MarkdownNotesSidebar *markdownNotesSidebar;  // Sidebar for markdown notes
     // QPushButton *toggleMarkdownNotesButton; // Button to toggle markdown notes sidebar
     bool markdownNotesSidebarVisible = false;
+
+    // Memos (随记): floating cards over the page + their gallery in the sidebar
+    MemoManager* m_memoManager = nullptr;
+    QLabel* m_memoHint = nullptr;         ///< Transient "added to memos" chip
+    QTimer* m_memoHintTimer = nullptr;
 
     // Side notes area is now integrated into DocumentViewport
     bool m_sideNotesPanelVisible = false;  // Track visibility state for nav bar sync

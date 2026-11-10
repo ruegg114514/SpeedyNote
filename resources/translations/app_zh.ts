@@ -2381,6 +2381,14 @@ This helps prevent accidental palm touches while writing. Only affects Y-Axis On
         <source>Delete</source>
         <translation type="unfinished">删除</translation>
     </message>
+    <message>
+        <source>Add to memos, keep it on the page</source>
+        <translation type="unfinished">加入随记（保留在原文）</translation>
+    </message>
+    <message>
+        <source>Cut into memos (remove it from the page)</source>
+        <translation type="unfinished">剪入随记（从原文删除）</translation>
+    </message>
 </context>
 <context>
     <name>Launcher</name>
@@ -3699,6 +3707,26 @@ The recognized block is removed and its ink is excluded from future scans.</sour
         <source>At least one tab must remain open.</source>
         <translation type="unfinished">至少保留一个选项卡。</translation>
     </message>
+    <message>
+        <source>Delete Memo</source>
+        <translation type="unfinished">删除随记</translation>
+    </message>
+    <message>
+        <source>Delete "%1"? The image is removed from this notebook.</source>
+        <translation type="unfinished">删除“%1”？这张图片会从当前笔记本中移除。</translation>
+    </message>
+    <message>
+        <source>Import Images as Memos</source>
+        <translation type="unfinished">导入图片为随记</translation>
+    </message>
+    <message>
+        <source>Images (*.png *.jpg *.jpeg *.bmp *.webp *.gif);;All Files (*)</source>
+        <translation type="unfinished">图片 (*.png *.jpg *.jpeg *.bmp *.webp *.gif);;所有文件 (*)</translation>
+    </message>
+    <message>
+        <source>Added to Memos</source>
+        <translation type="unfinished">已加入随记</translation>
+    </message>
 </context>
 <context>
     <name>MarkdownNote</name>
@@ -3810,6 +3838,22 @@ The recognized block is removed and its ink is excluded from future scans.</sour
         <location filename="../../source/ui/MarkdownNotesSidebar.cpp" line="471"/>
         <source>No matching notes found</source>
         <translation type="unfinished">没有找到符合的笔记</translation>
+    </message>
+    <message>
+        <source>Memos</source>
+        <translation type="unfinished">随记</translation>
+    </message>
+    <message>
+        <source>Notes</source>
+        <translation type="unfinished">笔记</translation>
+    </message>
+    <message>
+        <source>Memos: screenshots and handwriting kept aside</source>
+        <translation type="unfinished">随记：收起来的截图与手写内容</translation>
+    </message>
+    <message>
+        <source>Markdown notes linked to annotations</source>
+        <translation type="unfinished">与批注关联的 Markdown 笔记</translation>
     </message>
 </context>
 <context>
@@ -3986,6 +4030,10 @@ Please remove the password and try again.</source>
         <location filename="../../source/ui/NavigationBar.cpp" line="81"/>
         <source>Menu</source>
         <translation type="unfinished">菜单</translation>
+    </message>
+    <message>
+        <source>Toggle Memos / Notes</source>
+        <translation type="unfinished">显示/隐藏 随记与笔记</translation>
     </message>
 </context>
 <context>
@@ -5878,6 +5926,102 @@ The + and - buttons keep working</source>
         <translation type="unfinished">
             <numerusform>%n个对应的</numerusform>
         </translation>
+    </message>
+</context>
+<context>
+    <name>ScreenClipWidget</name>
+    <message>
+        <source>Cancel</source>
+        <translation type="unfinished">取消</translation>
+    </message>
+    <message>
+        <source>Confirm</source>
+        <translation type="unfinished">确认</translation>
+    </message>
+    <message>
+        <source>Drag to select a region  ·  Enter / double-click inserts on the page  ·  Esc cancels</source>
+        <translation type="unfinished">拖动选择区域  ·  回车/双击插入页面  ·  Esc 取消</translation>
+    </message>
+    <message>
+        <source>Memo (keep)</source>
+        <translation type="unfinished">随记（保留）</translation>
+    </message>
+    <message>
+        <source>Memo (cut)</source>
+        <translation type="unfinished">随记（剪除）</translation>
+    </message>
+</context>
+<context>
+    <name>MemoGalleryWidget</name>
+    <message>
+        <source>Memos (%1)</source>
+        <translation type="unfinished">随记 (%1)</translation>
+    </message>
+    <message>
+        <source>Import an image as a memo</source>
+        <translation type="unfinished">导入一张图片作为随记</translation>
+    </message>
+    <message>
+        <source>Untitled memo</source>
+        <translation type="unfinished">未命名随记</translation>
+    </message>
+    <message>
+        <source>Delete memo</source>
+        <translation type="unfinished">删除随记</translation>
+    </message>
+    <message>
+        <source>Missing image</source>
+        <translation type="unfinished">图片缺失</translation>
+    </message>
+    <message>
+        <source>No memos yet</source>
+        <translation type="unfinished">还没有随记</translation>
+    </message>
+    <message>
+        <source>Open</source>
+        <translation type="unfinished">打开</translation>
+    </message>
+    <message>
+        <source>Rename…</source>
+        <translation type="unfinished">重命名…</translation>
+    </message>
+    <message>
+        <source>Delete…</source>
+        <translation type="unfinished">删除…</translation>
+    </message>
+    <message>
+        <source>Go to source page</source>
+        <translation type="unfinished">跳转到来源页面</translation>
+    </message>
+    <message>
+        <source>Rename memo</source>
+        <translation type="unfinished">重命名随记</translation>
+    </message>
+    <message>
+        <source>Memo title:</source>
+        <translation type="unfinished">随记标题：</translation>
+    </message>
+</context>
+<context>
+    <name>MemoEntry</name>
+    <message>
+        <source>Screenshot %1</source>
+        <translation type="unfinished">截图 %1</translation>
+    </message>
+    <message>
+        <source>Handwriting %1</source>
+        <translation type="unfinished">手写 %1</translation>
+    </message>
+    <message>
+        <source>Image %1</source>
+        <translation type="unfinished">图片 %1</translation>
+    </message>
+</context>
+<context>
+    <name>MemoFloatWidget</name>
+    <message>
+        <source>Missing image</source>
+        <translation type="unfinished">图片缺失</translation>
     </message>
 </context>
 </TS>

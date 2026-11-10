@@ -841,6 +841,7 @@ set(CORE_SOURCES
     source/core/NotebookLibrary.cpp
     source/core/TouchGestureHandler.cpp
     source/core/MarkdownNote.cpp
+    source/core/MemoEntry.cpp
     source/core/ShortcutManager.cpp
     source/core/DarkModeUtils.cpp
 )
@@ -917,6 +918,10 @@ set(UI_SOURCES
     source/ui/PageThumbnailModel.cpp
     source/ui/PageThumbnailDelegate.cpp
     source/ui/ThumbnailRenderer.cpp
+    # Memos (随记)
+    source/ui/MemoFloatWidget.cpp
+    source/ui/MemoGalleryWidget.cpp
+    source/ui/MemoManager.cpp
     # Sidebars
     source/ui/sidebars/LayerPanel.cpp
     source/ui/sidebars/LeftSidebarContainer.cpp

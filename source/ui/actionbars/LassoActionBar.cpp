@@ -48,7 +48,26 @@ void LassoActionBar::setupButtons()
     m_pasteButton->hide();  // Hidden by default
     addButton(m_pasteButton);
     connect(m_pasteButton, &ActionBarButton::clicked, this, &LassoActionBar::pasteRequested);
-    
+
+    // Memo (随记) actions. "Keep" leaves the strokes on the page and stores a
+    // copy; "cut" removes them from the page and stores that. Both render the
+    // selection (with any live rotation/scale) into a transparent PNG.
+    m_memoKeepButton = new ActionBarButton(this);
+    m_memoKeepButton->setIconName("memo_keep");
+    m_memoKeepButton->setToolTip(tr("Add to memos, keep it on the page"));
+    addButton(m_memoKeepButton);
+    connect(m_memoKeepButton, &ActionBarButton::clicked, this, [this]() {
+        emit addToMemoRequested(false);
+    });
+
+    m_memoCutButton = new ActionBarButton(this);
+    m_memoCutButton->setIconName("memo_cut");
+    m_memoCutButton->setToolTip(tr("Cut into memos (remove it from the page)"));
+    addButton(m_memoCutButton);
+    connect(m_memoCutButton, &ActionBarButton::clicked, this, [this]() {
+        emit addToMemoRequested(true);
+    });
+
     // Create Delete button (bottom)
     m_deleteButton = new ActionBarButton(this);
     m_deleteButton->setIconName("trash");
@@ -76,6 +95,12 @@ void LassoActionBar::updateButtonStates()
     }
     if (m_deleteButton) {
         m_deleteButton->setVisible(m_hasSelection);
+    }
+    if (m_memoKeepButton) {
+        m_memoKeepButton->setVisible(m_hasSelection);
+    }
+    if (m_memoCutButton) {
+        m_memoCutButton->setVisible(m_hasSelection);
     }
 
     // Paste button: visible when clipboard has strokes
@@ -127,6 +152,12 @@ void LassoActionBar::setDarkMode(bool darkMode)
     }
     if (m_pasteButton) {
         m_pasteButton->setDarkMode(darkMode);
+    }
+    if (m_memoKeepButton) {
+        m_memoKeepButton->setDarkMode(darkMode);
+    }
+    if (m_memoCutButton) {
+        m_memoCutButton->setDarkMode(darkMode);
     }
     if (m_deleteButton) {
         m_deleteButton->setDarkMode(darkMode);
