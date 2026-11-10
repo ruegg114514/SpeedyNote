@@ -30,6 +30,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSizePolicy>
 #include <QString>
 #include <QToolButton>
@@ -369,6 +370,8 @@ void MemoCard::buildUi(const MemoEntry& entry, const QImage& image)
     m_titleLabel->setObjectName(QStringLiteral("MemoCardTitle"));
     m_titleLabel->setFullText(m_fullTitle);
     m_titleLabel->onDoubleClick = [this]() { beginTitleEdit(); };
+    // I-beam hints "this text is editable" without a visible button.
+    m_titleLabel->setCursor(Qt::IBeamCursor);
     m_titleLabel->setToolTip(
         QStringLiteral("%1\n%2").arg(m_fullTitle, memoString("Double-click to rename")));
     layout->addWidget(m_titleLabel);
@@ -743,6 +746,28 @@ void applyThumbnailLimits(QGridLayout* grid, int viewportHeight)
 }
 
 /**
+ * @brief Keep the card width constant while the vertical scrollbar appears and
+ *        disappears.
+ *
+ * The thumbnail height is derived from the card width, and the card height
+ * drives whether the scrollbar is needed - a classic feedback loop: the bar
+ * takes ~12 px off the viewport, which shrinks every card, which can make the
+ * content fit again, which removes the bar. Reserving the bar's width on the
+ * right when it is hidden keeps the content width identical in both states, so
+ * the loop has nothing to oscillate.
+ */
+void syncScrollbarMargin(QScrollArea* area, QGridLayout* grid)
+{
+    if (!area || !grid) return;
+    const QScrollBar* bar = area->verticalScrollBar();
+    const int barWidth = bar ? bar->sizeHint().width() : 0;
+    const bool barVisible = bar && bar->isVisible();
+    grid->setContentsMargins(kGridMargin, kGridMargin,
+                             kGridMargin + (barVisible ? 0 : barWidth),
+                             kGridMargin);
+}
+
+/**
  * @brief Reports viewport resizes to a callback.
  *
  * The gallery header is frozen, so the re-flow hook cannot be a member
@@ -861,6 +886,7 @@ void MemoGalleryWidget::setupUi()
     // no header change.
     auto* resizeFilter = new ViewportResizeFilter([this]() {
         if (!m_scrollArea || !m_gridLayout) return;
+        syncScrollbarMargin(m_scrollArea, m_gridLayout);
         relayoutMemoGrid(m_gridLayout);
         applyThumbnailLimits(m_gridLayout, m_scrollArea->viewport()->height());
     }, this);
@@ -1048,6 +1074,7 @@ void MemoGalleryWidget::refresh()
     // One card per row; the width comes from the viewport and the height from
     // each memo's aspect ratio. A rebuild while the sidebar is hidden is
     // corrected by the resize filter right after the first show.
+    syncScrollbarMargin(m_scrollArea, m_gridLayout);
     relayoutMemoGrid(m_gridLayout);
     applyThumbnailLimits(m_gridLayout,
                          m_scrollArea ? m_scrollArea->viewport()->height() : 0);
