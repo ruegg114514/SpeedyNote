@@ -184,8 +184,12 @@ public:
     explicit ElidedTitleLabel(QWidget* parent = nullptr)
         : QLabel(parent)
     {
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        // Ignored horizontal: the label must never impose its (full) text width
+        // as a minimum, otherwise a long title would stop the card - and with it
+        // the whole gallery - from narrowing to the sidebar.
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         setTextInteractionFlags(Qt::NoTextInteraction);
+        setMinimumWidth(0);
     }
 
     void setFullText(const QString& text)
@@ -198,6 +202,13 @@ public:
 
     /// Invoked on double-click (the card replaces the label with an editor).
     std::function<void()> onDoubleClick;
+
+    // Ignored policy already reports a 0 minimum width; keeping the height to a
+    // single text line makes the card's sizeHint independent of the title.
+    QSize minimumSizeHint() const override
+    {
+        return QSize(0, fontMetrics().height());
+    }
 
 protected:
     void resizeEvent(QResizeEvent* event) override
@@ -358,7 +369,13 @@ void MemoCard::buildUi(const MemoEntry& entry, const QImage& image)
     m_thumbnailLabel = new QLabel(this);
     m_thumbnailLabel->setObjectName(QStringLiteral("MemoThumbnail"));
     m_thumbnailLabel->setAlignment(Qt::AlignCenter);
-    m_thumbnailLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    // Ignored horizontal: a QLabel's minimum width is derived from its pixmap,
+    // so without this the card could never become narrower than the thumbnail
+    // it was last scaled for - it would overflow the sidebar when the sidebar
+    // was dragged narrower (the gallery has no horizontal scrollbar). The pixmap
+    // is re-scaled to the real label width by updateThumbnail().
+    m_thumbnailLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    m_thumbnailLabel->setMinimumWidth(0);
     m_thumbnailLabel->setMinimumHeight(kThumbMinHeight);
     // Clicks must reach the card itself; labels would otherwise eat the press
     // (and the tooltip of the card would never show).
