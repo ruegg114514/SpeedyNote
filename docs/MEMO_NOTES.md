@@ -68,6 +68,9 @@ canvas says "Added to Memos" and the gallery shows the new thumbnail.
   very tall page cannot eat the whole list; a tall memo keeps its full image and
   is scaled down (letterboxed inside the card) instead of being cropped. Title
   and timestamp sit under the thumbnail.
+* The list scrolls by dragging anywhere: a stylus/finger swipe on a card, on its
+  title or on the background moves the list (same gesture as the scrollbar), so
+  a tablet does not need the scrollbar.
 * Hover reveals a `×` (the window asks for confirmation); the context menu has
   Open / Rename… / Delete… and, when the memo records a source page, "Go to
   source page".
@@ -82,6 +85,13 @@ canvas says "Added to Memos" and the gallery shows the new thumbnail.
   handle above the card to rotate (15° steps, same snap as rotated objects in
   the canvas), press the always-visible `×` to put it away. The memo itself is
   not deleted by closing its card.
+* A card opens at the material's own size (the captured screenshot region, the
+  on-screen size of the cut strokes, or the imported image's pixel size), scaled
+  down uniformly only when it does not fit the viewport - never stretched.
+* The top-left lock button mirrors the image object's aspect-ratio lock: while
+  highlighted, resizing keeps the memo's proportions; click it to allow free
+  resizing (a stretched state is snapped back when the lock is re-enabled). The
+  preference is global and remembered in QSettings.
 * The card is a viewport-space overlay: it does **not** scroll with the page.
   Wheel events over a card are forwarded to the viewport, so scrolling the page
   under a card still works. A press on the page deactivates the card (hides its

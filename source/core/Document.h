@@ -572,10 +572,14 @@ public:
      * @param title      Display title (empty = a timestamped kind title).
      * @param kind       Where the material came from.
      * @param sourcePage 0-based notebook page it was captured from, -1 unknown.
+     * @param naturalSize The material's own size at capture time (viewport
+     *        logical pixels for a screenshot, page units for lasso strokes).
+     *        The floating card opens at this size instead of a generic default.
      * @return The new entry, or an invalid one when @p image was null.
      */
     MemoEntry addMemo(const QImage& image, const QString& title,
-                      MemoEntry::Kind kind, int sourcePage = -1);
+                      MemoEntry::Kind kind, int sourcePage = -1,
+                      const QSizeF& naturalSize = QSizeF());
 
     /// Persist the floating card's last position/size/rotation. No-op (and no
     /// modification flag) when the value did not actually change.

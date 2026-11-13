@@ -79,14 +79,22 @@ public:
 
     void setDarkMode(bool darkMode);
 
+    /// Resize keeps the memo's own proportions while true (the small lock button
+    /// on a card toggles this). A global preference, persisted in QSettings:
+    /// it describes how the reader wants to manipulate cards, not the notebook.
+    void setAspectRatioLocked(bool locked);
+    bool isAspectRatioLocked() const { return m_aspectRatioLocked; }
+
 private:
     void clearCards();
     MemoFloatWidget* createCard(const MemoEntry& entry);
     void activateCard(MemoFloatWidget* card);
     void deactivateAll();
-    /// @param imageSize memo image size in pixels (used for the default card
-    ///        aspect ratio). Passed in so the image is decoded only once per open.
-    QRectF defaultCardRectFor(const QSize& imageSize) const;
+    /// @param entry    memo metadata (natural size decides the opening size).
+    /// @param imageSize decoded image size, passed in so the image is decoded
+    ///        only once per open.
+    QRectF defaultCardRectFor(const MemoEntry& entry,
+                              const QSize& imageSize) const;
     void clampCardIntoHost(MemoFloatWidget* card);
     QPoint viewportOffset() const { return m_viewportRect.topLeft(); }
 
@@ -101,6 +109,7 @@ private:
     QRect m_viewportRect;
 
     bool m_darkMode = false;
+    bool m_aspectRatioLocked = true;
 
     QHash<QString, MemoFloatWidget*> m_cards;
     /// Memos whose cards were open, keyed by Document::sessionId() (session-only

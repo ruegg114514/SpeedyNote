@@ -46,6 +46,13 @@ QJsonObject MemoEntry::toJson() const
         if (!qFuzzyIsNull(floatRotation))
             obj["float_rotation"] = floatRotation;
     }
+
+    // Capture-time size, so a reopened notebook can restore the card at the
+    // material's own proportions. Absent for memos written before this field.
+    if (hasNaturalSize()) {
+        obj["natural_w"] = naturalSize.width();
+        obj["natural_h"] = naturalSize.height();
+    }
     return obj;
 }
 
@@ -69,6 +76,12 @@ MemoEntry MemoEntry::fromJson(const QJsonObject& obj)
         entry.floatRect = QRectF(obj["float_x"].toDouble(0.0),
                                  obj["float_y"].toDouble(0.0), w, h);
         entry.floatRotation = obj["float_rotation"].toDouble(0.0);
+    }
+
+    const qreal naturalW = obj["natural_w"].toDouble(0.0);
+    const qreal naturalH = obj["natural_h"].toDouble(0.0);
+    if (naturalW > 0.5 && naturalH > 0.5) {
+        entry.naturalSize = QSizeF(naturalW, naturalH);
     }
 
     if (entry.title.isEmpty()) {

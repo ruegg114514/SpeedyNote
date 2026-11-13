@@ -5,6 +5,7 @@
 #include "ThemeColors.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QColor>
 #include <QContextMenuEvent>
 #include <QCoreApplication>
@@ -165,6 +166,40 @@ QPoint mouseLocalPos(const QMouseEvent* event)
 #endif
 }
 
+/// Global position of a mouse event (Qt5 globalPos() / Qt6 globalPosition()).
+QPoint mouseGlobalPos(const QMouseEvent* event)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    return event->globalPosition().toPoint();
+#else
+    return event->globalPos();
+#endif
+}
+
+/// Nearest scroll area above @p widget, or nullptr.
+QScrollArea* scrollAreaAncestor(QWidget* widget)
+{
+    for (QWidget* parent = widget; parent; parent = parent->parentWidget()) {
+        if (auto* area = qobject_cast<QScrollArea*>(parent)) {
+            return area;
+        }
+    }
+    return nullptr;
+}
+
+/// Scroll the gallery by @p dy logical pixels (positive = content moves up).
+void dragScrollBy(QWidget* widget, int dy)
+{
+    if (!widget || dy == 0) {
+        return;
+    }
+    if (QScrollArea* area = scrollAreaAncestor(widget)) {
+        if (QScrollBar* bar = area->verticalScrollBar()) {
+            bar->setValue(bar->value() + dy);
+        }
+    }
+}
+
 /// Tallest a thumbnail may become for a @p viewportHeight px tall gallery.
 int maxThumbnailHeightFor(int viewportHeight)
 {
@@ -200,15 +235,19 @@ public:
     }
     QString fullText() const { return m_fullText; }
 
-    /// Invoked on double-click (the card replaces the label with an editor).
-    std::function<void()> onDoubleClick;
-
     // Ignored policy already reports a 0 minimum width; keeping the height to a
     // single text line makes the card's sizeHint independent of the title.
     QSize minimumSizeHint() const override
     {
         return QSize(0, fontMetrics().height());
     }
+
+    /// Invoked on double-click (the card replaces the label with an editor).
+    std::function<void()> onDoubleClick;
+    /// Invoked with a pixel delta while the reader drags the title: the card
+    /// forwards it to the gallery's scroll bar, so a stylus/finger can slide the
+    /// list even when the press started on the (click-catching) title.
+    std::function<void(int)> onDragBy;
 
 protected:
     void resizeEvent(QResizeEvent* event) override
@@ -217,7 +256,50 @@ protected:
         updateElidedText();
     }
 
-    void mousePressEvent(QMouseEvent* event) override { event->accept(); }
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        event->accept();
+        m_pressed = true;
+        m_dragging = false;
+        m_pressGlobal = mouseGlobalPos(event);
+        m_lastGlobal = m_pressGlobal;
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        if (!m_pressed) {
+            QLabel::mouseMoveEvent(event);
+            return;
+        }
+        const QPoint global = mouseGlobalPos(event);
+        if (!m_dragging
+            && (global - m_pressGlobal).manhattanLength()
+                   >= QApplication::startDragDistance()) {
+            m_dragging = true;
+            setCursor(Qt::ClosedHandCursor);
+        }
+        if (m_dragging) {
+            if (onDragBy) {
+                onDragBy(m_lastGlobal.y() - global.y());
+            }
+            m_lastGlobal = global;
+            event->accept();
+            return;
+        }
+        QLabel::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        m_pressed = false;
+        if (m_dragging) {
+            m_dragging = false;
+            setCursor(Qt::IBeamCursor);
+            event->accept();
+            return;
+        }
+        QLabel::mouseReleaseEvent(event);
+    }
 
     void mouseDoubleClickEvent(QMouseEvent* event) override
     {
@@ -235,6 +317,10 @@ private:
     }
 
     QString m_fullText;
+    bool m_pressed = false;
+    bool m_dragging = false;
+    QPoint m_pressGlobal;
+    QPoint m_lastGlobal;
 };
 
 // ============================================================================
@@ -271,6 +357,7 @@ protected:
     bool event(QEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
 
@@ -301,6 +388,11 @@ private:
     /// True between a left press on the card and its release; a release outside
     /// the card (a drag that left the tile) is not a click.
     bool m_pressed = false;
+    /// True once the press turned into a drag: the drag scrolls the gallery and
+    /// the release must not open the memo.
+    bool m_dragging = false;
+    QPoint m_pressGlobal;
+    QPoint m_lastGlobal;
 
     MemoColors m_colors;
     QLabel* m_thumbnailLabel = nullptr;
@@ -387,6 +479,7 @@ void MemoCard::buildUi(const MemoEntry& entry, const QImage& image)
     m_titleLabel->setObjectName(QStringLiteral("MemoCardTitle"));
     m_titleLabel->setFullText(m_fullTitle);
     m_titleLabel->onDoubleClick = [this]() { beginTitleEdit(); };
+    m_titleLabel->onDragBy = [this](int dy) { dragScrollBy(this, dy); };
     // I-beam hints "this text is editable" without a visible button.
     m_titleLabel->setCursor(Qt::IBeamCursor);
     m_titleLabel->setToolTip(
@@ -595,16 +688,52 @@ void MemoCard::mousePressEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::LeftButton) {
         m_pressed = true;
+        m_dragging = false;
+        m_pressGlobal = mouseGlobalPos(event);
+        m_lastGlobal = m_pressGlobal;
         event->accept();
         return;
     }
     QFrame::mousePressEvent(event);
 }
 
+void MemoCard::mouseMoveEvent(QMouseEvent* event)
+{
+    if (!m_pressed) {
+        QFrame::mouseMoveEvent(event);
+        return;
+    }
+
+    // A stylus/finger drag on a card slides the gallery: Qt only synthesizes
+    // mouse events for single-touch input, so handling them here is what makes
+    // the list scrollable without grabbing the scrollbar. Once the press has
+    // travelled past the drag threshold it is a scroll, never an "open".
+    const QPoint global = mouseGlobalPos(event);
+    if (!m_dragging
+        && (global - m_pressGlobal).manhattanLength()
+               >= QApplication::startDragDistance()) {
+        m_dragging = true;
+        setCursor(Qt::ClosedHandCursor);
+    }
+    if (m_dragging) {
+        dragScrollBy(this, m_lastGlobal.y() - global.y());
+        m_lastGlobal = global;
+        event->accept();
+        return;
+    }
+    QFrame::mouseMoveEvent(event);
+}
+
 void MemoCard::mouseReleaseEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::LeftButton && m_pressed) {
         m_pressed = false;
+        if (m_dragging) {
+            m_dragging = false;
+            setCursor(Qt::PointingHandCursor);
+            event->accept();
+            return;
+        }
         // Only a release inside the card counts as a click: a press that dragged
         // out (e.g. the reader started scrolling from the tile) must not open a
         // floating card.
@@ -811,6 +940,82 @@ private:
     std::function<void()> m_onResize;
 };
 
+/**
+ * @brief Drag-to-scroll for the empty background of the gallery.
+ *
+ * Cards and titles handle their own drags (they receive the press and forward
+ * the delta), but the gaps between cards and the area below the last card are
+ * plain grid-host surface: without this, a stylus/finger swipe there did
+ * nothing, which is why the list felt "scrollbar only".
+ */
+class DragScrollFilter final : public QObject {
+public:
+    explicit DragScrollFilter(QScrollArea* area, QObject* parent = nullptr)
+        : QObject(parent)
+        , m_area(area)
+    {
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        switch (event->type()) {
+        case QEvent::MouseButtonPress: {
+            auto* mouse = static_cast<QMouseEvent*>(event);
+            if (mouse->button() != Qt::LeftButton) {
+                break;
+            }
+            m_pressed = true;
+            m_dragging = false;
+            m_pressGlobal = mouseGlobalPos(mouse);
+            m_lastGlobal = m_pressGlobal;
+            break;
+        }
+        case QEvent::MouseMove: {
+            auto* mouse = static_cast<QMouseEvent*>(event);
+            if (!m_pressed) {
+                break;
+            }
+            const QPoint global = mouseGlobalPos(mouse);
+            if (!m_dragging
+                && (global - m_pressGlobal).manhattanLength()
+                       >= QApplication::startDragDistance()) {
+                m_dragging = true;
+            }
+            if (m_dragging) {
+                if (m_area) {
+                    if (QScrollBar* bar = m_area->verticalScrollBar()) {
+                        bar->setValue(bar->value() + m_lastGlobal.y() - global.y());
+                    }
+                }
+                m_lastGlobal = global;
+                event->accept();
+                return true;
+            }
+            break;
+        }
+        case QEvent::MouseButtonRelease:
+            m_pressed = false;
+            if (m_dragging) {
+                m_dragging = false;
+                event->accept();
+                return true;
+            }
+            break;
+        default:
+            break;
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    QScrollArea* m_area = nullptr;
+    bool m_pressed = false;
+    bool m_dragging = false;
+    QPoint m_pressGlobal;
+    QPoint m_lastGlobal;
+};
+
 }  // namespace
 
 // ============================================================================
@@ -908,6 +1113,11 @@ void MemoGalleryWidget::setupUi()
         applyThumbnailLimits(m_gridLayout, m_scrollArea->viewport()->height());
     }, this);
     m_scrollArea->viewport()->installEventFilter(resizeFilter);
+
+    // Drag-to-scroll for the background (cards/titles handle their own drags).
+    auto* dragFilter = new DragScrollFilter(m_scrollArea, this);
+    m_gridHost->installEventFilter(dragFilter);
+    m_scrollArea->viewport()->installEventFilter(dragFilter);
 }
 
 void MemoGalleryWidget::applyStyle()

@@ -85,6 +85,15 @@ MemoFloatWidget::MemoFloatWidget(const QString& memoId, const QPixmap& image,
     , m_memoId(memoId)
     , m_image(image)
 {
+    if (!m_image.isNull() && m_image.height() > 0) {
+        m_imageAspect = qreal(m_image.width()) / qreal(m_image.height());
+    }
+    if (!qIsFinite(m_imageAspect) || m_imageAspect <= 0.01) {
+        m_imageAspect = 4.0 / 3.0;
+    }
+
+    m_lockGlyph = QPixmap(QStringLiteral(":/resources/icons/lock_reversed.png"));
+
     // A card must never take keyboard focus: clicking one would otherwise eat
     // the canvas shortcuts (Ctrl+Z, tool keys). See the header contract.
     setFocusPolicy(Qt::NoFocus);
@@ -115,9 +124,23 @@ void MemoFloatWidget::applyStoredGeometry(const QRectF& rect, qreal rotation)
 {
     // Clamp the CARD size, not the widget rect: the widget rect is derived
     // from the card, so a stored rect that is too small/large only has to be
-    // corrected once, here.
-    const qreal width = qBound<qreal>(MIN_CARD_SIZE, rect.width(), MAX_CARD_SIZE);
-    const qreal height = qBound<qreal>(MIN_CARD_SIZE, rect.height(), MAX_CARD_SIZE);
+    // corrected once, here. With the aspect lock on, the stored height is
+    // re-derived from the width so a geometry saved by an older/free resize
+    // cannot reopen the memo distorted.
+    qreal width = qBound<qreal>(MIN_CARD_SIZE, rect.width(), MAX_CARD_SIZE);
+    qreal height = qBound<qreal>(MIN_CARD_SIZE, rect.height(), MAX_CARD_SIZE);
+    if (m_aspectLocked) {
+        height = width / m_imageAspect;
+        if (height < MIN_CARD_SIZE) {
+            height = MIN_CARD_SIZE;
+            width = qMin(MAX_CARD_SIZE, height * m_imageAspect);
+            height = width / m_imageAspect;
+        } else if (height > MAX_CARD_SIZE) {
+            height = MAX_CARD_SIZE;
+            width = qMax(MIN_CARD_SIZE, height * m_imageAspect);
+            height = width / m_imageAspect;
+        }
+    }
 
     // Keep the stored centre as-is. Deriving the centre from a clamped rect
     // instead would slide a minimum-size card towards its old corner.
@@ -132,6 +155,25 @@ void MemoFloatWidget::applyStoredGeometry(const QRectF& rect, qreal rotation)
     // cardGeometryChanged() must not fire (otherwise every open would mark the
     // notebook dirty).
 }
+
+void MemoFloatWidget::setAspectLocked(bool locked)
+{
+    if (m_aspectLocked == locked) {
+        return;
+    }
+    m_aspectLocked = locked;
+    if (locked) {
+        // Snap the current card to the image's ratio: toggling the lock should
+        // immediately undo whatever stretch was in effect.
+        const QSizeF oldSize = m_cardSize;
+        applyStoredGeometry(cardRect(), m_rotation);
+        if (m_cardSize != oldSize) {
+            emit cardGeometryChanged(m_memoId);
+        }
+    }
+    update();
+}
+
 
 void MemoFloatWidget::setTitle(const QString& title)
 {
@@ -256,6 +298,8 @@ QPointF MemoFloatWidget::cardPoint(Handle handle) const
         break;
     case Handle::Rotate:
         return rotateHandlePos();
+    case Handle::AspectLock:
+        return lockButtonPos();
     case Handle::Close:
         return closeButtonPos();
     case Handle::Move:
@@ -285,6 +329,17 @@ QPointF MemoFloatWidget::closeButtonPos() const
         m_rotation);
 }
 
+QPointF MemoFloatWidget::lockButtonPos() const
+{
+    // Mirror of the close button: the aspect lock lives in the top-left corner.
+    const QPointF centerLocal = cardCenter() - QPointF(geometry().topLeft());
+    const qreal halfW = m_cardSize.width() / 2.0;
+    const qreal halfH = m_cardSize.height() / 2.0;
+    return centerLocal + rotateVector(
+        QPointF(-halfW + CLOSE_BUTTON_INSET, -halfH + CLOSE_BUTTON_INSET),
+        m_rotation);
+}
+
 // ============================================================================
 // Hit testing
 // ============================================================================
@@ -303,9 +358,12 @@ bool MemoFloatWidget::pointInCard(const QPointF& localPos) const
 
 MemoFloatWidget::Handle MemoFloatWidget::handleAt(const QPointF& localPos) const
 {
-    // The close button is tested first: it sits inside the top-right corner,
-    // where the corner resize handle (whose hit radius reaches into the card)
-    // would otherwise win, making the close button unreachable.
+    // The corner buttons are tested first: they sit inside the corners, where
+    // the corner resize handle (whose hit radius reaches into the card) would
+    // otherwise win, making the buttons unreachable.
+    if (QLineF(localPos, lockButtonPos()).length() <= CLOSE_BUTTON_SIZE / 2.0 + 4.0) {
+        return Handle::AspectLock;
+    }
     if (QLineF(localPos, closeButtonPos()).length() <= CLOSE_BUTTON_SIZE / 2.0 + 4.0) {
         return Handle::Close;
     }
@@ -340,6 +398,7 @@ void MemoFloatWidget::updateCursor(const QPointF& localPos)
 {
     switch (handleAt(localPos)) {
     case Handle::Close:
+    case Handle::AspectLock:
         setCursor(Qt::PointingHandCursor);
         break;
     case Handle::Rotate:
@@ -471,6 +530,28 @@ void MemoFloatWidget::paintEvent(QPaintEvent* event)
     painter.drawLine(closeCenter + QPointF(crossArm, -crossArm),
                      closeCenter + QPointF(-crossArm, crossArm));
 
+    // --- Aspect-ratio lock button (top-left, mirror of close) --------------
+    // Same idea as the lock button in the object-select action bar: highlighted
+    // means "resizing keeps the memo's proportions".
+    const QPointF lockCenter(-halfW + CLOSE_BUTTON_INSET,
+                             -halfH + CLOSE_BUTTON_INSET);
+    if (m_aspectLocked) {
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0x00, 0x78, 0xD4, 235));
+        painter.drawEllipse(lockCenter, closeRadius, closeRadius);
+    } else {
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 0, 0, m_darkMode ? 130 : 80));
+        painter.drawEllipse(lockCenter, closeRadius, closeRadius);
+    }
+    // The glyph is white (the reversed asset) on both backgrounds.
+    if (!m_lockGlyph.isNull()) {
+        const qreal glyph = closeRadius * 1.25;
+        const QRectF glyphRect(lockCenter.x() - glyph / 2.0,
+                               lockCenter.y() - glyph / 2.0, glyph, glyph);
+        painter.drawPixmap(glyphRect, m_lockGlyph, QRectF(m_lockGlyph.rect()));
+    }
+
     // --- Handles (active card only) ---------------------------------------
     if (m_active) {
         // Drawn in card-local space, i.e. they rotate with the card, exactly
@@ -560,6 +641,13 @@ void MemoFloatWidget::mousePressEvent(QMouseEvent* event)
     if (handle == Handle::Close) {
         // Closing only hides the card: deleting the memo is the gallery's job.
         emit closeRequested(m_memoId);
+        event->accept();
+        return;
+    }
+
+    if (handle == Handle::AspectLock) {
+        setAspectLocked(!m_aspectLocked);
+        emit aspectLockToggled(m_aspectLocked);
         event->accept();
         return;
     }
@@ -715,10 +803,37 @@ void MemoFloatWidget::mouseMoveEvent(QMouseEvent* event)
 
         const qreal pressWidth = m_pressCardRect.width();
         const qreal pressHeight = m_pressCardRect.height();
-        const qreal newWidth =
-            qBound(MIN_CARD_SIZE, pressWidth + signX * dragX, MAX_CARD_SIZE);
-        const qreal newHeight =
-            qBound(MIN_CARD_SIZE, pressHeight + signY * dragY, MAX_CARD_SIZE);
+        qreal newWidth = 0.0;
+        qreal newHeight = 0.0;
+
+        if (m_aspectLocked && m_imageAspect > 0.01) {
+            // Proportional resize (same idea as ImageObject::maintainAspectRatio):
+            // pick the scale from the dragged axis/axes, then derive both edges.
+            qreal scale = 1.0;
+            if (signX != 0 && signY != 0) {
+                const qreal scaleX = (pressWidth + signX * dragX) / pressWidth;
+                const qreal scaleY = (pressHeight + signY * dragY) / pressHeight;
+                // Follow whichever axis the pointer moved more, so a corner drag
+                // feels natural instead of jittering between the two.
+                scale = (qAbs(dragX) >= qAbs(dragY)) ? scaleX : scaleY;
+            } else if (signX != 0) {
+                scale = (pressWidth + signX * dragX) / pressWidth;
+            } else {
+                scale = (pressHeight + signY * dragY) / pressHeight;
+            }
+            const qreal minScale = qMax(MIN_CARD_SIZE / pressWidth,
+                                        MIN_CARD_SIZE / pressHeight);
+            const qreal maxScale = qMin(MAX_CARD_SIZE / pressWidth,
+                                        MAX_CARD_SIZE / pressHeight);
+            scale = qBound(minScale, scale, maxScale);
+            newWidth = pressWidth * scale;
+            newHeight = pressHeight * scale;
+        } else {
+            newWidth = qBound(MIN_CARD_SIZE, pressWidth + signX * dragX,
+                              MAX_CARD_SIZE);
+            newHeight = qBound(MIN_CARD_SIZE, pressHeight + signY * dragY,
+                               MAX_CARD_SIZE);
+        }
 
         // Re-derive the shift from the CLAMPED sizes: once the pointer passes
         // MIN/MAX_CARD_SIZE the card must stop moving, not drift away from the
@@ -737,8 +852,9 @@ void MemoFloatWidget::mouseMoveEvent(QMouseEvent* event)
     }
 
     case Handle::None:
+    case Handle::AspectLock:
     case Handle::Close:
-        // Unreachable: both return early above / on press.
+        // Unreachable: all are handled on press above.
         break;
     }
 

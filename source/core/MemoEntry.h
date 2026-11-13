@@ -23,6 +23,7 @@
 #include <QImage>
 #include <QJsonObject>
 #include <QRectF>
+#include <QSizeF>
 #include <QString>
 
 struct MemoEntry {
@@ -47,6 +48,14 @@ struct MemoEntry {
     /// InsertedObject::rotation).
     qreal floatRotation = 0.0;
 
+    /// The material's own size at capture time: viewport-logical pixels for a
+    /// screenshot/imported image, page units for lasso handwriting. The floating
+    /// card opens at this size (scaled down uniformly only when it does not fit
+    /// the viewport), so it reproduces the proportions of what was captured
+    /// instead of a generic default. Empty for memos written before this field
+    /// existed, in which case the image's pixel size is the fallback.
+    QSizeF naturalSize;
+
     /// Transient only: image bytes waiting for a bundle path on disk (a
     /// document that has never been saved has nowhere to write them yet).
     /// Never serialized; flushed by Document::saveBundle().
@@ -57,6 +66,11 @@ struct MemoEntry {
     bool hasFloatRect() const
     {
         return floatRect.width() > 1.0 && floatRect.height() > 1.0;
+    }
+
+    bool hasNaturalSize() const
+    {
+        return naturalSize.width() > 0.5 && naturalSize.height() > 0.5;
     }
 
     QJsonObject toJson() const;

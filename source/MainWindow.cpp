@@ -6515,9 +6515,16 @@ void MainWindow::importMemoImage()
         if (image.isNull()) {
             continue;
         }
+        // naturalSize in logical pixels: an imported image has no page
+        // coordinate system, so its own pixel size is the "original size".
+        const qreal imageDpr = image.devicePixelRatio() > 0.0
+            ? image.devicePixelRatio() : 1.0;
+        const QSizeF naturalSize(image.width() / imageDpr,
+                                 image.height() / imageDpr);
         const MemoEntry memo = vp->document()->addMemo(
             image, QString(), MemoEntry::Kind::Imported,
-            vp->document()->isEdgeless() ? -1 : vp->currentPageIndex());
+            vp->document()->isEdgeless() ? -1 : vp->currentPageIndex(),
+            naturalSize);
         if (memo.isValid()) {
             ++added;
         }

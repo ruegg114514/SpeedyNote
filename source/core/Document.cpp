@@ -4472,7 +4472,8 @@ QImage Document::memoImage(const QString& memoId) const
 }
 
 MemoEntry Document::addMemo(const QImage& image, const QString& title,
-                            MemoEntry::Kind kind, int sourcePage)
+                            MemoEntry::Kind kind, int sourcePage,
+                            const QSizeF& naturalSize)
 {
     if (image.isNull()) {
         return MemoEntry();
@@ -4484,6 +4485,7 @@ MemoEntry Document::addMemo(const QImage& image, const QString& title,
     entry.created = QDateTime::currentDateTime();
     entry.kind = kind;
     entry.sourcePage = sourcePage;
+    entry.naturalSize = naturalSize;
     entry.title = title.trimmed();
     if (entry.title.isEmpty()) {
         entry.title = memoDefaultTitle(kind, entry.created);

@@ -7,6 +7,7 @@
 
 #include <QEvent>
 #include <QPixmap>
+#include <QSettings>
 #include <QStringList>
 #include <QtAlgorithms>
 #include <QtGlobal>
@@ -15,6 +16,12 @@ MemoManager::MemoManager(QWidget* host, QObject* parent)
     : QObject(parent)
     , m_host(host)
 {
+    // Reader preference (not notebook data): cards keep their proportions when
+    // resized unless the little lock button was switched off.
+    QSettings settings(QStringLiteral("SpeedyNote"), QStringLiteral("App"));
+    m_aspectRatioLocked = settings.value(QStringLiteral("memos/aspectRatioLocked"),
+                                         true).toBool();
+
     if (m_host) {
         // Cards are children of the host; if the window tears the host down
         // first they are already gone, so the destructor must not touch them.
@@ -200,6 +207,22 @@ void MemoManager::setDarkMode(bool darkMode)
     }
 }
 
+void MemoManager::setAspectRatioLocked(bool locked)
+{
+    if (m_aspectRatioLocked == locked) {
+        return;
+    }
+    m_aspectRatioLocked = locked;
+    QSettings settings(QStringLiteral("SpeedyNote"), QStringLiteral("App"));
+    settings.setValue(QStringLiteral("memos/aspectRatioLocked"), locked);
+
+    for (MemoFloatWidget* card : m_cards) {
+        if (card) {
+            card->setAspectLocked(locked);
+        }
+    }
+}
+
 bool MemoManager::eventFilter(QObject* watched, QEvent* event)
 {
     // A press on the page itself deactivates the cards, so their handles stop
@@ -238,9 +261,13 @@ MemoFloatWidget* MemoManager::createCard(const MemoEntry& entry)
     card->setTitle(entry.title);
     card->setDarkMode(m_darkMode);
     card->setScrollTarget(m_viewport);
+    card->setAspectLocked(m_aspectRatioLocked);
 
+    // naturalSize is the material's capture-time size, so a fresh card opens at
+    // the captured proportions instead of a generic default; the aspect lock
+    // then keeps the stored rect honest for memos saved by older builds.
     QRectF rect = entry.hasFloatRect() ? entry.floatRect
-                                       : defaultCardRectFor(image.size());
+                                       : defaultCardRectFor(entry, image.size());
     rect.translate(viewportOffset());
     card->applyStoredGeometry(rect, entry.floatRotation);
     clampCardIntoHost(card);
@@ -265,6 +292,8 @@ MemoFloatWidget* MemoManager::createCard(const MemoEntry& entry)
     });
     connect(card, &MemoFloatWidget::closeRequested,
             this, &MemoManager::closeMemo);
+    connect(card, &MemoFloatWidget::aspectLockToggled,
+            this, &MemoManager::setAspectRatioLocked);
     connect(card, &MemoFloatWidget::activated, this,
             [this](const QString& memoId) {
         activateCard(m_cards.value(memoId));
@@ -296,11 +325,22 @@ void MemoManager::deactivateAll()
     }
 }
 
-QRectF MemoManager::defaultCardRectFor(const QSize& imageSize) const
+
+QRectF MemoManager::defaultCardRectFor(const MemoEntry& entry,
+                                       const QSize& imageSize) const
 {
-    QSizeF size(260.0, 200.0);
-    if (imageSize.isValid() && !imageSize.isEmpty()) {
-        size = MemoFloatWidget::naturalCardSize(imageSize);
+    // Open at the material's own size: the capture-time size when it is known
+    // (screenshots/handwriting/imported images all record it), otherwise the
+    // decoded image's pixel size. This is what makes the card "the same size"
+    // as what was captured; only a card too large for the viewport is scaled
+    // down, and that scaling is uniform so the proportions never change.
+    QSizeF size;
+    if (entry.hasNaturalSize()) {
+        size = entry.naturalSize;
+    } else if (imageSize.isValid() && !imageSize.isEmpty()) {
+        size = QSizeF(imageSize);
+    } else {
+        size = QSizeF(260.0, 200.0);
     }
 
     const QRectF viewport(QPointF(0.0, 0.0),
@@ -312,10 +352,20 @@ QRectF MemoManager::defaultCardRectFor(const QSize& imageSize) const
     const qreal cascade = 20.0 * (m_cards.size() % 6) - 50.0;
     const QPointF center = viewport.center() + QPointF(cascade, cascade);
 
-    const qreal maxW = qMax(120.0, viewport.width() - 48.0);
-    const qreal maxH = qMax(120.0, viewport.height() - 48.0);
-    const qreal w = qMin(size.width(), maxW);
-    const qreal h = qMin(size.height(), maxH);
+    const qreal maxW = qMax(MemoFloatWidget::MIN_CARD_SIZE,
+                            viewport.width() - 48.0);
+    const qreal maxH = qMax(MemoFloatWidget::MIN_CARD_SIZE,
+                            viewport.height() - 48.0);
+    qreal scale = 1.0;
+    if (size.width() > maxW || size.height() > maxH) {
+        scale = qMin(maxW / size.width(), maxH / size.height());
+    }
+    // Never open smaller than the widget's minimum card, but keep the ratio.
+    const qreal minScale = qMax(MemoFloatWidget::MIN_CARD_SIZE / size.width(),
+                                MemoFloatWidget::MIN_CARD_SIZE / size.height());
+    scale = qMax(scale, minScale);
+    const qreal w = size.width() * scale;
+    const qreal h = size.height() * scale;
     return QRectF(center.x() - w / 2.0, center.y() - h / 2.0, w, h);
 }
 

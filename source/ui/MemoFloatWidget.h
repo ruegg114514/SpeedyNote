@@ -122,6 +122,20 @@ public:
     static QSizeF naturalCardSize(const QSize& imageSize,
                                   qreal maxEdge = 340.0);
 
+    /**
+     * @brief Lock resizing to the memo image's aspect ratio.
+     *
+     * Mirrors ImageObject::maintainAspectRatio (the lock button in the object
+     * select action bar): while locked, every resize handle scales both axes
+     * together, so the memo is never stretched. Unlocked resizing keeps the
+     * historical free behaviour.
+     */
+    void setAspectLocked(bool locked);
+    bool isAspectLocked() const { return m_aspectLocked; }
+
+    /// The memo image's width/height ratio (1.0 when the image is missing).
+    qreal imageAspect() const { return m_imageAspect; }
+
 signals:
     /// Emitted after a move/resize/rotate gesture finishes.
     void cardGeometryChanged(const QString& memoId);
@@ -129,6 +143,9 @@ signals:
     void closeRequested(const QString& memoId);
     /// The card was pressed (bring to front / show handles).
     void activated(const QString& memoId);
+    /// The little lock button was toggled (manager persists the preference and
+    /// applies it to the other cards).
+    void aspectLockToggled(bool locked);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -159,6 +176,7 @@ private:
         BottomLeft,
         Bottom,
         BottomRight,
+        AspectLock,
         Close
     };
 
@@ -168,6 +186,8 @@ private:
     QPointF rotateHandlePos() const;
     /// Widget (local) coordinates of the close button centre.
     QPointF closeButtonPos() const;
+    /// Widget (local) coordinates of the aspect-lock button centre.
+    QPointF lockButtonPos() const;
     /// Which handle (if any) is at @p localPos.
     Handle handleAt(const QPointF& localPos) const;
     /// True when @p localPos is inside the rotated card.
@@ -187,16 +207,19 @@ private:
     QString m_memoId;
     QString m_title;
     QPixmap m_image;
+    QPixmap m_lockGlyph;         ///< White padlock used by the aspect-lock button
     QPixmap m_scaledCache;       ///< m_image scaled to the card size * dpr
     QSizeF  m_scaledCacheSize;   ///< Card size the cache was built for
 
     QPointF m_center;            ///< Card centre, parent coordinates
     QSizeF  m_cardSize = QSizeF(200.0, 150.0);
     qreal   m_rotation = 0.0;    ///< Degrees, clockwise-positive
+    qreal   m_imageAspect = 4.0 / 3.0;  ///< Memo image width/height
 
     bool m_darkMode = false;
     bool m_active = false;
     bool m_hovered = false;
+    bool m_aspectLocked = true;
 
     Handle m_activeHandle = Handle::None;
     QPointF m_pressParentPos;     ///< Press point, parent coordinates

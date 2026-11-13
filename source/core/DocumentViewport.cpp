@@ -9800,9 +9800,11 @@ void DocumentViewport::captureScreenAndInsert()
                 // empty so Document gives it the localised timestamped default.
                 const int sourcePage = m_document->isEdgeless()
                     ? -1 : currentPageIndex();
+                // naturalSize = the region exactly as it appeared on screen, so
+                // the floating card opens at the captured proportions/size.
                 const MemoEntry memo = m_document->addMemo(
                     region.toImage(), QString(), MemoEntry::Kind::Screenshot,
-                    sourcePage);
+                    sourcePage, QSizeF(sel.size()));
                 if (memo.isValid()) {
                     emit documentModified();
                     emit memosChanged();
@@ -9873,8 +9875,11 @@ void DocumentViewport::addLassoSelectionToMemo(bool removeFromPage)
 
     const int sourcePage = m_document->isEdgeless()
         ? -1 : m_lassoSelection.sourcePageIndex;
+    // naturalSize = the strokes' own size as they appeared on screen at capture
+    // time, so reopening the card reproduces what the reader saw when cutting.
     const MemoEntry memo = m_document->addMemo(
-        image, QString(), MemoEntry::Kind::Handwriting, sourcePage);
+        image, QString(), MemoEntry::Kind::Handwriting, sourcePage,
+        QSizeF(bounds.size() * m_zoomLevel));
 
     if (removeFromPage) {
         // deleteSelection() pushes the undo entry and clears the selection, so
